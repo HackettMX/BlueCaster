@@ -93,11 +93,13 @@ body:
       options:
         - Auto
         - LDAC
+        - aptX Adaptive
         - aptX HD
         - aptX Low Latency
         - aptX
         - LHDC V5
         - Opus
+        - Opus 05
         - AAC
         - SBC XQ
         - SBC
