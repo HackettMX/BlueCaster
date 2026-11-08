@@ -1,5 +1,14 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Antivirus flagged BlueCaster
+    url: https://github.com/SeiyaFunaokaJP/BlueCaster/issues/239
+    about: Windows Defender or another antivirus warns about the installer or the app. Please report it there.
+  - name: Sound drops out or stutters
+    url: https://seiyafunaokajp.github.io/BlueCaster/wireless
+    about: Most dropouts come from the radio, not the app. These checks find the cause.
+  - name: Ask a question
+    url: https://github.com/SeiyaFunaokaJP/BlueCaster/discussions/categories/q-a
+    about: How something works or why it works that way.
   - name: Documentation
     url: https://seiyafunaokajp.github.io/BlueCaster/
     about: Setup (adapter, WinUSB driver, firmware), usage, and codec details.

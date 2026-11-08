@@ -1,6 +1,6 @@
 name: Chip report
 description: An adapter BlueCaster cannot use yet (MediaTek, Qualcomm, …) — what its chip says, for whoever adds support
-labels: ["chip report"]
+labels: ["chip support"]
 body:
   - type: markdown
     attributes:

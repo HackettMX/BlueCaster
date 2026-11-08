@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Tried BlueCaster with your gear? I'd love to hear how it went! 🎧
-        "It just works" reports are super helpful too, especially for the experimental codecs (aptX HD, aptX Low Latency, Opus).
+        "It just works" reports are super helpful too, especially for the experimental codecs (aptX HD, aptX Low Latency, Opus, Opus 05, FastStream).
         Just check what you tried and leave the rest blank. If something is clearly broken, a [bug report](https://github.com/SeiyaFunaokaJP/BlueCaster/issues/new?template=bug_report.yml) is a better fit.
 
   - type: input
@@ -42,11 +42,13 @@ body:
       description: Check each codec you confirmed plays audio correctly.
       options:
         - label: LDAC
+        - label: aptX Adaptive
         - label: aptX HD
         - label: aptX Low Latency
         - label: aptX
         - label: LHDC V5
         - label: Opus
+        - label: Opus 05
         - label: AAC
         - label: SBC XQ
         - label: SBC
@@ -59,11 +61,13 @@ body:
       description: Offered by the headphones, but failed to connect, fell back, or had audio problems.
       options:
         - label: LDAC
+        - label: aptX Adaptive
         - label: aptX HD
         - label: aptX Low Latency
         - label: aptX
         - label: LHDC V5
         - label: Opus
+        - label: Opus 05
         - label: AAC
         - label: SBC XQ
         - label: SBC
