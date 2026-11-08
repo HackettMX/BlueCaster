@@ -470,12 +470,38 @@ pub struct StreamStatus {
     /// the battery shows as unknown
     #[serde(default)]
     pub battery_refused: bool,
-    /// The voice link (headset microphone, developer mode): Some only while
+    /// The voice link (headset microphone): Some only while
     /// it carries audio, cleared on Idle / Error / Reconnecting like the
     /// battery
     #[serde(default)]
     #[ts(optional = nullable)]
     pub voice: Option<VoiceStatus>,
+    /// An error state the codec caused (issue #86): the device's status
+    /// line names it in a few words; the message has the whole text
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub codec_stop: Option<CodecStop>,
+}
+
+/// Why the stream stopped over its codec (StreamStatus.codec_stop)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CodecStop {
+    /// Codec key ("ldac", "aac", ...)
+    pub codec: String,
+    pub kind: CodecStopKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CodecStopKind {
+    /// The device does not support the codec (or refused it, asked anyway)
+    Unsupported,
+    /// The device refused settings of the codec it does not list
+    SettingsUnsupported,
+    /// Another source uses the device's endpoint of the codec
+    InUse,
+    /// The device refused the codec's configuration
+    Refused,
 }
 
 /// The headset microphone's voice link (StreamStatus.voice)
@@ -490,6 +516,26 @@ pub struct VoiceStatus {
     pub rate: u32,
     /// Microphone output device in use (id), empty while not rendering
     pub mic_device_id: String,
+}
+
+/// The microphone test (mic_test.*)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]
+
+pub struct MicTestState {
+    /// "idle" | "starting" (the voice link opens) | "recording" |
+    /// "recorded" | "playing"
+    pub phase: String,
+    /// Peak level 0..1 since the last answer: the microphone, or the
+    /// recording while it plays
+    pub level: f32,
+    /// Length of the recording so far
+    pub recorded_ms: u32,
+    /// Longest recording
+    pub max_ms: u32,
+    /// Position of the playback
+    pub played_ms: u32,
+    /// Why the test stopped (a message key), None while fine
+    pub error: Option<String>,
 }
 
 /// A connection profile, as in profiles.json
@@ -517,9 +563,8 @@ pub struct Profile {
     pub sample_rate: u32,
     /// 0 = auto, 16, 24
     pub bit_depth: u32,
-    /// loopback, virtual, output, app. "output" (developer mode, issue
-    /// #193): the output device audio_device_id, whichever is the Windows
-    /// default; outside developer mode it streams System Loopback
+    /// loopback, virtual, output, app. "output" (issue #193): the output
+    /// device audio_device_id, whichever is the Windows default
     pub capture_mode: String,
     pub audio_device_id: String,
     pub audio_device_name: String,
@@ -542,7 +587,7 @@ pub struct Profile {
     /// default; other headsets get the media configuration either way)
     #[serde(default = "yes")]
     pub le_low_latency: bool,
-    /// Headset mode (developer mode only): the headphones' microphone is
+    /// Headset mode: the headphones' microphone is
     /// rendered to mic_device_id. "off" (the default) | "on" | "auto";
     /// anything else reads as off. "on": classic devices switch playback to
     /// the voice link (mono call quality) for as long as they stream;
@@ -559,6 +604,10 @@ pub struct Profile {
     /// Its friendly name, for display when the device is missing
     #[serde(default)]
     pub mic_device_name: String,
+    /// The microphone muted (Home's and the flyout's chip): no voice link,
+    /// as with headset_mic "off"; headset_mic is kept for unmuting
+    #[serde(default)]
+    pub mic_muted: bool,
     /// SBC / SBC XQ: the bitpool to encode with, within what the device
     /// allows (0 = by quality)
     #[serde(default)]
@@ -594,10 +643,9 @@ pub struct Profile {
     #[serde(default)]
     pub codec_settings: std::collections::BTreeMap<String, CodecValues>,
     /// The device's codec order (codec keys) as dragged on the Codecs
-    /// screen with Auto-select off: Auto, and a chosen codec the device
+    /// screen: Auto, under Auto-select too, and a chosen codec the device
     /// does not offer, take the first one in it the device offers (issue
-    /// #86 round 8). Empty: highest sound quality first. Not used under
-    /// Auto-select.
+    /// #86 round 8). Empty: highest sound quality first.
     #[serde(default)]
     pub codec_order: Vec<String>,
 }
@@ -864,8 +912,8 @@ pub struct Snapshot {
     pub adapter: AdapterState,
     pub devices: Vec<Device>,
     pub scanning: bool,
-    /// The scan's LE Audio part runs (status.le_scanning): after the
-    /// classic inquiry, with LE Audio on
+    /// Only the scan's LE Audio part runs (status.le_scanning): after a
+    /// classic inquiry shorter than the LE scan, with LE Audio on
     #[serde(default)]
     pub le_scanning: bool,
     pub stream: StreamStatus,
@@ -1128,6 +1176,17 @@ pub struct LinkSample {
     #[ts(optional = nullable)]
     #[serde(default)]
     pub afh_map: Option<Vec<u8>>,
+    /// A classic device plays over its call link (the headset microphone
+    /// is open): A2DP is suspended, and the media figures above are the
+    /// call link's (SCO payloads sent, the uplink capture). None: not on a
+    /// call link
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub voice: Option<bool>,
+    /// The call link's way back (the microphone), while on it
+    #[ts(optional = nullable)]
+    #[serde(default)]
+    pub voice_rx: Option<VoiceRxCounters>,
 }
 
 /// The connected device's Bluetooth chip, as its controller reports it
@@ -1238,6 +1297,22 @@ pub struct EncodeLoad {
     /// SDU set), in microseconds
     pub avg_us: f64,
     pub max_us: f64,
+}
+
+/// The headset microphone's packets over a classic call link (cumulative
+/// since the core started; the UI takes differences)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+
+pub struct VoiceRxCounters {
+    /// SCO payloads received
+    #[ts(type = "number")]
+    pub packets: u64,
+    /// Of them, flagged by the controller as damaged on the air
+    #[ts(type = "number")]
+    pub bad: u64,
+    /// Codec frames concealed (made up from the ones around them)
+    #[ts(type = "number")]
+    pub concealed: u64,
 }
 
 /// An LE Audio stream's send counters (since the stream was set up; a
@@ -1511,23 +1586,23 @@ pub enum Method {
     /// since the core started
     #[serde(rename = "device.services")]
     DeviceServices { address: String },
-    /// -> string[]: the addresses of the classic devices Windows' Bluetooth
-    /// paired through the adapter with the Bluetooth address `adapter`
-    /// (what device.import_windows_pairings can take over; no
+    /// -> WindowsPairedDevice[]: the classic audio devices Windows'
+    /// Bluetooth paired through the adapter with the Bluetooth address
+    /// `adapter` (what device.import_windows_pairings can take over; no
     /// administrator prompt, no running radio needed)
     #[serde(rename = "device.windows_paired_through")]
     DeviceWindowsPairedThrough { adapter: String },
     /// -> WindowsImport: takes over the link keys Windows' Bluetooth keeps
     /// for the adapter with the Bluetooth address `adapter`, so the devices
     /// it paired with that adapter connect without pairing again, and saves
-    /// the audio ones (an administrator prompt); `address`: that device's
-    /// only (Connect on a device Windows paired, issue #86)
+    /// the audio ones (an administrator prompt); `addresses`: only those
+    /// devices' (the ones ticked in the setup's list, issue #86)
     #[serde(rename = "device.import_windows_pairings")]
     DeviceImportWindowsPairings {
         adapter: String,
         #[ts(optional = nullable)]
         #[serde(default)]
-        address: Option<String>,
+        addresses: Option<Vec<String>>,
     },
     /// Removes a saved device; `le_audio` true: its LE Audio entry (absent
     /// or false: the classic one)
@@ -1680,6 +1755,25 @@ pub enum Method {
     /// -> ReceiverState
     #[serde(rename = "receiver.status")]
     ReceiverStatus,
+    /// The microphone test: records the headset microphone of the classic
+    /// stream (the voice link opens for it, the stream first starts again
+    /// on a stack without voice) -> MicTestState. Errors
+    /// "mic_test.not_streaming", "mic_test.le_audio".
+    #[serde(rename = "mic_test.record")]
+    MicTestRecord,
+    /// Stops the recording or the playback -> MicTestState
+    #[serde(rename = "mic_test.stop")]
+    MicTestStop,
+    /// Plays the recording to the headphones -> MicTestState
+    #[serde(rename = "mic_test.play")]
+    MicTestPlay,
+    /// -> MicTestState. Also keeps the test alive: one not asked about for
+    /// a few seconds ends (the voice link closes unless headset mode wants it)
+    #[serde(rename = "mic_test.status")]
+    MicTestStatus,
+    /// Ends the test -> null
+    #[serde(rename = "mic_test.end")]
+    MicTestEnd,
     /// Opens an RFCOMM channel to the service `uuid` ("0000xxxx-0000-1000-
     /// 8000-00805F9B34FB", or "xxxx" on the Bluetooth base UUID) of the
     /// device at `address`, the device being streamed to, over the link
@@ -1740,6 +1834,11 @@ pub struct AudioDevice {
     pub mix_channels: Option<u16>,
     #[serde(default)]
     pub mix_bits: Option<u16>,
+    /// The recording side apps pick as a microphone when the headset
+    /// microphone is rendered here ("CABLE Output" for "CABLE Input");
+    /// None: it has none
+    #[serde(default)]
+    pub capture_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -2061,6 +2160,16 @@ pub struct ServiceList {
     pub services: Vec<DeviceService>,
     /// Not connected now: the list from its last connection
     pub from_last_connection: bool,
+}
+
+/// A classic audio device Windows' Bluetooth paired through an adapter
+/// (device.windows_paired_through)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+
+pub struct WindowsPairedDevice {
+    pub address: String,
+    /// Windows' name for it (empty when it has none)
+    pub name: String,
 }
 
 /// device.import_windows_pairings' result

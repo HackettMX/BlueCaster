@@ -11,7 +11,7 @@ has_toc: false
 모든 코덱을 지원하는 Windows용 Bluetooth A2DP 오디오 스트리밍 도구
 {: .fs-6 .fw-300 }
 
-WinUSB 모드의 USB Bluetooth 어댑터를 사용하여 시스템 오디오를 **LHDC V5, LDAC, aptX Adaptive, aptX HD, aptX, aptX Low Latency, AAC, SBC** 및 (실험적) **Opus**, PipeWire의 **Opus 05**로 스트리밍합니다. 커널 드라이버나 테스트 서명이 필요 없습니다.
+저렴한 USB 동글이나 많은 노트북의 내장 어댑터처럼, Windows에서는 기본 코덱만 쓰는 평범한 Bluetooth 어댑터를 Hi-Fi 송신기로 바꿉니다. **LHDC V5, LDAC, aptX Adaptive**를 최대 96 kHz(LHDC V5는 192 kHz)로, 그 밖에 **aptX, AAC, SBC XQ, SBC**를 지원합니다. 실험적: **aptX HD, aptX Low Latency, Opus, FastStream, LE Audio(LC3)**. 어댑터 설정은 BlueCaster가 직접 하며, 클릭 한 번으로 Windows에 되돌릴 수 있습니다([작동 방식](architecture)).
 
 ![BlueCaster's Codecs screen, streaming LDAC 990 kbps / 48 kHz to Sony WH-1000XM4](../images/app_sample.png)
 
@@ -54,7 +54,7 @@ WinUSB 모드의 USB Bluetooth 어댑터를 사용하여 시스템 오디오를 
 | SBC XQ | ❌ | ❌ | ✅ | ✅ (SBC에서 듀얼 채널을 허용하는 수신 장치, bitpool 29 이상) |
 | SBC | ✅ | ✅ | ✅ | ✅ |
 | FastStream | ❌ | ❌ | ✅ | 🧪 실험적 (음악 전용, 직접 선택한 경우) |
-| Opus 05 (PipeWire 자체 Opus) | ❌ | ❌ | ✅ PipeWire 0.3.57 이상 (`opus_05`, PipeWire 기기로만) | 🧪 실험적 (직접 선택한 경우) |
+| Opus 05 (PipeWire 자체 Opus) | ❌ | ❌ | ✅ PipeWire 0.3.57 이상 (`opus_05`, PipeWire 기기로만) | 🧪 실험적 (직접 선택한 경우, 개발자 모드 전용) |
 | LC3 (LE 오디오, BAP 유니캐스트) | ❌ | ✅ Bluetooth 하드웨어와 드라이버가 LE 오디오를 지원하는 PC에서만 | ✅ PipeWire BAP `lc3` (BlueZ LE 오디오) | 🧪 실험적 (장치의 LE 오디오 항목, 게이밍 헤드셋에서는 GMAP 저지연, ISO를 지원하는 Bluetooth 5.2 어댑터 필요, [사용법](usage#le-audio)) |
 
 ✅ 지원 · 🧪 실험적 · ❌ 미지원. 모든 열은 전송 측(PC → 헤드폰) 기준입니다. "기본"은 BlueCaster 없이 OS 자체 Bluetooth 오디오를 사용하는 경우이며, Ubuntu 열은 Ubuntu 26.04의 PipeWire 코덱 구성(`libspa-0.2-bluetooth`)입니다.
@@ -111,13 +111,13 @@ BlueCaster는 WASAPI로 오디오를 캡처하며 세 가지 모드를 제공합
 
 | 모드 | 설명 | 용도 |
 |:-----|:-----|:-----|
-| **시스템 루프백** | WASAPI 루프백으로 기본 재생 장치의 모든 시스템 오디오 출력을 캡처 | 간단한 구성 -- 모든 소리가 스트리밍됨 |
+| **기본 장치** | 기본 재생 장치의 모든 시스템 오디오 출력을 캡처 | 간단한 구성 -- 모든 소리가 스트리밍됨 |
 | **가상 장치** | 사용자가 선택한 가상 오디오 장치(예: VB-CABLE, VoiceMeeter)에서 캡처 | 특정 앱만 Bluetooth로 보내고 나머지 소리는 스피커로 출력 |
 | **응용 프로그램** | 한 앱이 재생하는 소리만 앱 자체 처리 후에 캡처 (Windows 11 / Windows 10 2004 이상) | 한 앱만 보내거나, 시스템 전체 효과 앱(이퀄라이저, 음질 향상 앱)의 출력을 보낼 때 |
 
 **가상 장치** 모드에서 BlueCaster는 Windows 기본 재생 장치를 선택한 가상 장치로 전환한 다음(**연결 중 Windows 기본 출력으로 설정**), 그 루프백 출력을 캡처합니다. 가상 장치로 출력하는 앱의 소리가 Bluetooth로 스트리밍됩니다. 스트리밍을 중지하면 이전 기본 장치로 복원됩니다.
 
-시스템 루프백은 기본 재생 장치에서 소리를 빼앗지 않습니다. 소리는 Bluetooth와 함께 그 장치에서도 재생됩니다. 선택한 가상 장치를 열 수 없으면 연결은 대신 시스템 오디오를 보내고 그 사실을 알립니다. [캡처 모드](usage#capture-modes)를 참조하십시오.
+**기본 장치** 소스는 기본 재생 장치에서 소리를 빼앗지 않습니다. 소리는 Bluetooth와 함께 그 장치에서도 재생됩니다. 선택한 가상 장치를 열 수 없으면 연결은 대신 시스템 오디오를 보내고 그 사실을 알립니다. [캡처 모드](usage#capture-modes)를 참조하십시오.
 
 ## 작동 방식
 
@@ -143,7 +143,7 @@ BlueCaster는 Windows Bluetooth 스택을 완전히 우회합니다. [BTstack](h
 
 ## 주요 기능
 
-- **다중 코덱**: LHDC V5, LDAC, aptX Adaptive, aptX HD, aptX, aptX Low Latency, AAC, SBC XQ, SBC 및 (실험적) Opus / Opus 05 / FastStream, 자동 협상
+- **다중 코덱**: LHDC V5, LDAC, aptX Adaptive, aptX, AAC, SBC XQ, SBC 및 (실험적) aptX HD / aptX Low Latency / Opus / Opus 05 / FastStream, 자동 협상
 - **LE 오디오 (실험적)**: LE 오디오 헤드폰과 이어폰으로 LC3 전송(BAP 유니캐스트, 한 쌍의 양쪽 이어폰, 헤드셋 음량, 미디어 버튼, GMAP 저지연). Bluetooth 5.2의 등시성 채널을 지원하는 어댑터가 필요합니다. Bluetooth 에뮬레이터로만 시험했고 실제 LE 오디오 헤드폰으로는 아직 확인하지 않았습니다([사용법](usage#le-audio) 참조)
 - **세 가지 캡처 모드**: 시스템 루프백, 가상 오디오 장치 라우팅, 또는 한 응용 프로그램의 출력
 - **창, 트레이, CLI**: 설정과 진단을 위한 창, 평소 연결에 쓰는 트레이 플라이아웃과 메뉴, 그리고 명령줄 ([사용법](usage) 참조)

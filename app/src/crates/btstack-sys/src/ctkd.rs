@@ -12,6 +12,10 @@
 //! of a device without keys from it yet (once per device and run). A device
 //! that does not list the channel is not asked; one that refuses, or does
 //! not answer (SM's 30 s timeout), keeps its classic link as it is.
+//!
+//! The LE keys Windows got the same way can be taken over instead
+//! ([`Stack::add_le_bond_of_classic`], issue #86): a device that refuses to
+//! give them again over a link it is already paired on then has them too.
 
 use std::cell::RefCell;
 use std::ffi::c_int;
@@ -169,6 +173,84 @@ impl Stack {
         }
         self.le_keys_of_classic(addr).ok_or_else(|| outcome_of(addr))
     }
+
+    /// Adds the LE bond `bond` of the classic device `classic` (keys taken
+    /// from Windows) as SM would after CTKD. A device that has LE keys
+    /// already keeps them (they are the newer ones). Needs LE (SM).
+    pub fn add_le_bond_of_classic(&self, classic: &[u8; 6], bond: &ImportedLeBond) -> LeBondAdded {
+        if !self.le_initialized() {
+            return LeBondAdded::NoLe;
+        }
+        if self.le_keys_of_classic(classic).is_some() {
+            return LeBondAdded::Kept;
+        }
+        let (mut addr, mut irk, mut ltk, mut rand) = (bond.identity_addr, bond.irk, bond.ltk, bond.rand);
+        // SAFETY: on the BTstack thread after le_init; the buffers have the
+        // sizes BTstack reads (6, 16, 8, 16 bytes) and are copied.
+        let index =
+            unsafe { ffi::le_device_db_add(c_int::from(bond.identity_addr_type), addr.as_mut_ptr(), irk.as_mut_ptr()) };
+        let Ok(index) = usize::try_from(index) else {
+            tracing::warn!(target: "le", "Windows' LE keys of {}: no room for the bond", addr_str(classic));
+            return LeBondAdded::Failed;
+        };
+        // SAFETY: as above; index is the slot le_device_db_add returned.
+        unsafe {
+            ffi::le_device_db_encryption_set(
+                index as c_int,
+                bond.ediv,
+                rand.as_mut_ptr(),
+                ltk.as_mut_ptr(),
+                c_int::from(bond.key_size),
+                c_int::from(bond.authenticated),
+                0,
+                c_int::from(bond.secure_connection),
+            );
+        }
+        for i in (0..self.le_device_db_max_count()).filter(|&i| i != index) {
+            if self.tlv_get(tag(i)).is_some_and(|v| v.len() == MAPPING_LEN && v[..6] == classic[..]) {
+                self.tlv_delete(tag(i));
+            }
+        }
+        self.tlv_store(tag(index), &mapping(classic, bond.identity_addr_type, &bond.identity_addr));
+        tracing::info!(
+            target: "le",
+            "Windows' LE keys of {} taken (identity {}, type {}, IRK {})",
+            addr_str(classic),
+            addr_str(&bond.identity_addr),
+            bond.identity_addr_type,
+            if bond.irk == [0u8; 16] { "none" } else { "taken" }
+        );
+        LeBondAdded::Added
+    }
+}
+
+/// An LE bond to add ([`Stack::add_le_bond_of_classic`]); keys most
+/// significant octet first, as BTstack keeps them
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportedLeBond {
+    /// BD_ADDR_TYPE_LE_PUBLIC / _RANDOM
+    pub identity_addr_type: u8,
+    pub identity_addr: [u8; 6],
+    /// All zero: none
+    pub irk: [u8; 16],
+    pub ltk: [u8; 16],
+    pub key_size: u8,
+    pub ediv: u16,
+    /// Most significant octet first
+    pub rand: [u8; 8],
+    pub authenticated: bool,
+    pub secure_connection: bool,
+}
+
+/// What [`Stack::add_le_bond_of_classic`] did
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeBondAdded {
+    Added,
+    /// The device has LE keys already
+    Kept,
+    /// SM is not set up (LE Audio off)
+    NoLe,
+    Failed,
 }
 
 /// SM events over a classic link: an LE bond created is noted with the
@@ -197,8 +279,15 @@ pub(crate) fn on_sm_event(stack: &Stack, p: &[u8]) {
 }
 
 fn on_complete(stack: &Stack, classic: [u8; 6], status: u8, reason: u8) {
+    // Keys given: whatever SM says at the end (issue #86: a device gave its
+    // keys, but SM only ended the pairing at the disconnection, with 0x13)
+    if stack.le_keys_of_classic(&classic).is_some() {
+        if status != ERROR_CODE_SUCCESS {
+            tracing::debug!(target: "le", "CTKD: {} has LE keys; SM ended with status {status:#04x}", addr_str(&classic));
+        }
+        return;
+    }
     let outcome = match status {
-        ERROR_CODE_SUCCESS if stack.le_keys_of_classic(&classic).is_some() => return,
         ERROR_CODE_SUCCESS => CtkdOutcome::NoneGiven,
         ERROR_CODE_CONNECTION_TIMEOUT => CtkdOutcome::NoAnswer,
         // The link went down meanwhile: asked again at its next connection

@@ -61,6 +61,9 @@ export interface CodecSpec {
    *  CodecKind::experimental). The app offers and uses them as any other
    *  (issue #86); only the CLI's --no-experimental leaves them out */
   experimental?: boolean;
+  /** Shown and used only in developer mode (core: CodecKind::developer_only):
+   *  outside it, a device's is left out as if it did not offer it */
+  developer?: boolean;
 }
 
 /** SBC's largest bitpool (the local SEP's) */
@@ -227,6 +230,7 @@ export const CODECS: CodecSpec[] = [
     hiRes: false,
     rates: [0, 48000],
     experimental: true,
+    developer: true,
   },
 ];
 
@@ -386,6 +390,16 @@ export function moved<T>(list: readonly T[], from: number, to: number): T[] {
   const [item] = next.splice(from, 1);
   next.splice(to, 0, item);
   return next;
+}
+
+/** Shown and used only in developer mode (CodecSpec.developer) */
+export function developerOnly(codec: string): boolean {
+  return codecSpec(codec).developer === true;
+}
+
+/** The codecs of `list` the app offers: those of developer mode only with it on */
+export function offeredCodecs<T extends string>(list: readonly T[], developer: boolean): T[] {
+  return list.filter((c) => developer || !developerOnly(c));
 }
 
 /** Not yet confirmed with real headphones (CodecSpec.experimental) */

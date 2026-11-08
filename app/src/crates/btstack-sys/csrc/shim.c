@@ -462,6 +462,12 @@ uint8_t bluecaster_hfp_ag_audio_release(uint16_t acl_handle) {
     return hfp_ag_release_audio_connection(acl_handle);
 }
 
+/* +VGS: the headphones' speaker gain (0..15) on the voice link. BTstack
+ * sends it only when it differs from the last gain either side gave. */
+uint8_t bluecaster_hfp_ag_set_speaker_gain(uint16_t acl_handle, uint8_t gain) {
+    return hfp_ag_set_speaker_gain(acl_handle, gain);
+}
+
 /* ---- SCO data ---- */
 
 /* One SCO packet (header: handle, length; then the payload) in HCI's

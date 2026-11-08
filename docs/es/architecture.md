@@ -290,10 +290,10 @@ JSON. Enumerar los adaptadores y su controlador no requiere elevación.
   el ajuste `auto_codec` está activado (Códecs > Seleccionar automáticamente el códec compatible de mayor
   calidad, un único ajuste para todos los dispositivos desde el esquema 5); el códec
   elegido para el dispositivo se conserva en su perfil para cuando esté desactivado
-- Sigue el orden de códecs del dispositivo tal como el usuario arrastró sus tarjetas con
-  la selección automática desactivada (el `codec_order` del perfil; `codec::AutoOrder`, vacío
+- Sigue el orden de códecs del dispositivo tal como el usuario arrastró sus tarjetas
+  (el `codec_order` del perfil; `codec::AutoOrder`, vacío
   para mayor calidad de sonido primero), para la elección de Automático y para la alternativa de
-  un códec elegido; con la selección automática, el orden predeterminado. FastStream y Opus
+  un códec elegido, también con la selección automática. FastStream y Opus
   05 nunca son la elección de Automático ni una alternativa. (Las betas de 2.0.2 tenían un orden para
   todos los dispositivos, el `auto_order` de settings.json, que ahora se ignora.)
 - Elige la frecuencia de muestreo de la familia aptX (44.1 / 48 kHz entre las que

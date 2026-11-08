@@ -40,7 +40,7 @@ mod transport;
 pub mod voice;
 
 pub use att::AttWriteRequest;
-pub use ctkd::{CtkdOutcome, LeKeys, ctkd_enabled, set_ctkd};
+pub use ctkd::{CtkdOutcome, ImportedLeBond, LeBondAdded, LeKeys, ctkd_enabled, set_ctkd};
 pub use le::{BigParams, CigParams, CisParams, ConnectionType, LeDbEntry, LeEncryption};
 pub use stack::{AclState, AvdtpState, HciState, Stack};
 pub use timer_resolution::HighTimerResolution;

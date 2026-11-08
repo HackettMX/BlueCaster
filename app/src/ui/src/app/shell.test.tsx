@@ -10,6 +10,7 @@ import { errorCopyText, isAppFault, sourceText, stateLabel, statusText } from ".
 import { setLanguage, t } from "../i18n";
 import { MockCore, sampleProfile, type MockOptions } from "../ipc/mock";
 import type { UpdatePhase } from "../ipc/transport";
+import type { CodecStopKind } from "../ipc/bindings/CodecStopKind";
 import { createCore } from "../ipc/store";
 import { LINKS } from "../lib/links";
 import { toneParams } from "../lib/profile";
@@ -637,7 +638,7 @@ describe("helpers", () => {
   it("source text", () => {
     const p = sampleProfile({ app_exe: "Spotify.exe", app_name: "Spotify" });
     expect(sourceText({ kind: "tone", name: "", waiting: false }, null).text).toBe("Test tone");
-    expect(sourceText({ kind: "loopback", name: "", waiting: false }, null).text).toBe("System Loopback");
+    expect(sourceText({ kind: "loopback", name: "", waiting: false }, null).text).toBe("Default device");
     expect(sourceText({ kind: "virtual", name: "CABLE Input", waiting: false }, null).text).toBe("CABLE Input");
     expect(sourceText({ kind: "app", name: "spotify.exe", waiting: false }, p).text).toBe("Spotify");
     const waiting = sourceText({ kind: "app", name: "foo.exe", waiting: true }, p);
@@ -654,6 +655,15 @@ describe("helpers", () => {
     expect(statusText({ state: "streaming", message: msg("status.connected_fallback_in_use", "LDAC", "AAC") })).toBe("Connected");
     expect(statusText({ state: "connecting", message: msg("status.initializing_btstack") })).toBe("Starting Bluetooth...");
     expect(statusText({ state: "error", message: msg("error.connect_no_answer") })).toBe("Error");
+    // An error the codec caused names it in a few words (issue #86)
+    const refused = msg("error.codec_unsupported_refused", "LDAC");
+    const stopped = (codec: string, kind: CodecStopKind) =>
+      statusText({ state: "error", message: refused, codec_stop: { codec, kind } });
+    expect(stopped("ldac", "unsupported")).toBe("LDAC is unsupported");
+    expect(stopped("sbcxq", "settings_unsupported")).toBe("Unsupported SBC XQ settings");
+    expect(stopped("opus05", "in_use")).toBe("Opus (PipeWire) is in use");
+    expect(stopped("aac", "refused")).toBe("AAC was refused");
+    expect(statusText({ state: "error", message: refused, codec_stop: null })).toBe("Error");
     expect(statusText({ state: "idle", message: msg("") })).toBe("Disconnected");
     // Streaming reads "Connected" everywhere (issue #86); the other states keep their words
     expect(statusText({ state: "streaming", message: msg("") })).toBe("Connected");

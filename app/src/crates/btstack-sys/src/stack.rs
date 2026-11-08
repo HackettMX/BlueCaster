@@ -298,6 +298,14 @@ impl Stack {
         status
     }
 
+    /// Sets the headphones' HFP speaker gain (+VGS, 0..15, clamped)
+    pub fn hfp_ag_set_speaker_gain(&self, acl: u16, gain: u8) -> u8 {
+        // SAFETY: on the BTstack thread after hfp_ag_init.
+        let status = unsafe { ffi::bluecaster_hfp_ag_set_speaker_gain(acl, gain.min(15)) };
+        tracing::debug!(target: "btstack", "hfp_ag_set_speaker_gain acl 0x{acl:04X} {gain}: 0x{status:02X}");
+        status
+    }
+
     /// Sends one SCO packet with this payload (at most 255 bytes; use
     /// [`Stack::sco_packet_length`] minus the 3 header bytes). Only after
     /// HCI_EVENT_SCO_CAN_SEND_NOW ([`crate::Source::Sco`]); 0 = sent,

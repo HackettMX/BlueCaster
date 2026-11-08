@@ -90,7 +90,8 @@ Usage: bluecaster-core --cli [-d XX:XX:XX:XX:XX:XX] [options]
   --remote-sink <host[:port]|auto>
                         statistics of a measuring receiver (tools/linux_sink);
                         without -d, stream to that receiver
-  --scan [seconds]      list nearby devices and exit
+  --scan [seconds]      list nearby devices and exit (with --le-audio: the LE
+                        Audio devices too)
   --probe               read what the adapter answers (read commands only, no
                         HCI init; for adapters BlueCaster cannot use yet), save it
                         to logs\\probe and exit
@@ -111,7 +112,7 @@ LE Audio (experimental, LC3 over LE isochronous channels):
                         encrypt the broadcast with this code (4-16 bytes)
   --auracast-mono       one mono channel instead of left and right
 
-Headset microphone (developer mode):
+Headset microphone:
   --headset-mic [on|auto]
                         headset mode: once streaming, the headphones'
                         microphone goes to --mic-output; classic devices switch
@@ -518,6 +519,40 @@ pub fn run(args: &[String]) -> i32 {
         return code;
     }
 
+    if let (Some(secs), true) = (a.scan, a.le.on) {
+        // The app's device scan: the classic devices, and the LE Audio ones
+        // of an LE scan beside it
+        service.set_le_audio_cli(bluecaster_core::LeCliOptions { mcp_dry_run: a.le.mcp_dry_run, ..Default::default() });
+        let code = match service.scan_devices(secs, &mut |_| {}) {
+            Ok(found) => {
+                for d in found {
+                    outln!(
+                        "{}  {:<32} CoD 0x{:06X}  RSSI {}{}",
+                        d.address,
+                        d.name,
+                        d.class_of_device,
+                        d.rssi,
+                        if d.le_audio {
+                            "  (LE Audio)"
+                        } else if d.audio {
+                            "  (audio)"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                0
+            }
+            Err(m) => {
+                eoutln!("{m}");
+                1
+            }
+        };
+        service.shutdown();
+        capture.stop();
+        return code;
+    }
+
     if a.le.on {
         // LE Audio (experimental): its own flow (v1 le_audio_cli.cpp)
         let code = le_run(&a, &service, &running);
@@ -703,6 +738,8 @@ pub fn run(args: &[String]) -> i32 {
         codec_forced: a.force_codec,
         unlisted_options: a.unlisted_options,
         experimental_codecs: !a.no_experimental,
+        // The command line is a developer's: every codec, as asked
+        developer_codecs: true,
         auto_order: codec::AutoOrder::default(),
         quality: a.quality,
         abr: a.abr,
@@ -834,6 +871,9 @@ fn stream_session(
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(ServiceEvent::State(state, msg)) => {
                 outln!("[{state:?}] {msg}");
+                if let Some(c) = msg.codec_stop {
+                    outln!("Codec stop: {} {:?}", c.codec.key(), c.kind);
+                }
                 match state {
                     StreamState::Streaming if streaming_since.is_none() => {
                         streaming_since = Some(Instant::now());

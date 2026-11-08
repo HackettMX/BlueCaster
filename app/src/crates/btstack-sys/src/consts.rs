@@ -52,6 +52,8 @@ pub const HFP_SUBEVENT_AUDIO_CONNECTION_RELEASED: u8 = 0x04;
 pub const HFP_CODEC_CVSD: u8 = 0x01;
 pub const HFP_CODEC_MSBC: u8 = 0x02;
 pub const HFP_CODEC_LC3_SWB: u8 = 0x03;
+/// AT+VGS from the headphones: acl handle, gain 0..15
+pub const HFP_SUBEVENT_SPEAKER_VOLUME: u8 = 0x14;
 pub const HFP_SUBEVENT_HF_INDICATOR: u8 = 0x27;
 pub const HFP_SUBEVENT_APPLE_BATTERY_LEVEL: u8 = 0x2C;
 /// HF indicator: remaining battery, 0..100

@@ -6,7 +6,7 @@ import { createEffect, createSignal, For, Match, on, onCleanup, Show, Switch } f
 import { Icon } from "../components/Icon";
 import { NoticeLine } from "../components/Notice";
 import type { IconName } from "../components/icons";
-import { BatteryLevel, CodecBadge, codecDetails, codecName, showsBattery, stateLabel } from "../components/stream";
+import { BatteryLevel, CodecBadge, codecDetails, codecName, codecStopText, showsBattery, stateLabel } from "../components/stream";
 import { lang, setLanguage, t } from "../i18n";
 import type { Core } from "../ipc/store";
 import { About } from "../screens/About";
@@ -287,10 +287,12 @@ function DevicePill(props: { entry: AudioEntry | null }) {
     return i ? codecDetails(i).join(" ") : "";
   };
   const info = () => (live() ? stream().info : null);
+  // An error the codec caused, named (issue #86)
+  const stateText = () => codecStopText({ ...stream(), state: state() }) ?? stateLabel(state());
   // Also the name while collapsed to the dot
   const label = () => {
     const i = info();
-    return [device(), stateLabel(state()), i ? `${codecName(i)} ${details()}` : ""].filter((x) => x).join(", ");
+    return [device(), stateText(), i ? `${codecName(i)} ${details()}` : ""].filter((x) => x).join(", ");
   };
   return (
     <button
@@ -313,7 +315,7 @@ function DevicePill(props: { entry: AudioEntry | null }) {
               |
             </span>
           </Show>
-          <span class="status-pill-state">{stateLabel(state())}</span>
+          <span class="status-pill-state">{stateText()}</span>
         </span>
         {/* The codec, then its details below it, as on Home and in the tray (issue #86) */}
         <Show when={info()}>

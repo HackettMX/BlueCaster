@@ -13,6 +13,7 @@ mod le_media;
 mod le_stream;
 pub mod link;
 pub mod messages;
+mod mic_test;
 pub mod migrate;
 pub mod paths;
 pub mod profiles;
@@ -26,7 +27,7 @@ pub use le_stream::{
     BROADCAST_PRESET_HQ, BROADCAST_PRESET_SQ, LeAudioPath, LeMicPath, LeStreamDetails, broadcast_config, le_mic_target,
     le_silence_set, le_stats_line, start_mic,
 };
-pub use messages::Msg;
+pub use messages::{CodecStop, CodecStopKind, Msg};
 pub use service::{LeCliOptions, ScannedDevice, Service, ServiceEvent, ServiceOptions, VoiceChange};
 pub use stream::{
     AacDetails, AacDeviceCaps, CodecDetails, CodecDeviceCaps, KnownCodecs, SbcDetails, SbcDeviceCaps, SourceInfo,

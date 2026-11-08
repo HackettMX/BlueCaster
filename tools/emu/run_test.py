@@ -17,7 +17,8 @@ The cases of NEGOTIATION run the same way with another sink or command line
 refuses it; Opus and Opus 05 at 48 kHz
 from a 44.1 kHz request, Auto choosing Opus over AAC and LHDC V5 over Opus,
 but never Opus 05; SBC with another frame setup from --sbc-* options;
-LDAC from a sink listing 18 SEPs).
+LDAC from a sink listing 18 SEPs). The cases of EXPECT_ERROR must stop with
+an error instead, naming the codec that caused it (not offered, in use, refused).
 
 Outputs (captures, logs, reports, WAV) go to tools/emu/out/<codec>/.
 Exit code 0 when every codec passed. Uses only the Python standard library;
@@ -172,6 +173,12 @@ NEGOTIATION = {
     # ... unless its card shows more than the sink lists (the profile's
     # unlisted_options, issue #86): BlueCaster's own range
     'sbc-bp35-unlisted': ('sbc', ['--codecs', 'sbc', '--sbc-max-bitpool', '35'], 'sbc', ['--unlisted-options']),
+    # Stops the codec causes (issue #86, EXPECT_ERROR): a chosen codec the
+    # sink does not list, one it holds for another source, a configuration
+    # it refuses (SBC XQ's dual channel, chosen, so no SBC instead)
+    'ldac-not-offered': ('ldac', ['--codecs', 'sbc'], None, []),
+    'ldac-in-use': ('ldac', ['--in-use', 'ldac'], None, []),
+    'sbcxq-chosen-refused': ('sbcxq', ['--codecs', 'sbc', '--sbc-reject-dual'], None, []),
     # Max bitpool 39 with dual channel (Moto buds+, issue #86): Auto takes
     # SBC XQ capped at 39, as PipeWire; below 29 it does not (plain SBC)
     'auto-sbcxq-bp39': ('auto', ['--codecs', 'sbc', '--sbc-max-bitpool', '39'], 'sbcxq-bp39', []),
@@ -313,6 +320,13 @@ NEGOTIATION = {
     'ctkd-refused': ('sbc', CTKD_SINK + ['--ctkd-refuse'], 'sbc', []),
     'ctkd-silent': ('sbc', CTKD_SINK + ['--ctkd-silent'], 'sbc', []),
     'ctkd-developer-off': ('sbc', CTKD_SINK, 'sbc', []),
+}
+# Cases that must stop with an error before streaming: what the CLI's log
+# says of it (its "Codec stop" line carries the structured cause)
+EXPECT_ERROR = {
+    'ldac-not-offered': r'Codec stop: ldac Unsupported',
+    'ldac-in-use': r'Codec stop: ldac InUse',
+    'sbcxq-chosen-refused': r'Codec stop: sbcxq Refused',
 }
 # The settings.json a case starts with (developer mode)
 DEV_SETTINGS = {
@@ -659,11 +673,20 @@ def run_codec(args, codec, port):
                     stdout=log, stderr=subprocess.STDOUT, env=env, timeout=args.duration + 90).returncode
             except subprocess.TimeoutExpired:
                 rc = 'timeout'
-        if rc != 0:
+        if rc != 0 and codec not in EXPECT_ERROR:
             failures.append(f'BlueCaster exited with {rc} (see bluecaster.log)')
     finally:
         sink.terminate()
         sink.wait(10)
+    if codec in EXPECT_ERROR:
+        log_text = read_text(os.path.join(out, 'bluecaster.log'))
+        if rc == 0 or rc == 'timeout':
+            failures.append(f'BlueCaster exited with {rc}, expected an error exit')
+        if not re.search(EXPECT_ERROR[codec], log_text):
+            failures.append(f'no line matching "{EXPECT_ERROR[codec]}" in bluecaster.log')
+        if '[Streaming]' in log_text:
+            failures.append('BlueCaster streamed although the codec should have stopped it')
+        return failures, f'exit {rc}'
     for name, text, present in LOG_CHECKS.get(codec, []):
         found = read_text(os.path.join(out, name)).count(text)
         if isinstance(present, bool) and (found > 0) != present:
@@ -925,7 +948,13 @@ def main_le(args):
 SCAN_CASES = {
     'eir': (['--dual-mode'], 'inquiry result', 3.0),                      # in its extended inquiry response
     'name-request': (['--dual-mode', '--no-eir-name'], 'remote name', 15.0),  # asked after the first inquiry (10.24 s)
+    # Earbuds advertising LE Audio too (issue #86), LE Audio on: both entries,
+    # the LE one found by the LE scan beside the inquiry, not after it
+    'le-audio': (['--dual-mode', '--le-audio-adv'], 'inquiry result', 3.0),
 }
+# Scan cases with LE Audio on: BlueCaster's arguments
+SCAN_LE_CASES = {'le-audio': ['--le-audio', '--mcp-dry-run']}
+SCAN_LE_FOUND_MAX_S = 3.0
 SCAN_SECONDS = 10
 SCAN_LISTED_MAX_S = 3.0
 SINK_NAME = 'BlueCaster Test Sink'
@@ -1013,7 +1042,7 @@ def run_scan_case(args, case, port):
         try:
             r = subprocess.run(
                 [args.bluecaster, '--cli', '--hci-tcp', f'127.0.0.1:{port}', '--scan', str(SCAN_SECONDS),
-                 '--hci-capture', os.path.join(out, 'bluecaster.pklg')],
+                 '--hci-capture', os.path.join(out, 'bluecaster.pklg')] + SCAN_LE_CASES.get(case, []),
                 capture_output=True, text=True, encoding='utf-8', errors='replace', env=env,
                 timeout=SCAN_SECONDS + 60)
             rc, text = r.returncode, r.stdout + r.stderr
@@ -1029,6 +1058,13 @@ def run_scan_case(args, case, port):
     if rc != 0:
         failures.append(f'BlueCaster exited with {rc} (see bluecaster.log)')
     lines = [line for line in text.splitlines() if line.startswith(SINK_ADDRESS)]
+    le_lines = [line for line in lines if '(LE Audio)' in line]
+    lines = [line for line in lines if line not in le_lines]
+    if case in SCAN_LE_CASES:
+        if len(le_lines) != 1 or SINK_NAME not in le_lines[0]:
+            failures.append(f'the LE Audio entry listed {len(le_lines)} times, or without its name: {le_lines}')
+    elif le_lines:
+        failures.append(f'an LE Audio entry with LE Audio off: {le_lines}')
     if len(lines) != 1:
         failures.append(f'the sink listed {len(lines)} times (expected once)')
     elif SINK_NAME not in lines[0]:
@@ -1046,7 +1082,14 @@ def run_scan_case(args, case, port):
         failures.append(f'listed {since(listed)} s after the inquiry started (at most {SCAN_LISTED_MAX_S} s)')
     if since(named) is None or since(named) > name_max_s:
         failures.append(f'name from the {name_from} {since(named)} s after the inquiry started (at most {name_max_s} s)')
-    return failures, f'listed after {since(listed)} s, named after {since(named)} s, scan took {took:.1f} s'
+    detail = f'listed after {since(listed)} s, named after {since(named)} s'
+    if case in SCAN_LE_CASES:
+        le_found = log_time(text, rf'LE Audio: found {SINK_NAME} \({SINK_ADDRESS}')
+        if since(le_found) is None or since(le_found) > SCAN_LE_FOUND_MAX_S:
+            failures.append(f'LE Audio entry found {since(le_found)} s after the inquiry started '
+                            f'(at most {SCAN_LE_FOUND_MAX_S} s)')
+        detail += f', LE Audio found after {since(le_found)} s'
+    return failures, f'{detail}, scan took {took:.1f} s'
 
 
 def main_scan(args):

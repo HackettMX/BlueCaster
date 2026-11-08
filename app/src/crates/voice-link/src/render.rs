@@ -120,12 +120,22 @@ pub struct PcmProducer {
     /// None: a second producer of a [`Renderer`], which only counts
     queue: Option<rtrb::Producer<i16>>,
     shared: Arc<Shared>,
+    /// The microphone test's tap and the rate of what is pushed
+    tap: Option<(crate::MicTap, u32)>,
 }
 
 impl PcmProducer {
+    /// Everything pushed from now on also goes to `tap` (as `rate` Hz)
+    pub fn set_tap(&mut self, tap: crate::MicTap, rate: u32) {
+        self.tap = Some((tap, rate));
+    }
+
     /// Queues as much of `mono_i16` as fits; returns the frames accepted
     /// (the rest is counted as overflow)
     pub fn push(&mut self, mono_i16: &[i16]) -> usize {
+        if let Some((tap, rate)) = &self.tap {
+            tap.feed(*rate, mono_i16);
+        }
         let n = self.queue.as_mut().map_or(0, |q| push_from(q, mono_i16));
         if n < mono_i16.len() {
             self.shared.overflow.fetch_add((mono_i16.len() - n) as u64, Ordering::Relaxed);
@@ -175,7 +185,7 @@ impl std::fmt::Debug for PcmConsumer {
 pub fn pcm_channel(capacity: usize) -> (PcmProducer, PcmConsumer) {
     let (p, c) = rtrb::RingBuffer::new(capacity.max(1));
     let shared = Arc::new(Shared::default());
-    (PcmProducer { queue: Some(p), shared: shared.clone() }, PcmConsumer { queue: c, shared })
+    (PcmProducer { queue: Some(p), shared: shared.clone(), tap: None }, PcmConsumer { queue: c, shared })
 }
 
 /// The device side of the render loop, so the loop can be tested without
@@ -310,7 +320,7 @@ impl Renderer {
         let taken = self.producer.lock().unwrap_or_else(|e| e.into_inner()).take();
         taken.unwrap_or_else(|| {
             tracing::warn!("voice link: render producer requested twice; the second one is not connected");
-            PcmProducer { queue: None, shared: self.shared.clone() }
+            PcmProducer { queue: None, shared: self.shared.clone(), tap: None }
         })
     }
 
@@ -620,7 +630,7 @@ mod tests {
         let (p, c) = pcm_channel(10);
         let shared = c.shared.clone();
         drop(p);
-        let mut detached = PcmProducer { queue: None, shared };
+        let mut detached = PcmProducer { queue: None, shared, tap: None };
         assert_eq!(detached.push(&[1, 2, 3]), 0);
         assert_eq!(c.stats().overflow, 3);
     }

@@ -53,7 +53,7 @@ describe("Codecs screen", () => {
     const le = await screen.findByRole("region", { name: "Galaxy Buds2 Pro" });
     expect(le).toHaveTextContent(t("device.tag_le_audio"));
     expect(within(le).getByRole("radio", { name: named(t("ui.codec.lc3")) })).toBeChecked();
-    expect(within(le).getAllByRole("radio")).toHaveLength(1);
+    expect(within(le).getAllByRole("radio").filter((r) => !r.closest(".headset-mic"))).toHaveLength(1);
     expect(within(le).queryByRole("button", { name: /\.\.\.|settings/i })).toBeNull();
   });
 

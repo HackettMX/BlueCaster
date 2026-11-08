@@ -5,4 +5,10 @@ export type AudioDevice = { id: string, name: string, is_default: boolean, is_vi
  * Windows' shared-mode mix format: what capturing it delivers without
  * resampling (None: not known)
  */
-mix_rate: number | null, mix_channels: number | null, mix_bits: number | null, };
+mix_rate: number | null, mix_channels: number | null, mix_bits: number | null, 
+/**
+ * The recording side apps pick as a microphone when the headset
+ * microphone is rendered here ("CABLE Output" for "CABLE Input");
+ * None: it has none
+ */
+capture_name: string | null, };

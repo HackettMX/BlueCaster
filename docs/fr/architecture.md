@@ -290,10 +290,10 @@ Lister les adaptateurs et leur pilote ne nécessite aucune élévation.
   le réglage `auto_codec` est activé (Codecs > Sélectionner automatiquement le codec pris en charge
   de meilleure qualité, un seul réglage pour tous les appareils depuis le schéma 5) ; le codec
   choisi pour l'appareil reste dans son profil pour le moment où il est désactivé
-- Suit l'ordre des codecs de l'appareil tel que l'utilisateur a fait glisser ses cartes,
-  sélection automatique désactivée (le `codec_order` du profil ; `codec::AutoOrder`, vide
+- Suit l'ordre des codecs de l'appareil tel que l'utilisateur a fait glisser ses cartes
+  (le `codec_order` du profil ; `codec::AutoOrder`, vide
   pour la meilleure qualité sonore d'abord), pour le choix d'Auto et pour le repli d'un
-  codec choisi ; avec la sélection automatique, l'ordre par défaut. FastStream et Opus
+  codec choisi, avec la sélection automatique aussi. FastStream et Opus
   05 ne sont jamais choisis par Auto ni utilisés comme repli. (Les bêtas de la 2.0.2 avaient un ordre pour
   tous les appareils, l'`auto_order` de settings.json, désormais ignoré.)
 - Choisit la fréquence d'échantillonnage de la famille aptX (44,1 / 48 kHz parmi les fréquences

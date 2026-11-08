@@ -660,6 +660,24 @@ impl DevInfoSet {
         (ty == windows::Win32::Devices::Properties::DEVPROP_TYPE_UINT32).then(|| u32::from_le_bytes(buf))
     }
 
+    /// A GUID device property, None if absent or of another type
+    pub(crate) fn property_guid(&self, data: &SP_DEVINFO_DATA, key: &DEVPROPKEY) -> Option<GUID> {
+        let mut ty = DEVPROPTYPE::default();
+        let mut buf = [0u8; 16];
+        // SAFETY: valid set, element and key; the buffer length is passed.
+        unsafe { SetupDiGetDevicePropertyW(self.0, data, key, &mut ty, Some(&mut buf), None, 0) }.ok()?;
+        if ty != windows::Win32::Devices::Properties::DEVPROP_TYPE_GUID {
+            return None;
+        }
+        let [a0, a1, a2, a3, b0, b1, c0, c1, d @ ..] = buf;
+        Some(GUID::from_values(
+            u32::from_le_bytes([a0, a1, a2, a3]),
+            u16::from_le_bytes([b0, b1]),
+            u16::from_le_bytes([c0, c1]),
+            d,
+        ))
+    }
+
     /// The driver that owns the device now (all fields empty if none)
     pub(crate) fn driver_info(&self, data: &SP_DEVINFO_DATA) -> DriverInfo {
         DriverInfo {

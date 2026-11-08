@@ -1185,6 +1185,20 @@ impl RemoteCaps {
         caps.has(kind).then_some(caps)
     }
 
+    /// These capabilities without the codecs of developer mode
+    /// ([`CodecKind::developer_only`]), as if the device did not offer them
+    /// (issue #86: outside developer mode)
+    pub fn without_developer_codecs(mut self) -> RemoteCaps {
+        self.opus05 = None;
+        self.opus05_channels = 0;
+        self.opus05_frames = 0;
+        self.opus05_bitrate = 0;
+        self.opus05_bidi = false;
+        self.ignored.retain(|(k, _)| !k.developer_only());
+        debug_assert!(CodecKind::ALL.iter().all(|&k| !k.developer_only() || !self.has(k)));
+        self
+    }
+
     /// A SEP of the sink, whatever its codec: SBC's when it has one
     fn any_sep(&self) -> Option<RemoteSep> {
         [
@@ -1640,6 +1654,9 @@ pub enum Unavailable {
     NotSupported,
     /// An experimental codec while experimental codecs are turned off
     Experimental,
+    /// A codec of developer mode ([`CodecKind::developer_only`]) while it
+    /// is off
+    DeveloperMode,
 }
 
 /// The codec to stream with
@@ -2854,6 +2871,21 @@ mod tests {
         );
         assert_eq!(choose(&only, Some(CodecKind::AptxAdaptive), false, true).unwrap().kind, CodecKind::AptxAdaptive);
         assert_eq!(CodecKind::from_key("aptxad"), Some(CodecKind::AptxAdaptive));
+    }
+
+    #[test]
+    fn developer_codecs_left_out_as_not_offered() {
+        use CodecKind::*;
+        let developer: Vec<_> = CodecKind::ALL.into_iter().filter(|k| k.developer_only()).collect();
+        assert_eq!(developer, [Opus05]);
+        let mut caps = RemoteCaps::default();
+        caps.add_sbc(1);
+        caps.add_vendor(2, &pipewire_opus05(2, 0x1F, 0, 0));
+        let ignored = RemoteCaps { ignored: vec![(Opus05, RemoteSep { seid: 3 })], ..caps.clone() };
+        let without = ignored.without_developer_codecs();
+        assert!(!without.has(Opus05) && without.has(Sbc));
+        assert!(without.ignored.is_empty());
+        assert_eq!(choose(&without, None, true, true).unwrap().kind, Sbc);
     }
 
     #[test]

@@ -13,7 +13,7 @@ use codec::{CodecKind, Encoder, EncoderConfig, PeerParams, Quality};
 use pipeline::{BufferPreset, CaptureInput, InputFormat, Pipeline, PipelineConfig, SampleType};
 
 use crate::health::{CaptureReading, StreamHealth};
-use crate::messages::Msg;
+use crate::messages::{CodecStopKind, Msg};
 use crate::mute_output::OutputMute;
 use crate::service::Inner;
 use crate::vendor;
@@ -35,6 +35,10 @@ pub struct StreamRequest {
     /// Experimental codecs may be used (settings `experimental_codecs`):
     /// off, Auto and a fallback never pick them and a chosen one falls back
     pub experimental_codecs: bool,
+    /// The codecs of developer mode ([`CodecKind::developer_only`]) may be
+    /// used (developer mode, settings `debug_mode`): off, the device's are left out as
+    /// if it did not offer them and a chosen one falls back
+    pub developer_codecs: bool,
     /// The device's codec order (the profile's `codec_order`; the default
     /// under Auto-select): what Auto picks first, and what a chosen codec
     /// the device does not offer falls back to (the first one it offers)
@@ -119,7 +123,7 @@ impl StreamRequest {
 }
 
 /// Where a stream's audio comes from. OutputDevice: loopback of that output
-/// device whichever is the Windows default (developer mode, issue #193),
+/// device whichever is the Windows default (issue #193),
 /// never made the default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceRequest {
@@ -1222,6 +1226,32 @@ fn sbc_xq_fallback(kind: CodecKind, failure: &ConfigFailure, requested: Option<C
 /// on its card though the device does not offer it, and `unlisted`'s
 /// settings not held to what the device lists (its card's "Show only
 /// supported options" off; issue #86)
+/// Outside developer mode (`req.developer_codecs` off) its codecs
+/// ([`CodecKind::developer_only`], issue #86) are left out of the device's,
+/// as if it did not offer them. Also the one of them requested, if any.
+fn without_developer_codecs(req: &StreamRequest, remote: RemoteCaps) -> (RemoteCaps, Option<CodecKind>) {
+    if req.developer_codecs {
+        return (remote, None);
+    }
+    (remote.without_developer_codecs(), req.codec.filter(|k| k.developer_only()))
+}
+
+/// The choice with the reason for a codec of developer mode left out
+/// (`blocked`): developer mode, not the device
+fn developer_reason(
+    chosen: Result<caps::Choice, Option<(CodecKind, Unavailable)>>,
+    blocked: Option<CodecKind>,
+) -> Result<caps::Choice, Option<(CodecKind, Unavailable)>> {
+    let why = |r: Option<(CodecKind, Unavailable)>| match r {
+        Some((k, _)) if Some(k) == blocked => Some((k, Unavailable::DeveloperMode)),
+        r => r,
+    };
+    match chosen {
+        Ok(c) => Ok(caps::Choice { replaced: why(c.replaced), ..c }),
+        Err(e) => Err(why(e)),
+    }
+}
+
 fn as_asked(remote: RemoteCaps, forced: Option<CodecKind>, unlisted: Option<CodecKind>) -> RemoteCaps {
     let remote = match forced.map(|k| (k, remote.forcing(k))) {
         Some((kind, Some(caps))) => {
@@ -1569,13 +1599,21 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
     // A codec chosen on its card that the device did not offer: asked for
     // anyway, and no fallback (issue #86: without Auto-select the choice is
     // the user's; it stops with an error if the device refuses it)
-    let forced = req.codec.filter(|&k| req.codec_forced && k.available() && !remote.has(k));
-    let fallback = req.codec_fallback && !req.codec_forced;
+    // Outside developer mode its codecs are neither asked for nor used: one
+    // chosen falls back, under Auto-select or not (its card is not shown)
+    let blocked;
+    (remote, blocked) = without_developer_codecs(&req, remote);
+    if let Some(k) = blocked {
+        tracing::info!("codec: {} is used only in developer mode", k.name());
+    }
+    let forced = req.codec.filter(|&k| blocked.is_none() && req.codec_forced && k.available() && !remote.has(k));
+    let fallback = req.codec_fallback && (!req.codec_forced || blocked.is_some());
     remote = as_asked(remote, forced, None);
     if !req.auto_order.is_default() {
         tracing::info!("codec: the device's order set by the user: {}", req.auto_order.names());
     }
-    let choice = match caps::choose_in(&remote, req.codec, fallback, req.experimental_codecs, &req.auto_order) {
+    let chosen = caps::choose_in(&remote, req.codec, fallback, req.experimental_codecs, &req.auto_order);
+    let choice = match developer_reason(chosen, blocked) {
         Ok(c) => c,
         Err(why) => {
             tracing::debug!(
@@ -1587,10 +1625,17 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
             host.disconnect();
             let msg = match why {
                 None => Msg::new("error.no_compatible_codec"),
-                Some((codec, Unavailable::SepInUse { .. })) => Msg::with("error.codec_sep_in_use", &[&codec.name()]),
-                Some((codec, Unavailable::AdaptiveOnly)) => Msg::with("error.codec_adaptive_only", &[&codec.name()]),
-                Some((codec, Unavailable::NotSupported)) => Msg::with("error.codec_not_supported", &[&codec.name()]),
+                Some((codec, Unavailable::SepInUse { .. })) => {
+                    Msg::codec_stop("error.codec_sep_in_use", codec, CodecStopKind::InUse)
+                }
+                Some((codec, Unavailable::AdaptiveOnly)) => {
+                    Msg::codec_stop("error.codec_adaptive_only", codec, CodecStopKind::Unsupported)
+                }
+                Some((codec, Unavailable::NotSupported)) => {
+                    Msg::codec_stop("error.codec_not_supported", codec, CodecStopKind::Unsupported)
+                }
                 Some((codec, Unavailable::Experimental)) => Msg::with("error.codec_experimental_off", &[&codec.name()]),
+                Some((codec, Unavailable::DeveloperMode)) => Msg::with("error.codec_developer_only", &[&codec.name()]),
             };
             return inner.notify(StreamState::Error, msg);
         }
@@ -1805,9 +1850,12 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
             // What the user chose beyond what the device lists: say so, and
             // how to get sound back (issue #86)
             let msg = if forced.is_some() {
-                Msg::with("error.codec_unsupported_refused", &[&kind.name()])
+                Msg::codec_stop("error.codec_unsupported_refused", kind, CodecStopKind::Unsupported)
             } else if unlisted.is_some() {
-                Msg::with("error.codec_unlisted_refused", &[&kind.name()])
+                Msg::codec_stop("error.codec_unlisted_refused", kind, CodecStopKind::SettingsUnsupported)
+            } else if matches!(e, ConfigFailure::Host(ConfigureError::Refused)) {
+                // The device (or BTstack) refused a codec it lists
+                Msg::codec_stop("error.codec_configure", kind, CodecStopKind::Refused)
             } else {
                 Msg::new("error.codec_configure")
             };
@@ -1832,6 +1880,7 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         let key = match why {
             Unavailable::SepInUse { .. } => "status.connected_fallback_in_use",
             Unavailable::Experimental => "status.connected_fallback_experimental",
+            Unavailable::DeveloperMode => "status.connected_fallback_developer",
             _ => "status.connected_fallback",
         };
         Msg::with(key, &[&wanted.name(), &kind.name()])
@@ -2405,7 +2454,10 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
             );
             if !stopped() {
                 if codec_gone {
-                    inner.notify(StreamState::Error, Msg::with("error.codec_not_supported", &[&kind.name()]));
+                    inner.notify(
+                        StreamState::Error,
+                        Msg::codec_stop("error.codec_not_supported", kind, CodecStopKind::Unsupported),
+                    );
                 } else if restart_why.is_none() {
                     // The adapter works, the headphones never answered: off
                     // or out of range, not an error of BlueCaster
@@ -2716,5 +2768,58 @@ mod tests {
         assert!(!sbc_xq_fallback(xq, &ConfigFailure::Build(ConfigError::NotOffered(xq)), None, false));
         // Other codecs are not retried
         assert!(!sbc_xq_fallback(CodecKind::Ldac, &refused, None, true));
+    }
+
+    #[test]
+    fn opus05_only_in_developer_mode() {
+        let Some(ep) = caps::local_endpoints().into_iter().find(|e| e.kind == CodecKind::Opus05) else {
+            return;
+        };
+        // A PipeWire sink: SBC and Opus 05
+        let mut pipewire = RemoteCaps::default();
+        pipewire.add_sbc(1);
+        pipewire.add_vendor(2, &ep.caps);
+        assert!(pipewire.has(CodecKind::Opus05));
+        let request = |codec: &str, developer: bool| {
+            let mut r = crate::profiles::Profile {
+                device_address: "00:11:22:33:44:55".into(),
+                codec: codec.into(),
+                ..Default::default()
+            }
+            .to_request(1000)
+            .unwrap();
+            r.developer_codecs = developer;
+            r
+        };
+        let choose = |req: &StreamRequest| {
+            let (remote, blocked) = without_developer_codecs(req, pipewire.clone());
+            let chosen = caps::choose_in(&remote, req.codec, true, true, &req.auto_order);
+            (remote.has(CodecKind::Opus05), developer_reason(chosen, blocked))
+        };
+        // Developer mode: offered and used as chosen
+        let (offered, c) = choose(&request("opus05", true));
+        assert!(offered);
+        assert_eq!(c.unwrap(), caps::Choice { kind: CodecKind::Opus05, replaced: None });
+        // Off: as if the device did not offer it; the one chosen falls back,
+        // for developer mode's reason
+        let (offered, c) = choose(&request("opus05", false));
+        assert!(!offered);
+        assert_eq!(
+            c.unwrap(),
+            caps::Choice { kind: CodecKind::Sbc, replaced: Some((CodecKind::Opus05, Unavailable::DeveloperMode)) }
+        );
+        // Another codec the device lacks keeps its own reason
+        let (_, c) = choose(&request("ldac", false));
+        assert_eq!(c.unwrap().replaced, Some((CodecKind::Ldac, Unavailable::NotSupported)));
+        // Auto never took it anyway
+        assert_eq!(choose(&request("auto", false)).1.unwrap().kind, CodecKind::Sbc);
+        // Until the stream starts, a profile's request has it off
+        assert!(!request("opus05", false).developer_codecs);
+        assert!(
+            !crate::profiles::Profile { device_address: "00:11:22:33:44:55".into(), ..Default::default() }
+                .to_request(1000)
+                .unwrap()
+                .developer_codecs
+        );
     }
 }

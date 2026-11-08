@@ -5,6 +5,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "../app/App";
+import { ICONS } from "../components/icons";
 import { t } from "../i18n";
 import { MockCore } from "../ipc/mock";
 import { createCore } from "../ipc/store";
@@ -45,13 +46,30 @@ describe("device pairing", () => {
     expect(calls.some((c) => c.method === "device.pairing")).toBe(false);
   });
 
-  it("lists the keys first, the services as a table below them (issue #86)", async () => {
+  it("lists the keys first, folded, the services as a table below them (issue #86)", async () => {
     const { calls } = await open("#/devices", true);
     const [tag] = await screen.findAllByRole("button", { name: t("ui.pairing.services") });
     expect(tag).toHaveClass("tag");
     fireEvent.click(tag);
     const dialog = await screen.findByRole("dialog", { name: t("ui.pairing.services") });
-    const table = await within(dialog).findByRole("table");
+    // The keys folded, not asked for until unfolded
+    const fold = within(dialog).getByRole("button", { name: t("ui.pairing.key_title") });
+    expect(fold).toHaveAttribute("aria-expanded", "false");
+    await within(dialog).findByRole("table");
+    expect(calls.some((c) => c.method === "device.pairing")).toBe(false);
+    fireEvent.click(fold);
+    expect(fold).toHaveAttribute("aria-expanded", "true");
+    const table = within(dialog).getByRole("table", { name: t("ui.pairing.services") });
+    // The keys as a table of the same look, above the services
+    const keys = await within(dialog).findByRole("table", { name: t("ui.pairing.key_title") });
+    expect(keys).toHaveClass("table");
+    expect(within(keys).getByRole("columnheader", { name: t("ui.pairing.col_name") })).toBeInTheDocument();
+    expect(within(keys).getByRole("columnheader", { name: t("ui.pairing.col_value") })).toBeInTheDocument();
+    expect(within(keys).getByRole("rowheader", { name: t("ui.pairing.link_key") })).toBeInTheDocument();
+    expect(within(keys).getByRole("rowheader", { name: t("ui.pairing.ltk") })).toBeInTheDocument();
+    expect(within(keys).getByRole("rowheader", { name: t("ui.pairing.irk") })).toBeInTheDocument();
+    expect(keys.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(dialog.querySelector("dl")).toBeNull();
     expect(within(table).getByRole("columnheader", { name: t("ui.pairing.col_name") })).toBeInTheDocument();
     expect(within(table).getByRole("columnheader", { name: t("ui.pairing.col_guid") })).toBeInTheDocument();
     expect(within(table).getByText("Audio Sink")).toBeInTheDocument();
@@ -91,6 +109,7 @@ describe("device pairing", () => {
     const [tag] = await screen.findAllByRole("button", { name: t("ui.pairing.services") });
     fireEvent.click(tag);
     const dialog = await screen.findByRole("dialog", { name: t("ui.pairing.services") });
+    fireEvent.click(within(dialog).getByRole("button", { name: t("ui.pairing.key_title") }));
     expect(await within(dialog).findByText(t("ui.pairing.le_missing.no_support"))).toBeInTheDocument();
     expect(within(dialog).queryByText(t("ui.pairing.le_missing.not_asked"))).toBeNull();
   });
@@ -107,10 +126,13 @@ describe("device pairing", () => {
     const [tag] = await screen.findAllByRole("button", { name: t("ui.pairing.services") });
     fireEvent.click(tag);
     const dialog = await screen.findByRole("dialog", { name: t("ui.pairing.services") });
+    fireEvent.click(within(dialog).getByRole("button", { name: t("ui.pairing.key_title") }));
     expect(await within(dialog).findByText("0F0E0D0C0B0A09080706050403020100")).toBeInTheDocument();
     expect(within(dialog).getByText("A0A1A2A3A4A5A6A7A8A9AAABACADAEAF")).toBeInTheDocument();
     expect(within(dialog).getByText(t("ui.pairing.key_size", 16))).toBeInTheDocument();
     expect(within(dialog).getByText("C0:11:22:33:44:55")).toBeInTheDocument();
+    const keys = within(dialog).getByRole("table", { name: t("ui.pairing.key_title") });
+    expect(within(keys).getByRole("rowheader", { name: t("ui.pairing.identity_address") })).toBeInTheDocument();
     expect(within(dialog).getByText(t("ui.pairing.random"))).toBeInTheDocument();
     expect(within(dialog).getAllByRole("button", { name: t("ui.pairing.copy_key") })).toHaveLength(3);
     expect(within(dialog).queryByText(t("ui.pairing.not_available"))).toBeNull();
@@ -128,25 +150,49 @@ describe("device pairing", () => {
     expect(calls.filter((c) => c.method === "device.services")).toHaveLength(3);
   });
 
-  it("imports Windows' pairings on Audio Devices, without developer mode (issue #86)", async () => {
-    const { calls } = await open("#/devices", false);
+  it("imports the Windows pairings ticked in the setup, without developer mode (issue #86)", async () => {
+    location.hash = "#/setup";
+    const calls: { method: string; params: unknown }[] = [];
+    mock = new MockCore({ speed: 0, onCall: (method, params) => calls.push({ method, params }) });
+    render(() => <App core={createCore(mock!)} />);
     // Only while Windows lists a device BlueCaster has not saved
-    mock!.windowsPaired = ["11:22:33:44:55:66"];
+    mock!.windowsPaired = ["11:22:33:44:55:66", "22:33:44:55:66:77"];
+    mock!.windowsNames = { "11:22:33:44:55:66": "EarFun Air Pro 4", "22:33:44:55:66:77": "WF-1000XM5" };
     await mock!.call("adapter.list");
-    const button = await screen.findByRole("button", { name: t("ui.adapter.import_windows") });
-    expect(screen.getByText(t("ui.devices.import_hint"))).toBeInTheDocument();
-    fireEvent.click(button);
+    // To the device step
+    for (let i = 0; i < 2; i++) fireEvent.click(await screen.findByRole("button", { name: t("ui.setup.next") }));
+    const row = (await screen.findByText(t("ui.adapter.import_windows"))).closest(".import-pairings") as HTMLElement;
+    expect(within(row).getByText(t("ui.devices.import_hint"))).toBeInTheDocument();
+    // Its button lists them, all ticked; the import asks for administrator rights
+    fireEvent.click(within(row).getByRole("button", { name: t("ui.devices.import_one") }));
+    const dialog = await screen.findByRole("dialog", { name: t("ui.adapter.import_windows") });
+    const boxes = within(dialog).getAllByRole("checkbox");
+    expect(boxes.map((b) => b.closest("label")!.textContent)).toEqual([
+      "EarFun Air Pro 411:22:33:44:55:66",
+      "WF-1000XM522:33:44:55:66:77",
+    ]);
+    expect(boxes.every((b) => (b as HTMLInputElement).checked)).toBe(true);
+    const confirm = within(dialog).getByRole("button", { name: t("ui.devices.import_one") });
+    expect(confirm.querySelector("svg.icon path")?.getAttribute("d")).toBe(ICONS.shield);
+    fireEvent.click(boxes[1]);
+    fireEvent.click(confirm);
     expect(await screen.findByText(t("ui.adapter.import_done", 1))).toBeInTheDocument();
-    const sent = calls.find((c) => c.method === "device.import_windows_pairings")!.params as { adapter: string };
+    const sent = calls.find((c) => c.method === "device.import_windows_pairings")!.params as {
+      adapter: string;
+      addresses: string[];
+    };
     expect(sent.adapter).toMatch(/^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/);
+    expect(sent.addresses).toEqual(["11:22:33:44:55:66"]);
   });
 
-  it("offers no import when Windows has nothing new, nor on the Adapter screen", async () => {
+  it("offers no import on Audio Devices nor on the Adapter screen", async () => {
     await open("#/devices", true);
+    mock!.windowsPaired = ["11:22:33:44:55:66"];
+    await mock!.call("adapter.list");
     await screen.findAllByText(t("device.tag_saved"));
-    expect(screen.queryByRole("button", { name: t("ui.adapter.import_windows") })).toBeNull();
+    expect(screen.queryByText(t("ui.adapter.import_windows"))).toBeNull();
     location.hash = "#/adapter";
     await screen.findByRole("heading", { level: 1, name: t("ui.nav.adapter") });
-    expect(screen.queryByRole("button", { name: t("ui.adapter.import_windows") })).toBeNull();
+    expect(screen.queryByText(t("ui.adapter.import_windows"))).toBeNull();
   });
 });

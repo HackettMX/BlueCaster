@@ -18,7 +18,9 @@
 use core::ffi::c_void;
 use core::marker::PhantomData;
 
-use windows::Win32::Devices::FunctionDiscovery::{PKEY_Device_ContainerId, PKEY_DeviceInterface_FriendlyName};
+use windows::Win32::Devices::FunctionDiscovery::{
+    PKEY_Device_ContainerId, PKEY_Device_FriendlyName, PKEY_DeviceInterface_FriendlyName,
+};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_OK};
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
@@ -34,6 +36,7 @@ use windows::Win32::System::Com::StructuredStorage::{
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, STGM_READ,
 };
+use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::core::{BOOL, GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface, PCWSTR};
 
 // ---------------------------------------------------------------------------
@@ -521,18 +524,57 @@ fn pairing(device: &IMMDevice) -> Pairing {
         // SAFETY: clears the value GetValue gave us, once.
         let _ = unsafe { PropVariantClear(&mut v) };
     }
-    if let Some(mut v) = read(&PKEY_DeviceInterface_FriendlyName) {
-        // SAFETY: an initialised PROPVARIANT (VT_LPWSTR; VT_EMPTY fails).
-        if let Ok(pwstr) = unsafe { PropVariantToStringAlloc(&v) } {
-            // SAFETY: a valid NUL-terminated string from COM.
-            out.adapter = unsafe { pwstr.to_string() }.ok().filter(|s| !s.trim().is_empty());
-            // SAFETY: allocated by COM for us, freed once.
-            unsafe { CoTaskMemFree(Some(pwstr.0 as *const c_void)) };
-        }
-        // SAFETY: clears the value GetValue gave us, once.
-        let _ = unsafe { PropVariantClear(&mut v) };
-    }
+    out.adapter = string_property(&store, &PKEY_DeviceInterface_FriendlyName);
     out
+}
+
+/// A string property of an endpoint's store (None when missing or blank)
+fn string_property(store: &IPropertyStore, key: &PROPERTYKEY) -> Option<String> {
+    // SAFETY: `key` is a valid PROPERTYKEY; the value is ours to clear.
+    let mut v = unsafe { store.GetValue(key) }.ok()?;
+    let mut out = None;
+    // SAFETY: an initialised PROPVARIANT (VT_LPWSTR; VT_EMPTY fails).
+    if let Ok(pwstr) = unsafe { PropVariantToStringAlloc(&v) } {
+        // SAFETY: a valid NUL-terminated string from COM.
+        out = unsafe { pwstr.to_string() }.ok().filter(|s| !s.trim().is_empty());
+        // SAFETY: allocated by COM for us, freed once.
+        unsafe { CoTaskMemFree(Some(pwstr.0 as *const c_void)) };
+    }
+    // SAFETY: clears the value GetValue gave us, once.
+    let _ = unsafe { PropVariantClear(&mut v) };
+    out
+}
+
+/// The recording side of each render endpoint in `render_ids`, by its
+/// friendly name: the capture endpoint paired with it ("CABLE Output
+/// (VB-Audio Virtual Cable)" for "CABLE Input"; same container, else same
+/// adapter name), None where none is. What apps pick as the microphone
+/// when the headset microphone is rendered to that endpoint.
+pub fn paired_capture_names(render_ids: &[String]) -> windows::core::Result<Vec<Option<String>>> {
+    let enumerator = enumerator()?;
+    // SAFETY: plain call on a live enumerator.
+    let devices = unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)? };
+    // SAFETY: plain call on a live collection.
+    let count = unsafe { devices.GetCount()? };
+    let mut captures = Vec::new();
+    for i in 0..count {
+        // SAFETY: `i` is within the collection's count.
+        let Ok(device) = (unsafe { devices.Item(i) }) else { continue };
+        // SAFETY: plain call on a live device.
+        let name = unsafe { device.OpenPropertyStore(STGM_READ) }
+            .ok()
+            .and_then(|store| string_property(&store, &PKEY_Device_FriendlyName));
+        captures.push((pairing(&device), name));
+    }
+    let keys: Vec<Pairing> = captures.iter().map(|(p, _)| p.clone()).collect();
+    Ok(render_ids
+        .iter()
+        .map(|id| {
+            let render = pairing(&render_device(&enumerator, Some(id)).ok()?);
+            // Several (one adapter with more cables): the first named one
+            paired(&render, &keys).into_iter().find_map(|i| captures[i].1.clone())
+        })
+        .collect())
 }
 
 /// Whether a session on `device` records (AudioSessionStateActive), this

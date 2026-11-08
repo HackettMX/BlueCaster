@@ -16,7 +16,7 @@
 //! `--verbose`: every command takes both), nothing is asked interactively. `assign` and `restore` need
 //! administrator rights; `list` and `state` do not.
 //!
-//! `windows-keys` reads the link keys Windows' Bluetooth keeps for the radio
+//! `windows-keys` reads the link keys and LE keys Windows' Bluetooth keeps for the radio
 //! with that address (win-sys::bt_keys), for the core to take over the
 //! devices paired with it. It needs administrator rights too; the keys go to
 //! stdout and `--out` only, never to the log.
@@ -266,19 +266,42 @@ fn windows_keys(radio: &[u8; 6]) -> (u8, Value) {
     if !win_sys::elevation::is_elevated() {
         return (exit::NOT_ELEVATED, error_json("not_elevated", "windows-keys needs administrator rights"));
     }
-    match win_sys::bt_keys::read_link_keys(radio) {
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    match win_sys::bt_keys::read_keys(radio) {
         Ok(keys) => {
             let list: Vec<Value> = keys
                 .iter()
-                .flatten()
+                .flat_map(|k| &k.link_keys)
+                .map(|k| json!({ "address": win_sys::bt_paired::format_address(&k.address), "key": hex(&k.key) }))
+                .collect();
+            // As Windows keeps them: LTK and IRK least significant octet
+            // first, ERand as a number (16 hex digits)
+            let le: Vec<Value> = keys
+                .iter()
+                .flat_map(|k| &k.le_keys)
                 .map(|k| {
                     json!({
                         "address": win_sys::bt_paired::format_address(&k.address),
-                        "key": k.key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                        "address_type": k.address_type,
+                        "ltk": hex(&k.ltk),
+                        "key_length": k.key_length,
+                        "ediv": k.ediv,
+                        "erand": k.erand.map(|r| format!("{r:016x}")),
+                        "irk": k.irk.map(|i| hex(&i)),
+                        "auth_req": k.auth_req,
                     })
                 })
                 .collect();
-            (exit::OK, json!({ "ok": true, "command": "windows-keys", "radio_found": keys.is_some(), "keys": list }))
+            (
+                exit::OK,
+                json!({
+                    "ok": true,
+                    "command": "windows-keys",
+                    "radio_found": keys.is_some(),
+                    "keys": list,
+                    "le_keys": le,
+                }),
+            )
         }
         Err(e) => (exit::FAILED, error_json("registry", &e.to_string())),
     }

@@ -84,6 +84,13 @@ pub struct LinkStats {
     pub link: Mutex<LinkDetails>,
     /// How long the encoder takes (encode thread, A2DP or LE Audio)
     pub encode: EncodeTiming,
+    /// The headset microphone's call link, the way back: SCO payloads
+    /// received, those the controller flagged as damaged, and the codec
+    /// frames concealed. The way out counts as media (packets_sent,
+    /// bytes_sent; the uplink capture as capture_*), A2DP being suspended.
+    pub voice_rx_packets: AtomicU64,
+    pub voice_rx_bad: AtomicU64,
+    pub voice_rx_concealed: AtomicU64,
 }
 
 /// The encoder's own time: what one encoder call takes against the audio

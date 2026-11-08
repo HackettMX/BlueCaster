@@ -646,6 +646,14 @@ async def main(args):
         if on:
             device.l2cap_channel_manager.register_fixed_channel(SMP_BR_CID, smp_handler)
         print(f'SMP over BR/EDR {"listed" if on else "not listed"} (connection {connections})', flush=True)
+    if args.le_audio_adv:
+        # Earbuds with LE Audio on (issue #86): over LE too, under the
+        # classic address, a CAS general announcement and the name
+        name = args.name.encode()[:21]
+        data = bytes([2, 0x01, 0x06, 4, 0x16, 0x53, 0x18, 0x00, len(name) + 1, 0x09]) + name
+        await device.start_advertising(own_address_type=hci.OwnAddressType.PUBLIC, auto_restart=True,
+                                       advertising_data=data)
+        print('advertising LE Audio (CAS)', flush=True)
     await device.set_discoverable(True)
     await device.set_connectable(True)
 
@@ -813,6 +821,8 @@ if __name__ == '__main__':
                         help='answer inquiries without the name in the EIR (BlueCaster asks for it)')
     parser.add_argument('--dual-mode', action='store_true',
                         help="report BR/EDR support on BlueCaster's controller (BTstack inquires only then)")
+    parser.add_argument('--le-audio-adv', action='store_true',
+                        help='also advertise over LE as an LE Audio device (CAS announcement, the classic address)')
     parser.add_argument('--in-use', nargs='*', default=[], choices=CODEC_NAMES, metavar='CODEC',
                         help='report the SEP of these codecs as in use by another device (multipoint)')
     parser.add_argument('--codecs', nargs='+', choices=CODEC_NAMES, metavar='CODEC',

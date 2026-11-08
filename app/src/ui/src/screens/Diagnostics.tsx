@@ -1,5 +1,6 @@
 // Diagnostics: live graphs of the stream, the radio and the audio capture
-// (an LE Audio stream's ISO counters on the stream tab), the eleven-step
+// (an LE Audio stream's ISO counters on the stream tab), the headset
+// microphone test, the eleven-step
 // connection flow, the log with level, text and attempt filters, HCI
 // capture, "copy diagnostic info", verbose logging, the diagnostic bundle
 // (one .zip of logs, captures and crash reports for a report). The receiver
@@ -19,11 +20,12 @@ import { formatBytes } from "../lib/linkstats";
 import { CapturePanel } from "./diagnostics/CapturePanel";
 import { FlowPanel } from "./diagnostics/FlowPanel";
 import { createLogView, JUMP_WAIT_MS, LogPanel } from "./diagnostics/LogPanel";
+import { MicPanel } from "./diagnostics/MicPanel";
 import { RadioPanel } from "./diagnostics/RadioPanel";
 import { mask, observeCoreTime, setCoreClock, setEpoch, setMask } from "./diagnostics/shared";
 import { StreamPanel } from "./diagnostics/StreamPanel";
 
-type Tab = "stream" | "radio" | "capture" | "flow" | "log";
+type Tab = "stream" | "radio" | "capture" | "mic" | "flow" | "log";
 
 // ---- Window-wide view state (kept while the window lives) ------------------
 
@@ -170,6 +172,7 @@ export function Diagnostics() {
     { id: "stream", label: t("quality.section_stream"), icon: "pulse" },
     { id: "radio", label: t("ui.diag.tab_radio"), icon: "bluetooth" },
     { id: "capture", label: t("ui.diag.tab_capture"), icon: "speaker_2" },
+    { id: "mic", label: t("ui.diag.tab_mic"), icon: "mic" },
     { id: "flow", label: t("dbgc.section_flow"), icon: "checkmark_circle" },
     { id: "log", label: t("dbgc.section_log"), icon: "people_list" },
   ];
@@ -300,6 +303,9 @@ export function Diagnostics() {
         </Show>
         <Show when={tab() === "capture"}>
           <CapturePanel />
+        </Show>
+        <Show when={tab() === "mic"}>
+          <MicPanel />
         </Show>
         <Show when={tab() === "flow"}>
           <FlowPanel onJump={jumpTo} />

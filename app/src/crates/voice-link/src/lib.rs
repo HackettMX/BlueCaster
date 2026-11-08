@@ -10,6 +10,7 @@
 //!   packet loss concealment.
 //! - [`WavSink`]: the microphone into a WAV file instead (developer CLI,
 //!   emulator tests).
+//! - [`MicTap`]: the microphone test's level, recording and playback.
 //!
 //! The codec primitives are in `btstack-sys` (mSBC, CVSD PLC) and `lc3-sys`;
 //! this crate itself has no `unsafe`.
@@ -21,11 +22,13 @@ mod drift;
 pub mod h2;
 mod render;
 mod resample;
+mod tap;
 mod uplink;
 mod wav;
 
 pub use codec::{DecoderStats, EncoderStats, VoiceCodec, VoiceDecoder, VoiceEncoder};
 pub use render::{PcmConsumer, PcmProducer, RenderError, RenderStats, Renderer, pcm_channel};
+pub use tap::MicTap;
 pub use uplink::{UplinkConsumer, UplinkSink, UplinkStats};
 pub use wav::WavSink;
 

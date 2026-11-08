@@ -313,7 +313,7 @@ export function Adapter() {
                         </>
                       }
                     >
-                      <Button icon="arrow_reset" onClick={() => setDialog({ adapter: a, mode: "restore" })}>
+                      <Button icon="shield" onClick={() => setDialog({ adapter: a, mode: "restore" })}>
                         {t("ui.adapter.restore_driver")}
                       </Button>
                       <p class="hint">{t("ui.adapter.restore_short")}</p>

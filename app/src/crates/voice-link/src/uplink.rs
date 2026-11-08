@@ -80,6 +80,8 @@ pub struct UplinkConsumer {
     consumer: rtrb::Consumer<i16>,
     shared: Arc<Shared>,
     primed: Primed,
+    /// The microphone test: its recording plays in place of the capture
+    tap: Option<crate::MicTap>,
 }
 
 impl UplinkSink {
@@ -100,7 +102,8 @@ impl UplinkSink {
             resampled: Vec::with_capacity(rate as usize / 10),
             resampler: None,
         };
-        let consumer = UplinkConsumer { rate, consumer, shared, primed: Primed::new(rate, prefill, tolerance) };
+        let consumer =
+            UplinkConsumer { rate, consumer, shared, primed: Primed::new(rate, prefill, tolerance), tap: None };
         (sink, consumer)
     }
 
@@ -192,7 +195,18 @@ impl UplinkConsumer {
         s.underruns.fetch_add(u64::from(r.underrun || r.reprimed), Ordering::Relaxed);
         s.dropped.fetch_add(r.dropped as u64, Ordering::Relaxed);
         s.duplicated.fetch_add(r.duplicated as u64, Ordering::Relaxed);
+        // The capture keeps flowing (its queue stays primed) while the
+        // microphone test's recording replaces it
+        if let Some(tap) = &self.tap {
+            tap.play_into(self.rate, out);
+        }
         r.got
+    }
+
+    /// While `tap` plays its recording, it goes to the headphones instead of
+    /// the capture
+    pub fn set_tap(&mut self, tap: crate::MicTap) {
+        self.tap = Some(tap);
     }
 
     /// Samples waiting in the queue

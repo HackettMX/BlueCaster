@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { App } from "../app/App";
 import { setLanguage, t } from "../i18n";
 import { MockCore, type MockScenario } from "../ipc/mock";
+import type { Device } from "../ipc/types";
 import { createCore } from "../ipc/store";
 import { CARD_ORDER } from "../lib/codecs";
 import { endSettle } from "./Codecs";
@@ -25,9 +26,13 @@ function start(hash: string, scenario: MockScenario = "normal") {
 
 /** A device's section on the Codecs screen */
 const section = (name: string) => screen.findByRole("region", { name });
+/** A section's codec cards (not its headset microphone's modes) */
+const cards = (where: HTMLElement) =>
+  within(where)
+    .getAllByRole("radio")
+    .filter((r) => !r.closest(".headset-mic")) as HTMLInputElement[];
 /** The cards can be chosen again (the last choice saved) */
-const settled = (where: HTMLElement) =>
-  waitFor(() => expect(within(where).getAllByRole("radio").every((r) => !(r as HTMLInputElement).disabled)).toBe(true));
+const settled = (where: HTMLElement) => waitFor(() => expect(cards(where).every((r) => !r.disabled)).toBe(true));
 /** The screen itself (the sidebar names the devices too) */
 const main = () => within(screen.getByRole("main"));
 /** "Auto-select the codec with the highest quality", for every device */
@@ -65,7 +70,7 @@ describe("the Codecs screen", () => {
     expect(within(wh).getByRole("radio", { name: /LDAC/ })).toBeChecked();
     // No Auto card: Auto is one switch for every device (issue #86), off
     // here, not the device's own
-    expect(within(wh).queryByRole("radio", { name: /Auto/ })).toBeNull();
+    expect(cards(wh).some((r) => r.value === "auto")).toBe(false);
     expect(autoSwitch()).not.toBeChecked();
     expect(within(wh).queryByRole("switch", { name: autoName })).toBeNull();
     const xb = await section("SRS-XB13");
@@ -75,6 +80,8 @@ describe("the Codecs screen", () => {
     // allows (round 8); no experimental codecs switch, no "Auto's order"
     // button, nor a way back to the default order while it is the default
     expect(main().queryByRole("button", { name: t("ui.codecs.order_reset") })).toBeNull();
+    // Dragging the cards is said under them
+    expect(within(wh).getByText(t("ui.codecs.order_hint"))).toBeInTheDocument();
     expect(main().queryAllByRole("checkbox")).toHaveLength(0);
     expect(hideSwitch()).toBeChecked();
     // A line between the device and its codecs
@@ -298,13 +305,36 @@ describe("the Codecs screen", () => {
     // Even with the old setting off
     await core.request("settings.set", { settings: { ...core.state.snap!.settings, experimental_codecs: false } });
     const hd = await within(wh).findByRole("radio", { name: /aptX HD/ });
-    for (const name of [/^aptX LL/, /^OpusUnsupported/, /^Opus \(PipeWire\)Unsupported/, /FastStream/]) {
+    for (const name of [/^aptX LL/, /^OpusUnsupported/, /FastStream/]) {
       expect(within(wh).getByRole("radio", { name })).toBeInTheDocument();
     }
+    // PipeWire's Opus only in developer mode (issue #86)
+    expect(within(wh).queryByRole("radio", { name: /^Opus \(PipeWire\)/ })).toBeNull();
     expect(within(wh).queryByRole("radio", { name: /Opus 05/ })).toBeNull();
     expect(wh).not.toHaveTextContent(/Experimental/);
     expect(hd).toBeInTheDocument();
+    await core.request("settings.set", { settings: { ...core.state.snap!.settings, developer_mode: true } });
+    expect(await within(wh).findByRole("radio", { name: /^Opus \(PipeWire\)Unsupported/ })).toBeInTheDocument();
     expect(saves(calls)).toHaveLength(0);
+  });
+
+  it("shows PipeWire's Opus only in developer mode, one chosen falls back without it (issue #86)", async () => {
+    const { core } = start("#/codecs");
+    const wh = await section("WH-1000XM5");
+    // A device that lists it, chosen on its card
+    const d = core.state.snap!.devices.find((x) => x.name === "WH-1000XM5")!;
+    const m = mock as unknown as { snap: { devices: Device[] }; emit: (e: unknown) => void };
+    const dev = m.snap.devices.find((x) => x.address === d.address)!;
+    dev.codecs = [...dev.codecs, "opus05"];
+    m.emit({ kind: "devices", value: m.snap.devices });
+    const p = core.state.snap!.profiles.find((x) => x.device_address === d.address)!;
+    await core.request("profile.save", { profile: { ...p, codec: "opus05" }, original_name: p.name });
+    // Off: no card, and the one used instead is the one picked
+    await waitFor(() => expect(within(wh).getByRole("radio", { name: /^LDAC/ })).toBeChecked());
+    expect(within(wh).queryByRole("radio", { name: /^Opus \(PipeWire\)/ })).toBeNull();
+    // On: its card, chosen
+    await core.request("settings.set", { settings: { ...core.state.snap!.settings, developer_mode: true } });
+    expect(await within(wh).findByRole("radio", { name: /^Opus \(PipeWire\)/ })).toBeChecked();
   });
 });
 
@@ -377,21 +407,18 @@ describe("saved devices on the Audio Devices screen", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "profile.save")).toBe(true));
   });
 
-  it("offers Windows' pairing of a device paired through this adapter (issue #86)", async () => {
+  it("only warns of a device Windows paired through this adapter: importing is the setup's (issue #86)", async () => {
     const { calls } = start("#/devices");
     mock!.windowsPaired = ["f4:4e:fd:00:11:22"];
     fireEvent.click(await screen.findByRole("button", { name: t("connection.scan") }));
     const row = (await screen.findByText(/Galaxy Buds2 Pro/)).closest(".device-row") as HTMLElement;
     fireEvent.click(within(row).getByRole("button", { name: t("ui.devices.add") }));
     const dialog = await screen.findByRole("dialog", { name: t("ui.devices.windows_paired_title") });
-    expect(dialog).toHaveTextContent(t("ui.devices.windows_import_text", "Galaxy Buds2 Pro"));
-    expect(within(dialog).getByRole("button", { name: t("ui.devices.add_new") })).toBeInTheDocument();
-    fireEvent.click(within(dialog).getByRole("button", { name: t("ui.devices.import_one") }));
-    // That device's key only, then added as usual
+    expect(dialog).toHaveTextContent(t("ui.devices.windows_paired_text", "Galaxy Buds2 Pro"));
+    expect(within(dialog).queryByRole("button", { name: t("ui.devices.import_one") })).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: t("ui.devices.add_anyway") }));
     await waitFor(() => expect(calls.some((c) => c.method === "profile.save")).toBe(true));
-    const imported = calls.find((c) => c.method === "device.import_windows_pairings");
-    expect(imported?.params).toMatchObject({ address: expect.stringMatching(/^f4:4e:fd:00:11:22$/i) });
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(calls.some((c) => c.method === "device.import_windows_pairings")).toBe(false);
   });
 
   it("makes a profile that picks the best codec for a device added without one", async () => {
@@ -432,7 +459,7 @@ describe("codec cards", () => {
     // The ones it did not support hidden (on by default, issue #86): SBC,
     // AAC and LDAC are supported, and need no "Supported" tag then
     expect(within(wh).queryByRole("radio", { name: /aptX HD/ })).toBeNull();
-    expect(within(wh).getAllByRole("radio")).toHaveLength(3);
+    expect(cards(wh)).toHaveLength(3);
     expect(within(wh).queryByText(t("ui.profile.codec_supported"))).toBeNull();
     const hide = hideSwitch();
     expect(hide).toBeChecked();
@@ -556,7 +583,7 @@ describe("codec cards", () => {
     expect(cardNames(wh)).toEqual([t("codec.ldac"), t("codec.aac"), t("codec.sbc")]);
   });
 
-  it("are in the default order and cannot be moved under Auto-select, which ignores the device's order", async () => {
+  it("keep the device's order under Auto-select, which follows it, and are dragged there too", async () => {
     const { calls, core } = start("#/codecs");
     const wh = await section("WH-1000XM5");
     const p = core.state.snap!.profiles.find((x) => x.device_address === "AC:80:0A:12:34:56")!;
@@ -569,18 +596,37 @@ describe("codec cards", () => {
     expect(within(wh).getByRole("radio", { name: /SBC/ })).toBeChecked();
     calls.length = 0;
     fireEvent.click(autoSwitch());
-    // On: highest sound quality first, LDAC picked
-    await waitFor(() => expect(cardNames(wh)).toEqual([t("codec.ldac"), t("codec.aac"), t("codec.sbc")]));
-    expect(within(wh).getByRole("radio", { name: /LDAC/ })).toBeChecked();
-    expect(main().queryByRole("button", { name: t("ui.codecs.order_reset") })).toBeNull();
-    const aac = within(wh).getByRole("radio", { name: /AAC/ });
-    expect(aac).not.toHaveAccessibleDescription();
-    fireEvent.keyDown(aac, { key: "ArrowLeft", altKey: true });
-    fireEvent.pointerDown(aac, { button: 0, pointerId: 1, clientX: 300, clientY: 10 });
-    fireEvent.pointerMove(wh.querySelector(".codec-grid")!, { pointerId: 1, clientX: 20, clientY: 10 });
-    fireEvent.pointerUp(wh.querySelector(".codec-grid")!, { pointerId: 1 });
-    expect(saves(calls)).toHaveLength(0);
-    expect(cardNames(wh)[0]).toBe(t("codec.ldac"));
+    await waitFor(() => expect(within(wh).getByRole("radio", { name: /SBC/ })).toBeDisabled());
+    // On: the same order, the same pick
+    expect(cardNames(wh)).toEqual([t("codec.sbc"), t("codec.aac"), t("codec.ldac")]);
+    expect(within(wh).getByRole("radio", { name: /SBC/ })).toBeChecked();
+    expect(main().getByRole("button", { name: t("ui.codecs.order_reset") })).toBeInTheDocument();
+    expect(within(wh).getByText(t("ui.codecs.order_hint"))).toBeInTheDocument();
+    // No keys: the cards take no focus under Auto-select
+    const ldac = within(wh).getByRole("radio", { name: /LDAC/ });
+    await waitFor(() => expect(ldac).toBeDisabled());
+    expect(ldac).not.toHaveAccessibleDescription();
+    // LDAC dragged first: Auto picks it, and the drag asks nothing
+    const sbc = within(wh).getByRole("radio", { name: /SBC/ });
+    const grid = wh.querySelector(".codec-grid")!;
+    const at = document.elementFromPoint;
+    document.elementFromPoint = () => sbc;
+    try {
+      fireEvent.pointerDown(ldac, { button: 0, pointerId: 1, clientX: 300, clientY: 10 });
+      fireEvent.pointerMove(grid, { pointerId: 1, clientX: 20, clientY: 10 });
+      await waitFor(() => expect(cardNames(wh)[0]).toBe(t("codec.ldac")));
+      document.elementFromPoint = () => ldac;
+      fireEvent.pointerUp(grid, { pointerId: 1, clientX: 20, clientY: 10 });
+      fireEvent.click(ldac.closest("label")!);
+    } finally {
+      document.elementFromPoint = at;
+    }
+    await waitFor(() => expect(saves(calls)).toHaveLength(1));
+    const order = saves(calls)[0].profile.codec_order as string[];
+    expect(order.indexOf("ldac")).toBeLessThan(order.indexOf("sbc"));
+    expect(saves(calls)[0].profile).toMatchObject({ codec: "auto" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(within(wh).getByRole("radio", { name: /LDAC/ })).toBeChecked());
   });
 });
 
@@ -606,12 +652,12 @@ describe("the device's activity (issue #86 round 8)", () => {
     fireEvent.click(within(wh).getByRole("radio", { name: /AAC/ }));
     await waitFor(() => expect(saves(calls)).toHaveLength(1));
     // Every card waits
-    await waitFor(() => expect(within(wh).getAllByRole("radio").every((r) => (r as HTMLInputElement).disabled)).toBe(true));
+    await waitFor(() => expect(cards(wh).every((r) => r.disabled)).toBe(true));
     expect(within(wh).getByRole("button", { name: t("ui.profile.codec_settings", t("codec.sbc")) })).toBeDisabled();
     fireEvent.click(within(wh).getByRole("radio", { name: /SBC/ }));
     expect(saves(calls)).toHaveLength(1);
     // Then, once it streams again, they can be chosen again
-    await waitFor(() => expect(within(wh).getAllByRole("radio").some((r) => (r as HTMLInputElement).disabled)).toBe(false), {
+    await waitFor(() => expect(cards(wh).some((r) => r.disabled)).toBe(false), {
       timeout: 5000,
     });
     expect(core.state.snap!.stream.state).toBe("streaming");
@@ -803,7 +849,7 @@ describe("codec settings within what the device lists (issue #86: moto buds+)", 
     fireEvent.input(bitpool, { target: { value: "53" } });
     expect(bitpool).toHaveValue("39");
     // Bitpool 39, 16 blocks, 8 subbands, joint stereo at 48 kHz
-    await waitFor(() => expect(within(dialog).getByRole("status")).toHaveTextContent("≈ 273 kbps"));
+    await waitFor(() => expect(within(dialog).getByLabelText(t("connection.quality"))).toHaveTextContent("≈ 273 kbps"));
     fireEvent.click(within(dialog).getByRole("button", { name: t("modal.close") }));
     await waitFor(() => expect(saves(calls)).toHaveLength(1));
     expect(saves(calls)[0].profile).toMatchObject({ codec_settings: { sbc: { sbc_bitpool: 39, sbc_min_bitpool: 0 } } });
@@ -827,7 +873,7 @@ describe("codec settings within what the device lists (issue #86: moto buds+)", 
       // One rate: shown fixed, not Auto and that rate to choose between
       const field = within(dialog).getByLabelText(t("connection.sample_rate"));
       const list =
-        field instanceof HTMLInputElement ? [field.value] : within(field).getAllByRole("option").map((o) => o.textContent);
+        field instanceof HTMLOutputElement ? [field.textContent] : within(field).getAllByRole("option").map((o) => o.textContent);
       fireEvent.click(within(dialog).getByRole("button", { name: t("modal.close") }));
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
       return list;
@@ -846,7 +892,7 @@ describe("SBC settings", () => {
     const wh = await section("WH-1000XM5");
     await core.request("settings.set", { settings: { ...core.state.snap!.settings, developer_mode: true } });
     const dialog = await codecSettings(wh, "codec.sbc");
-    const rate = within(dialog).getByRole("status");
+    const rate = within(dialog).getByLabelText(t("connection.quality"));
     expect(rate).toHaveTextContent("≈ 357 kbps");
 
     // The WH-1000XM5 lists 8 subbands and loudness only (the mock's
@@ -893,7 +939,8 @@ describe("SBC settings", () => {
     const dialog = await codecSettings(wh, "codec.sbc_xq");
     expect(within(dialog).getByLabelText(t("ui.diag.cd_blocks"))).toBeInTheDocument();
     expect(within(dialog).getByLabelText(t("ui.diag.cd_channel_mode"))).toHaveValue(t("ui.diag.cd_mode.dual_channel"));
-    expect(within(dialog).getByLabelText(t("ui.diag.cd_channel_mode"))).toHaveAttribute("readonly");
+    // Shown as the Quality value is: not a field to type in (issue #86)
+    expect(within(dialog).getByLabelText(t("ui.diag.cd_channel_mode")).tagName).toBe("OUTPUT");
     // One bit depth: a value, not a list (issue #86)
     expect(within(dialog).getByLabelText(t("connection.bit_depth"))).toHaveValue(t("bitdepth.16"));
     expect(within(dialog).queryByRole("combobox", { name: t("connection.bit_depth") })).toBeNull();
@@ -904,7 +951,7 @@ describe("SBC settings", () => {
     const dialog = await codecSettings(await section("WH-1000XM5"), "codec.sbc");
     // Auto: 16 blocks, 8 subbands, joint stereo, bitpool 53, at 48 kHz
     // only; read-only where the quality list was (issue #86)
-    const rate = within(dialog).getByRole("status");
+    const rate = within(dialog).getByLabelText(t("connection.quality"));
     expect(rate).toBe(within(dialog).getByLabelText(t("connection.quality")));
     expect(rate).toHaveTextContent("≈ 357 kbps");
 
@@ -949,7 +996,7 @@ describe("SBC settings", () => {
     // The highest down to 30: the bit rate follows it (73-byte frames at 48 kHz)
     fireEvent.input(high, { target: { value: "30" } });
     expect(high).toHaveAttribute("aria-valuetext", "30");
-    const rate = within(dialog).getByRole("status");
+    const rate = within(dialog).getByLabelText(t("connection.quality"));
     await waitFor(() => expect(rate).toHaveTextContent("≈ 219 kbps"));
     expect(auto).toBeEnabled();
     // The lowest never passes the highest, nor the highest the lowest
@@ -1016,7 +1063,7 @@ describe("SBC settings", () => {
     await waitFor(() => expect(high).toHaveAttribute("max", "47"));
     fireEvent.input(high, { target: { value: "47" } });
     // 47 per channel at 44.1 kHz
-    await waitFor(() => expect(within(dialog).getByRole("status")).toHaveTextContent("≈ 551 kbps"));
+    await waitFor(() => expect(within(dialog).getByLabelText(t("connection.quality"))).toHaveTextContent("≈ 551 kbps"));
     // Back at 48 kHz the bitpool comes down with the range
     fireEvent.change(rate, { target: { value: "48000" } });
     await waitFor(() => expect(high).toHaveValue("43"));
@@ -1028,7 +1075,7 @@ describe("SBC settings", () => {
     fireEvent.click(await screen.findByRole("switch", { name: (n) => n.startsWith(t("ui.profile.codecs_hide")) }));
     const dialog = await codecSettings(await section("WH-1000XM5"), "codec.sbc_xq");
     // Bitpool 43 per channel at 48 kHz
-    expect(within(dialog).getByRole("status")).toHaveTextContent("≈ 552 kbps");
+    expect(within(dialog).getByLabelText(t("connection.quality"))).toHaveTextContent("≈ 552 kbps");
   });
 
   it("SBC's ABR does not carry to SBC XQ, nor back (issue #86)", async () => {
@@ -1095,7 +1142,7 @@ describe("a device's capture source (Audio Devices, issue #86)", () => {
     expect(box).not.toHaveClass("st-warn");
   });
 
-  it("lists System Loopback, the virtual devices and the playing apps in one list", async () => {
+  it("lists the sound devices, the virtual devices and the playing apps in one list", async () => {
     start("#/devices");
     const entry = await deviceEntry(/WH-1000XM5/);
     const select = within(entry).getByLabelText(t("capture.mode"));
@@ -1103,8 +1150,8 @@ describe("a device's capture source (Audio Devices, issue #86)", () => {
     expect(within(virtual).getByRole("option", { name: "CABLE Input (VB-Audio Virtual Cable)" })).toBeInTheDocument();
     const apps = await within(select).findByRole("group", { name: t("capture.app") });
     expect(within(apps).getByRole("option", { name: "Spotify" })).toBeInTheDocument();
-    // With the default output it records, in its own group as the others (issue #86)
-    const loopback = within(select).getByRole("group", { name: t("capture.loopback") });
+    // The default output it records first among the sound devices, no "Loopback" (issue #86)
+    const loopback = within(select).getByRole("group", { name: t("capture.sound_devices") });
     expect(
       within(loopback).getByRole("option", { name: t("capture.loopback_default", "Speakers (Realtek(R) Audio)") }),
     ).toBeInTheDocument();
@@ -1113,18 +1160,18 @@ describe("a device's capture source (Audio Devices, issue #86)", () => {
     expect(within(entry).getByText(t("capture.hint_loopback"))).toBeInTheDocument();
   });
 
-  it("lists each output device in developer mode only, and keeps the choice outside it (issue #193)", async () => {
+  it("lists each output device (issue #193)", async () => {
     const { calls } = start("#/devices");
     const entry = await deviceEntry(/WH-1000XM5/);
     const select = within(entry).getByLabelText(t("capture.mode"));
-    await within(select).findByRole("group", { name: t("capture.virtual") });
-    expect(within(select).queryByRole("group", { name: t("capture.output") })).toBeNull();
-
-    const settings = (await mock!.call("state.snapshot")) as { settings: Record<string, unknown> };
-    await mock!.call("settings.set", { settings: { ...settings.settings, developer_mode: true } });
-    const output = await within(select).findByRole("group", { name: t("capture.output") });
-    // Each device once: the virtual ones stay under Virtual Device
-    expect(within(output).getAllByRole("option").map((o) => o.textContent)).toEqual(["Speakers (Realtek(R) Audio)"]);
+    const output = () => within(select).getByRole("group", { name: t("capture.sound_devices") });
+    // Each device once after the default: the virtual ones stay under Virtual Device
+    await waitFor(() =>
+      expect(within(output()).getAllByRole("option").map((o) => o.textContent)).toEqual([
+        t("capture.loopback_default", "Speakers (Realtek(R) Audio)"),
+        "Speakers (Realtek(R) Audio)",
+      ]),
+    );
     calls.length = 0;
     fireEvent.change(select, { target: { value: "output:{0.0.0.00000000}.{speakers}" } });
     await waitFor(() => expect(saves(calls)).toHaveLength(1));
@@ -1138,25 +1185,13 @@ describe("a device's capture source (Audio Devices, issue #86)", () => {
     expect(await within(entry).findByText(t("capture.hint_output"))).toBeInTheDocument();
     // Never made the default output
     expect(within(entry).queryByRole("switch", { name: (n) => n.startsWith(t("capture.auto_switch")) })).toBeNull();
-
-    // Developer mode off: what streams (System Loopback) is shown, and the
-    // profile keeps its choice
-    calls.length = 0;
-    await mock!.call("settings.set", { settings: { ...settings.settings, developer_mode: false } });
-    await waitFor(() => expect(select).toHaveValue("loopback"));
-    expect(within(select).queryByRole("group", { name: t("capture.output") })).toBeNull();
-    expect(within(entry).getByText(t("capture.hint_loopback"))).toBeInTheDocument();
-    expect(saves(calls)).toHaveLength(0);
-    const after = (await mock!.call("state.snapshot")) as { profiles: { name: string; capture_mode: string }[] };
-    expect(after.profiles.find((x) => x.name === "WH-1000XM5 (LDAC)")?.capture_mode).toBe("output");
   });
 
   it("shows a chosen output device that is not there as not connected (issue #193)", async () => {
     // Saved before the screen opens (the Codecs screen, another window)
     start("#/home");
     await screen.findAllByRole("button", { name: "Connect" });
-    const snap = (await mock!.call("state.snapshot")) as { profiles: { name: string }[]; settings: Record<string, unknown> };
-    await mock!.call("settings.set", { settings: { ...snap.settings, developer_mode: true } });
+    const snap = (await mock!.call("state.snapshot")) as { profiles: { name: string }[] };
     const p = snap.profiles.find((x) => x.name === "WH-1000XM5 (LDAC)")!;
     await mock!.call("profile.save", {
       profile: { ...p, capture_mode: "output", audio_device_id: "{gone}", audio_device_name: "USB Speakers" },
@@ -1166,7 +1201,7 @@ describe("a device's capture source (Audio Devices, issue #86)", () => {
     await waitFor(() => expect(document.querySelector(".device-entry")).not.toBeNull());
     const entry = await deviceEntry(/WH-1000XM5/);
     const select = within(entry).getByLabelText(t("capture.mode"));
-    const output = await within(select).findByRole("group", { name: t("capture.output") });
+    const output = await within(select).findByRole("group", { name: t("capture.sound_devices") });
     await waitFor(() => expect(select).toHaveValue("output:{gone}"));
     expect(within(output).getByRole("option", { name: t("capture.volume_sync_missing", "USB Speakers") })).toBeInTheDocument();
   });

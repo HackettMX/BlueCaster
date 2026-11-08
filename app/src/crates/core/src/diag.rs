@@ -279,7 +279,7 @@ const RULES: &[Rule] = &[
     rule(BT, Prefix, "HCI init took < 500 ms", Step::Btstack, A::Warning, D::Whole),
     rule(BT, Prefix, "Realtek firmware NOT loaded", Step::Btstack, A::Warning, D::Whole),
     rule(BT, Prefix, "firmware file missing: ", Step::Btstack, A::Warning, D::Whole),
-    rule(BT, Contains, "needs a firmware download that is not implemented", Step::Btstack, A::Warning, D::Whole),
+    rule(BT, Prefix, NO_LOADER, Step::Btstack, A::Warning, D::Whole),
     rule(BT, Prefix, "could not open the Bluetooth adapter", Step::Btstack, A::Failed, D::Whole),
     rule(BT, Prefix, "HCI initialization failed", Step::Btstack, A::Failed, D::Whole),
     rule(BT, Prefix, "HCI initialization timed out", Step::Btstack, A::Failed, D::Whole),
@@ -324,6 +324,10 @@ const RULES: &[Rule] = &[
     rule(STREAM, Prefix, "reconnected on attempt ", Step::Link, A::Warning, D::Whole),
 ];
 
+/// bt_host's warning for a MediaTek / Qualcomm / Atheros controller no loader
+/// of ours ran for
+const NO_LOADER: &str = "no firmware loader ran for this ";
+
 /// Adapter and controller lines kept for the diagnostics (target, message
 /// prefix: a newer line with the same prefix replaces the older one)
 const ADAPTER_LINES: &[(&str, &str)] = &[
@@ -337,7 +341,10 @@ const ADAPTER_LINES: &[(&str, &str)] = &[
     (BT, "HCI init took < 500 ms"),
     (BT, "Intel "),
     (BT, "Broadcom "),
-    (BT, "this vendor needs a firmware download"),
+    (BT, NO_LOADER),
+    (BT, "MediaTek controller: "),
+    (BT, "Qualcomm controller: "),
+    (BT, "Realtek controller: "),
 ];
 
 fn target_matches(target: &str, prefix: &str) -> bool {
@@ -568,6 +575,10 @@ impl ConnectionFlow {
             return;
         };
         self.adapter_lines.retain(|l| !l.starts_with(prefix));
+        // A loader that ran makes an earlier run's "no loader" line stale
+        if prefix.ends_with(" controller: ") {
+            self.adapter_lines.retain(|l| !l.starts_with(NO_LOADER));
+        }
         self.adapter_lines.push(message.to_string());
         if self.adapter_lines.len() > MAX_ADAPTER_LINES {
             self.adapter_lines.remove(0);
@@ -1736,6 +1747,20 @@ mod tests {
 
     fn status(f: &ConnectionFlow, s: Step) -> StepStatus {
         f.session().step(s).status
+    }
+
+    #[test]
+    fn a_loader_that_ran_clears_the_no_loader_warning() {
+        let mut f = ConnectionFlow::new();
+        let warn = "no firmware loader ran for this MediaTek controller; it runs the firmware it has";
+        let start = "stream: device 00:1A:7D:DA:71:13 codec Some(Sbc) quality High bit depth None rate None source SystemLoopback";
+        feed(&mut f, &[(1000, STREAM, Level::INFO, start), (1010, APP, Level::WARN, warn)]);
+        assert_eq!(status(&f, Step::Btstack), StepStatus::Warning);
+        assert!(f.adapter_lines().iter().any(|l| l == warn));
+        // The next run's loader (#86: the warning showed although it worked)
+        feed(&mut f, &[(2000, APP, Level::INFO, "MediaTek controller: firmware running already")]);
+        assert!(!f.adapter_lines().iter().any(|l| l.starts_with(NO_LOADER)), "{:?}", f.adapter_lines());
+        assert!(f.adapter_lines().iter().any(|l| l == "MediaTek controller: firmware running already"));
     }
 
     #[test]

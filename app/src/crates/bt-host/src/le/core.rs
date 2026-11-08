@@ -270,6 +270,9 @@ pub struct LeCore {
     devices: Vec<LeDevice>,
     scan_results: Vec<LeScanResult>,
     scanning: bool,
+    /// Counts the LE Audio advertisers a scan listed (HostApp wakes the
+    /// classic scan's waiters on a change: the list shows them at once)
+    scan_found: u64,
     connect: Option<ConnectAttempt>,
     /// By RPA
     rpa_cache: HashMap<[u8; 6], RpaEntry>,
@@ -705,11 +708,23 @@ impl<'a> LeCtx<'a> {
     // ======================================================================
 
     pub(crate) fn start_scan(&mut self) {
-        tracing::debug!("LE Audio: scan start (active, interval / window 0x0030)");
+        self.start_scan_with(0x0030, 0x0030);
+    }
+
+    /// Active scan with `interval` / `window` (0.625 ms units): a window
+    /// shorter than the interval leaves the radio to a classic inquiry
+    /// running beside it
+    pub(crate) fn start_scan_with(&mut self, interval: u16, window: u16) {
+        tracing::debug!("LE Audio: scan start (active, interval 0x{interval:04X}, window 0x{window:04X})");
         self.core.scan_results.clear();
         self.core.scanning = true;
-        self.stack.le_set_scan_params(true, 0x0030, 0x0030, 0);
+        self.stack.le_set_scan_params(true, interval, window, 0);
         self.stack.le_start_scan();
+    }
+
+    /// The running scan's advertisers so far
+    pub(crate) fn scan_results(&self) -> Vec<LeScanResult> {
+        self.core.scan_results.clone()
     }
 
     pub(crate) fn stop_scan(&mut self) -> Vec<LeScanResult> {
@@ -727,7 +742,9 @@ impl<'a> LeCtx<'a> {
         if !self.core.scanning {
             return;
         }
-        let addr = LeAddr { addr: r.addr, addr_type: if r.extended { r.addr_type & 0x01 } else { r.addr_type } };
+        // 0x02 / 0x03: an identity the controller resolved (also in legacy
+        // reports, which BTstack makes of extended ones with legacy PDUs)
+        let addr = LeAddr { addr: r.addr, addr_type: r.addr_type & 0x01 };
         let (idx, fresh) = match self.core.scan_results.iter().position(|e| e.addr == addr) {
             Some(i) => (i, false),
             None => {
@@ -741,17 +758,7 @@ impl<'a> LeCtx<'a> {
         if res.identity.is_none() {
             res.identity = identity;
         }
-        let (scan_rsp, connectable) = if r.extended {
-            (r.event_type & 0x08 != 0, r.event_type & 0x01 != 0)
-        } else {
-            (r.event_type == 4, r.event_type == 0 || r.event_type == 1)
-        };
-        if scan_rsp {
-            res.scan_rsp = r.data.to_vec();
-        } else {
-            res.adv = r.data.to_vec();
-            res.connectable = connectable;
-        }
+        take_report(&mut res, r);
         res.rssi = r.rssi;
         let was_le_audio = res.le_audio;
         let (adv, rsp) = (res.adv.clone(), res.scan_rsp.clone());
@@ -759,6 +766,7 @@ impl<'a> LeCtx<'a> {
         parse_ad(&mut res, &rsp);
         self.each_module(|m, ctx| m.on_scan_result(ctx, &mut res, r.data));
         if (fresh || !was_le_audio) && res.le_audio {
+            self.core.scan_found += 1;
             tracing::info!(
                 "LE Audio: found {} ({}, type {}) RSSI {}{}{}{}",
                 if res.name.is_empty() { "?" } else { res.name.as_str() },
@@ -1458,6 +1466,35 @@ fn poll_disconnected(ctx: &mut LeCtx<'_>, id: LeDeviceId, ticks: u32, done: LeDo
     ctx.run_after(20, Box::new(move |ctx| poll_disconnected(ctx, id, ticks + 1, done)));
 }
 
+/// The report's data into `r`: advertising data or scan response, the
+/// parts of chained extended data joined
+fn take_report(res: &mut LeScanResult, r: &events::AdvReport<'_>) {
+    let (scan_rsp, connectable) = if r.extended {
+        (r.event_type & 0x08 != 0, r.event_type & 0x01 != 0)
+    } else {
+        (r.event_type == 4, r.event_type == 0 || r.event_type == 1)
+    };
+    // Extended advertising data may come in several reports (data
+    // status 01: more follows): the parts are joined, as a new report
+    // that starts mid-way through an AD structure would not parse
+    let more = r.extended && (r.event_type >> 5) & 0x03 == 0x01;
+    let continued = if scan_rsp { res.rsp_more } else { res.adv_more };
+    let target = if scan_rsp { &mut res.scan_rsp } else { &mut res.adv };
+    if continued {
+        target.extend_from_slice(r.data);
+    } else {
+        *target = r.data.to_vec();
+    }
+    if scan_rsp {
+        res.rsp_more = more;
+    } else {
+        res.adv_more = more;
+        if !continued {
+            res.connectable = connectable;
+        }
+    }
+}
+
 /// Fills the parsed fields of `r` from AD data (v1 parse_ad)
 fn parse_ad(r: &mut LeScanResult, data: &[u8]) {
     let add_uuid = |r: &mut LeScanResult, u: u16| {
@@ -1725,6 +1762,7 @@ impl LeCore {
             devices: Vec::new(),
             scan_results: Vec::new(),
             scanning: false,
+            scan_found: 0,
             connect: None,
             rpa_cache: HashMap::new(),
             gatt: GattClient::new(),
@@ -1778,6 +1816,9 @@ impl LeCore {
         }
         stack.le_init(&path.to_string_lossy());
         tracing::info!("LE Audio: bonds in {}", path.display());
+        if let Some(imported) = self.config.as_ref().and_then(|c| c.imported_bonds_file.as_deref()) {
+            crate::le_import::apply(stack, imported);
+        }
 
         // The modules (once per BtHost)
         if let Some(cfg) = self.config.take() {
@@ -1871,6 +1912,11 @@ impl LeCore {
         self.queue = None;
         self.status = None;
         tracing::info!("LE Audio: stopped");
+    }
+
+    /// Changes when a scan lists another LE Audio advertiser
+    pub(crate) fn scan_found(&self) -> u64 {
+        self.scan_found
     }
 
     pub(crate) fn on_hci(&mut self, stack: &Stack, packet: &[u8]) {
@@ -2016,6 +2062,38 @@ pub type SharedSduQueue = Arc<Mutex<SduQueue>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chained_extended_advertising_data_is_joined() {
+        // CAS service data, then the name; split across two reports (data
+        // status 01, then complete) in the name's middle
+        const AD: [u8; 12] = [3, 0x16, 0x53, 0x18, 7, 0x09, b'E', b'a', b'r', b'F', b'u', b'n'];
+        let report = |event_type: u16, data: &'static [u8]| events::AdvReport {
+            event_type,
+            addr_type: 1,
+            addr: [1, 2, 3, 4, 5, 6],
+            rssi: -50,
+            data,
+            extended: true,
+        };
+        let mut r = LeScanResult::default();
+        // Connectable undirected, more data follows
+        take_report(&mut r, &report(0x0001 | 0x20, &AD[..7]));
+        assert!(r.adv_more && r.connectable);
+        take_report(&mut r, &report(0x0001, &AD[7..]));
+        assert!(!r.adv_more);
+        assert_eq!(r.adv, AD);
+        let adv = r.adv.clone();
+        parse_ad(&mut r, &adv);
+        assert!(r.le_audio);
+        assert_eq!(r.name, "EarFun");
+        // The next advertising event replaces the data
+        take_report(&mut r, &report(0x0001, &AD[..4]));
+        assert_eq!(r.adv, AD[..4]);
+        // A scan response leaves the advertising data alone
+        take_report(&mut r, &report(0x0001 | 0x08, &AD[4..]));
+        assert_eq!((r.adv.as_slice(), r.scan_rsp.as_slice()), (&AD[..4], &AD[4..]));
+    }
 
     #[test]
     fn advertising_data_is_parsed_as_v1() {

@@ -290,10 +290,10 @@ JSON-Ergebnis. Das Auflisten der Adapter und ihrer Treiber benötigt keine Admin
   die Einstellung `auto_codec` eingeschaltet ist (Codecs > Automatisch den unterstützten Codec mit der
   höchsten Qualität wählen, seit Schema 5 eine Einstellung für alle Geräte); der für das Gerät
   gewählte Codec bleibt in seinem Profil für den Fall erhalten, dass sie aus ist
-- Folgt der Codec-Reihenfolge des Geräts, wie der Benutzer seine Karten bei ausgeschalteter
-  automatischer Auswahl gezogen hat (`codec_order` des Profils; `codec::AutoOrder`, leer
+- Folgt der Codec-Reihenfolge des Geräts, wie der Benutzer seine Karten
+  gezogen hat (`codec_order` des Profils; `codec::AutoOrder`, leer
   für höchste Klangqualität zuerst), für die Wahl der Automatik und für das Ausweichen
-  eines gewählten Codecs; bei automatischer Auswahl die Standardreihenfolge. FastStream und Opus
+  eines gewählten Codecs, auch bei automatischer Auswahl. FastStream und Opus
   05 sind nie die Wahl der Automatik und nie ein Ausweichcodec. (Die Betas von 2.0.2 hatten eine
   Reihenfolge für alle Geräte, `auto_order` in settings.json, die jetzt ignoriert wird.)
 - Wählt die Abtastrate für die aptX-Familie (44,1 / 48 kHz aus den Raten, die die Gegenseite

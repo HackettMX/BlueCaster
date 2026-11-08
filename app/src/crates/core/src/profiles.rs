@@ -62,6 +62,9 @@ fn headset_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Err
 fn is_true(b: &bool) -> bool {
     *b
 }
+fn is_false(b: &bool) -> bool {
+    !*b
+}
 fn is_zero(n: &u8) -> bool {
     *n == 0
 }
@@ -102,7 +105,7 @@ pub struct Profile {
     pub bit_depth: u32,
     /// loopback, virtual, output, app. "output": loopback of the output
     /// device `audio_device_id` (Windows' endpoint ID) whichever is the
-    /// default, set in developer mode (issue #193)
+    /// default (issue #193)
     #[serde(default = "loopback")]
     pub capture_mode: String,
     pub audio_device_id: String,
@@ -161,13 +164,11 @@ pub struct Profile {
     /// configuration either way.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub le_low_latency: bool,
-    /// Headset mode (developer mode only, [`Settings::headset_mic_in_force`]):
-    /// "off" | "on" | "auto" ([`HeadsetMic`]; written only when not off).
-    /// The headphones' microphone is rendered to `mic_device_id`; classic
-    /// devices play over the voice link meanwhile (Auto: while an app
-    /// records from its capture side), LE Audio keeps its preset
-    ///
-    /// [`Settings::headset_mic_in_force`]: crate::settings::Settings::headset_mic_in_force
+    /// Headset mode: "off" | "on" | "auto" ([`HeadsetMic`]; written only
+    /// when not off). The headphones' microphone is rendered to
+    /// `mic_device_id`; classic devices play over the voice link meanwhile
+    /// (Auto: while an app records from its capture side), LE Audio keeps
+    /// its preset
     #[serde(default = "headset_off", deserialize_with = "headset_mode", skip_serializing_if = "is_headset_off")]
     pub headset_mic: String,
     /// The render endpoint id that receives the microphone (a virtual
@@ -177,16 +178,20 @@ pub struct Profile {
     /// Its friendly name, for display while the device is missing
     #[serde(skip_serializing_if = "String::is_empty")]
     pub mic_device_name: String,
+    /// The microphone muted from Home's or the flyout's chip: the voice link
+    /// stays closed as with headset mode off, `headset_mic` is kept for
+    /// unmuting (written only when muted)
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mic_muted: bool,
     /// The settings of the other codecs, by codec key, as they were last
     /// chosen: choosing one of them again brings them back (the codec in
     /// use has its own in the fields above)
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub codec_settings: BTreeMap<String, CodecValues>,
     /// The device's codec order (codec keys), as its cards were dragged on
-    /// the Codecs screen with Auto-select off (issue #86 round 8): Auto, and
-    /// a chosen codec the device does not offer, take the first one in it
-    /// the device offers. Empty: highest sound quality first. Under
-    /// Auto-select it is kept but not used ([`Profile::as_auto`]).
+    /// the Codecs screen (issue #86 round 8): Auto, under Auto-select too,
+    /// and a chosen codec the device does not offer, take the first one in
+    /// it the device offers. Empty: highest sound quality first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub codec_order: Vec<String>,
     #[serde(flatten)]
@@ -230,6 +235,7 @@ impl Default for Profile {
             headset_mic: headset_off(),
             mic_device_id: String::new(),
             mic_device_name: String::new(),
+            mic_muted: false,
             codec_settings: BTreeMap::new(),
             codec_order: Vec::new(),
             other: BTreeMap::new(),
@@ -373,8 +379,7 @@ impl Profile {
             sbc_channel_mode: d.sbc_channel_mode,
             unlisted_options: false,
             codec_forced: false,
-            // Auto-select's order is the default one
-            codec_order: Vec::new(),
+            // The device's own order stays: Auto takes the first card offered
             ..self.clone()
         }
     }
@@ -445,23 +450,24 @@ impl Profile {
         same == *new && self.bitpools() != new.bitpools()
     }
 
-    /// `new` is this profile with another headset mode or microphone output
-    /// and nothing else changed
+    /// `new` is this profile with another headset mode, microphone output
+    /// or mute and nothing else changed
     pub fn only_headset_mic_differs(&self, new: &Profile) -> bool {
         let same = Profile {
             headset_mic: new.headset_mic.clone(),
             mic_device_id: new.mic_device_id.clone(),
             mic_device_name: new.mic_device_name.clone(),
+            mic_muted: new.mic_muted,
             ..self.clone()
         };
         same == *new
-            && (&self.headset_mic, &self.mic_device_id, &self.mic_device_name)
-                != (&new.headset_mic, &new.mic_device_id, &new.mic_device_name)
+            && (&self.headset_mic, &self.mic_device_id, &self.mic_device_name, self.mic_muted)
+                != (&new.headset_mic, &new.mic_device_id, &new.mic_device_name, new.mic_muted)
     }
 
-    /// The saved headset mode
+    /// The headset mode as saved, Off while the microphone is muted
     pub fn headset_mic_mode(&self) -> HeadsetMic {
-        HeadsetMic::parse(&self.headset_mic)
+        if self.mic_muted { HeadsetMic::Off } else { HeadsetMic::parse(&self.headset_mic) }
     }
 
     /// Why headset mode must not run with this profile's microphone output:
@@ -516,6 +522,8 @@ impl Profile {
             unlisted_options: self.unlisted_options,
             // The setting's, filled in by whoever starts the stream
             experimental_codecs: true,
+            // Settings' developer_mode, filled in the same way
+            developer_codecs: false,
             auto_order: self.order(),
             quality: Quality::from_key(&self.quality),
             abr: self.abr,
@@ -547,8 +555,8 @@ impl Profile {
             le: self
                 .le_audio
                 .then(|| bt_host::LeRequest { low_latency: self.le_low_latency, ..bt_host::LeRequest::default() }),
-            // Developer mode only: whoever starts the stream decides
-            // (Settings::headset_mic_in_force)
+            // Whoever starts the stream decides (an output chosen, the
+            // app's start_profile)
             headset_mic: HeadsetMic::Off,
             mic_output: None,
         })
@@ -883,7 +891,8 @@ mod tests {
         assert_eq!(&order.codecs()[..2], &[CodecKind::SbcXq, CodecKind::Sbc]);
         assert_eq!(order.codecs().len(), CodecKind::AUTO_PRIORITY.len());
         // Auto-select: the default order
-        assert!(p.as_auto().to_request(1023).unwrap().auto_order.is_default());
+        // Under Auto-select too
+        assert_eq!(p.as_auto().to_request(1023).unwrap().auto_order, order);
         assert_eq!(serde_json::to_value(&p).unwrap()["codec_order"], serde_json::json!(["sbcxq", "sbc"]));
         let plain = Profile { codec_order: Vec::new(), ..p };
         assert!(plain.to_request(1023).unwrap().auto_order.is_default());
@@ -1032,6 +1041,14 @@ mod tests {
         }
         let auto = Profile { headset_mic: "auto".into(), ..on.clone() };
         assert_eq!(serde_json::to_value(&auto).unwrap()["headset_mic"], "auto");
+        // Muted: Off in force, the mode kept for unmuting; only a change
+        // of the microphone
+        assert!(serde_json::to_value(&auto).unwrap().get("mic_muted").is_none());
+        let muted = Profile { mic_muted: true, ..auto.clone() };
+        assert_eq!(muted.headset_mic_mode(), HeadsetMic::Off);
+        assert!(auto.only_headset_mic_differs(&muted));
+        let back: Profile = serde_json::from_value(serde_json::to_value(&muted).unwrap()).unwrap();
+        assert!(back.mic_muted && back.headset_mic == "auto");
     }
 
     #[test]

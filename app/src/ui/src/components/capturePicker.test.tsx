@@ -26,8 +26,8 @@ afterEach(() => {
 });
 
 const DEVICES = [
-  { id: "spk", name: "Speakers", is_default: true, is_virtual: false, mix_rate: null, mix_channels: null, mix_bits: null },
-  { id: "cable", name: "CABLE Input", is_default: false, is_virtual: true, mix_rate: null, mix_channels: null, mix_bits: null },
+  { id: "spk", name: "Speakers", is_default: true, is_virtual: false, mix_rate: null, mix_channels: null, mix_bits: null, capture_name: null },
+  { id: "cable", name: "CABLE Input", is_default: false, is_virtual: true, mix_rate: null, mix_channels: null, mix_bits: null, capture_name: null },
 ];
 const APPS = [{ exe: "Spotify.exe", name: "Spotify" }];
 
@@ -45,13 +45,12 @@ describe("choices", () => {
     expect(captureChoices(sampleProfile(), DEVICES, APPS, false).apps).toEqual([]);
   });
 
-  it("offers the other output devices in developer mode only (issue #193)", () => {
+  it("offers the other output devices (issue #193)", () => {
     const p = sampleProfile();
-    expect(captureChoices(p, DEVICES, APPS, true).output).toEqual([]);
     // Each device once: the virtual one stays under Virtual Device
-    expect(captureChoices(p, DEVICES, APPS, true, true).output).toEqual([{ value: "output:spk", label: "Speakers" }]);
+    expect(captureChoices(p, DEVICES, APPS, true).output).toEqual([{ value: "output:spk", label: "Speakers" }]);
     const gone = sampleProfile({ capture_mode: "output", audio_device_id: "usb", audio_device_name: "USB Speakers" });
-    expect(captureChoices(gone, DEVICES, APPS, true, true).output[0]).toEqual({
+    expect(captureChoices(gone, DEVICES, APPS, true).output[0]).toEqual({
       value: "output:usb",
       label: "USB Speakers (not connected)",
     });

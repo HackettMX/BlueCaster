@@ -92,7 +92,8 @@ pub struct State {
     /// offset): what a name request for it needs
     pub discovered_paging: Vec<([u8; 6], u8, u16)>,
     /// Counts the changes to `discovered` worth showing (a new device, a
-    /// name): the scan reports the list on each one
+    /// name), and the LE Audio advertisers an LE scan beside it listed: the
+    /// scan reports the list on each one
     pub found_rev: u64,
     /// The user stopped the scan (or a connection is starting): its
     /// inquiry and name requests end

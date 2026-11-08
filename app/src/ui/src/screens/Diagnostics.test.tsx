@@ -237,6 +237,7 @@ describe("Diagnostics", () => {
       "Stream",
       "Radio",
       "Audio capture",
+      "Microphone",
       "Connection Flow",
       "Log",
     ];
@@ -384,7 +385,7 @@ describe("Diagnostics", () => {
     ).toHaveTextContent(/\d/);
     expect(
       screen.getByText("Output Source").closest(".lq-row"),
-    ).toHaveTextContent("System Loopback");
+    ).toHaveTextContent("Default device");
     expect(view.container.querySelector(".lq-group .hint")).toHaveTextContent(
       /^Output source format: \d+ Hz/,
     );
@@ -495,5 +496,40 @@ describe("Diagnostics", () => {
     expect(rows()).toHaveLength(4);
     expect(view.container.querySelectorAll("path.band-ap")).toHaveLength(3);
     fireEvent.click(screen.getByRole("radio", { name: "2.4 GHz" }));
+  });
+
+  it("records the microphone, plays it back and ends the test with the tab", async () => {
+    const { core, calls } = start();
+    await screen.findByRole("heading", { level: 1, name: "Diagnostics" });
+    await waitFor(() => expect(core.state.snap).not.toBeNull());
+    fireEvent.click(screen.getByRole("tab", { name: "Microphone" }));
+    // Nothing to record from yet
+    expect(screen.getByRole("button", { name: "Record" })).toBeDisabled();
+    await core.request("stream.start", {
+      profile: core.state.snap!.profiles[0].name,
+    });
+    await waitFor(() =>
+      expect(core.state.snap!.stream.state).toBe("streaming"),
+    );
+    expect(screen.getByRole("button", { name: "Play" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Record" }));
+    const stop = await screen.findByRole("button", { name: "Stop" });
+    await waitFor(() =>
+      expect(Number(screen.getByRole("meter").getAttribute("aria-valuenow"))).toBeGreaterThan(0),
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    fireEvent.click(stop);
+    const play = await screen.findByRole("button", { name: "Play" });
+    await waitFor(() => expect(play).toBeEnabled());
+    fireEvent.click(play);
+    await waitFor(() => expect(screen.getByRole("meter")).toHaveClass("playing"));
+    fireEvent.click(screen.getByRole("tab", { name: "Log" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "mic_test.end")).toBe(true));
+  });
+
+  it("shows why the test cannot run", async () => {
+    const { core } = start();
+    await waitFor(() => expect(core.state.snap).not.toBeNull());
+    await expect(core.request("mic_test.record")).rejects.toMatchObject({ code: "mic_test.not_streaming" });
   });
 });

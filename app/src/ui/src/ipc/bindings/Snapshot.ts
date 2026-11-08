@@ -15,8 +15,8 @@ import type { VerboseState } from "./VerboseState";
  */
 export type Snapshot = { adapter: AdapterState, devices: Array<Device>, scanning: boolean, 
 /**
- * The scan's LE Audio part runs (status.le_scanning): after the
- * classic inquiry, with LE Audio on
+ * Only the scan's LE Audio part runs (status.le_scanning): after a
+ * classic inquiry shorter than the LE scan, with LE Audio on
  */
 le_scanning: boolean, stream: StreamStatus, profiles: Array<Profile>, active_profile: string | null, settings: Settings, update: UpdateState, 
 /**

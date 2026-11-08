@@ -11,7 +11,7 @@ has_toc: false
 适用于 Windows 的 Bluetooth A2DP 音频串流工具，支持全部主流编解码器。
 {: .fs-6 .fw-300 }
 
-使用处于 WinUSB 模式的 USB Bluetooth 适配器，以 **LHDC V5、LDAC、aptX Adaptive、aptX HD、aptX、aptX Low Latency、AAC、SBC** 以及（实验性的）**Opus** 和 PipeWire 的 **Opus 05** 串流系统音频——无需内核驱动，也无需测试签名。
+把普通的 Bluetooth 适配器（廉价的 USB 适配器，或许多笔记本电脑的内置适配器）从 Windows 只给的基础编解码器，变成 Hi-Fi 发射器：**LHDC V5、LDAC 和 aptX Adaptive** 最高 96 kHz（LHDC V5 最高 192 kHz），以及 **aptX、AAC、SBC XQ 和 SBC**。实验性：**aptX HD、aptX Low Latency、Opus、FastStream 和 LE Audio（LC3）**。BlueCaster 会自行设置适配器，一键即可交还给 Windows（[工作原理](architecture)）。
 
 ![BlueCaster's Codecs screen, streaming LDAC 990 kbps / 48 kHz to Sony WH-1000XM4](../images/app_sample.png)
 
@@ -54,7 +54,7 @@ has_toc: false
 | SBC XQ | ❌ | ❌ | ✅ | ✅（SBC 允许双声道且 bitpool ≥ 29 的接收端） |
 | SBC | ✅ | ✅ | ✅ | ✅ |
 | FastStream | ❌ | ❌ | ✅ | 🧪 实验性（仅音乐，需明确选择） |
-| Opus 05（PipeWire 自有的 Opus） | ❌ | ❌ | ✅ PipeWire 0.3.57+（`opus_05`，仅限 PipeWire 设备） | 🧪 实验性（需明确选择） |
+| Opus 05（PipeWire 自有的 Opus） | ❌ | ❌ | ✅ PipeWire 0.3.57+（`opus_05`，仅限 PipeWire 设备） | 🧪 实验性（需明确选择，仅限开发者模式） |
 | LC3（LE Audio，BAP 单播） | ❌ | ✅ 仅限 Bluetooth 硬件和驱动支持 LE Audio 的 PC | ✅ PipeWire BAP `lc3`（BlueZ LE Audio） | 🧪 实验性（设备的 LE Audio 条目；游戏耳机使用 GMAP 低延迟；需要支持 ISO 的 Bluetooth 5.2 适配器，[使用方法](usage#le-audio)） |
 
 ✅ 支持 · 🧪 实验性 · ❌ 不支持。所有列均指发送端（PC → 耳机）。“内置”指不使用 BlueCaster 时操作系统自带的 Bluetooth 音频；Ubuntu 一列为 Ubuntu 26.04 的 PipeWire 编解码器集（`libspa-0.2-bluetooth`）。
@@ -111,13 +111,13 @@ BlueCaster 通过 WASAPI 捕获音频，提供三种模式：
 
 | 模式 | 说明 | 用途 |
 |:-----|:------------|:---------|
-| **系统环回** | 通过 WASAPI 环回捕获默认播放设备输出的全部系统音频 | 设置简单——所有声音都会被串流 |
+| **默认设备** | 捕获默认播放设备输出的全部系统音频 | 设置简单——所有声音都会被串流 |
 | **虚拟设备** | 从用户选择的虚拟音频设备（如 VB-CABLE、VoiceMeeter）捕获 | 将特定应用的声音送到 Bluetooth，其他声音仍从扬声器播放 |
 | **应用程序** | 仅捕获某一个应用播放的声音，且是经过该应用自身处理之后的声音（Windows 11 / Windows 10 2004+） | 发送单个应用，或系统级音效应用（均衡器、音效增强）的输出 |
 
 在**虚拟设备**模式下，BlueCaster 可以将 Windows 默认播放设备切换为所选虚拟设备（**连接期间设为 Windows 默认输出设备**），然后捕获其环回输出。输出到该虚拟设备的应用将通过 Bluetooth 串流。停止串流时，会恢复之前的默认设备。
 
-系统环回不会把声音从默认播放设备上“拿走”：声音会同时在该设备和 Bluetooth 上播放。如果无法打开所选的虚拟设备，连接会改为发送系统音频，并给出提示。请参阅[捕获模式](usage#capture-modes)。
+**默认设备**源不会把声音从默认播放设备上“拿走”：声音会同时在该设备和 Bluetooth 上播放。如果无法打开所选的虚拟设备，连接会改为发送系统音频，并给出提示。请参阅[捕获模式](usage#capture-modes)。
 
 ## 工作原理
 
@@ -143,7 +143,7 @@ BlueCaster 完全绕过 Windows 的 Bluetooth 堆栈。它通过 WinUSB 直接�
 
 ## 功能
 
-- **多编解码器**：LHDC V5、LDAC、aptX Adaptive、aptX HD、aptX、aptX Low Latency、AAC、SBC XQ、SBC 以及（实验性的）Opus / Opus 05 / FastStream，自动协商
+- **多编解码器**：LHDC V5、LDAC、aptX Adaptive、aptX、AAC、SBC XQ、SBC 以及（实验性的）aptX HD / aptX Low Latency / Opus / Opus 05 / FastStream，自动协商
 - **LE Audio（实验性）**：通过 LC3 向 LE Audio 耳机传输（BAP 单播、一对耳机的左右两只、耳机音量、媒体按键、GMAP 低延迟）。需要支持 Bluetooth 5.2 等时通道的适配器；只在 Bluetooth 模拟器上测试过，尚未在真实的 LE Audio 耳机上验证（请参阅[使用方法](usage#le-audio)）
 - **三种捕获模式**：系统环回、虚拟音频设备路由，或单个应用的输出
 - **窗口、托盘和 CLI**：用于设置和诊断的窗口、用于日常连接的托盘浮出窗口和菜单，以及命令行（请参阅[使用方法](usage)）

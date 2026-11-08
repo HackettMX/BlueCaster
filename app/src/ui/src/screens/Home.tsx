@@ -19,17 +19,19 @@ import {
   ErrorPanel,
   FirmwareDownload,
   LinkSparkline,
+  MIC_NOTES,
   openFirmwareFolder,
   QualityIndicator,
   Ring,
   showsBattery,
   sourceText,
   statusText,
+  voiceCodecName,
   VolumeControl,
 } from "../components/stream";
-import { t } from "../i18n";
+import { t, tm } from "../i18n";
 import { IpcError, type AdapterInfo, type Snapshot, type StreamState } from "../ipc/types";
-import { CARD_ORDER, cardOrder, codecSpec } from "../lib/codecs";
+import { CARD_ORDER, cardOrder, codecSpec, offeredCodecs } from "../lib/codecs";
 import {
   audioEntries,
   codecsOnRequest,
@@ -38,7 +40,6 @@ import {
   entryOf,
   headsetMode,
   knownCodecs,
-  nextHeadsetMode,
   type AudioEntry,
   type HeadsetMode,
 } from "../lib/profile";
@@ -314,13 +315,13 @@ function DeviceCard(props: { entry: AudioEntry; onError: (e: unknown) => void })
               <span class="dot" aria-hidden="true" />
               <span>
                 {/* An error's text is in the panel above, with its fix */}
-                {live() ? statusText({ state: state(), message: stream().message }) : t("status.ready")}
+                {live() ? statusText({ ...stream(), state: state() }) : t("status.ready")}
               </span>
             </div>
             <HeadsetChip entry={props.entry} />
           </div>
           <Show when={live()}>
-            <CodecBadge picker={<CodecPicker entry={props.entry} />} />
+            <CodecBadge picker={<CodecPicker entry={props.entry} />} voice={false} />
           </Show>
           {/* The application it captures is not playing yet (the source is
               chosen on Audio Devices) */}
@@ -357,27 +358,40 @@ function DeviceCard(props: { entry: AudioEntry; onError: (e: unknown) => void })
   );
 }
 
-/** Headset mode at one click (developer mode, Home's card and the flyout):
- *  the microphone and Off / Auto / On, a click goes to the next one. Only
- *  for a device whose microphone output is chosen; it is set up on Codecs.
- *  Auto with no microphone link open is muted; the link's codec shows
- *  beside the codec (VoiceCodec). */
+/** The headset microphone's mute at one click (Home's card and the
+ *  flyout): a microphone icon, crossed out while muted, which closes the
+ *  microphone link as Off does and keeps the mode chosen on Audio Devices
+ *  (Auto / On). Only for a device with headset mode on and its microphone
+ *  output chosen. An icon alone keeps the card still as it switches (issue
+ *  #86); Auto with no microphone link open shows dimmed, and why the
+ *  microphone did not open (MIC_NOTES) shows on it, not as the card's
+ *  status. */
 export function HeadsetChip(props: { entry: AudioEntry }) {
   const app = useApp();
   const snap = () => app.core.state.snap!;
   const profile = () => props.entry.profile;
-  const shown = () => snap().settings.developer_mode && !!profile()?.mic_device_id;
-  const mode = () => headsetMode(profile()!);
-  const linked = () => {
+  const mode = (): HeadsetMode => (profile() ? headsetMode(profile()!) : "off");
+  const shown = () => !!profile()?.mic_device_id && mode() !== "off";
+  const muted = () => !!profile()?.mic_muted;
+  const ours = () => {
     const s = snap().stream;
-    return !!s.voice && s.state !== "idle" && s.profile === profile()?.name;
+    return s.state !== "idle" && s.profile === profile()?.name;
+  };
+  const linked = () => ours() && !!snap().stream.voice;
+  const note = () => {
+    const m = snap().stream.message;
+    return ours() && !muted() && MIC_NOTES.includes(m.key) ? tm(m) : null;
   };
   const [busy, setBusy] = createSignal(false);
-  const label = (m: HeadsetMode) => t(`ui.headset_mic_${m}`);
-  const describe = () => t("ui.headset_mic_cycle", label(mode()), label(nextHeadsetMode(mode())));
-  const cycle = async () => {
+  const action = () => t(muted() ? "ui.headset_mic_unmute" : "ui.headset_mic_mute");
+  // The voice codec while the microphone link is open: "Mute microphone (mSBC)"
+  const title = () => {
+    const v = linked() ? snap().stream.voice : null;
+    return note() ?? (v ? `${action()} (${voiceCodecName(v.codec)})` : action());
+  };
+  const toggle = async () => {
     setBusy(true);
-    await saveHeadsetMic(app, props.entry, { headset_mic: nextHeadsetMode(mode()) });
+    await saveHeadsetMic(app, props.entry, { mic_muted: !muted() });
     setBusy(false);
   };
   return (
@@ -385,14 +399,19 @@ export function HeadsetChip(props: { entry: AudioEntry }) {
       <button
         type="button"
         class="headset-chip"
-        classList={{ on: mode() !== "off", waiting: mode() === "auto" && !linked(), linked: linked() }}
-        aria-label={describe()}
-        title={describe()}
+        classList={{
+          on: !muted() && !note(),
+          muted: muted(),
+          waiting: !muted() && !note() && mode() === "auto" && !linked(),
+          linked: !muted() && linked(),
+          warn: !!note(),
+        }}
+        aria-label={action()}
+        title={title()}
         disabled={busy()}
-        onClick={() => void cycle()}
+        onClick={() => void toggle()}
       >
-        <Icon name="mic" />
-        <span>{label(mode())}</span>
+        <Icon name={note() ? "warning" : muted() ? "mic_off" : "mic"} />
       </button>
     </Show>
   );
@@ -415,12 +434,17 @@ export function CodecPicker(props: { entry: AudioEntry }) {
   const picked = () => pickedCodec(snap(), e(), autoAll(), order());
   // What it streams with; else Auto's pick, or the one used instead of a
   // codec it does not offer
-  const value = () => streamingCodec(snap(), e()) ?? picked() ?? (codec() === "auto" ? null : codec());
+  const value = () =>
+    streamingCodec(snap(), e()) ??
+    picked() ??
+    (codec() === "auto" || offeredCodecs([codec()], snap().settings.developer_mode).length === 0 ? null : codec());
   // A quick choice: what the device supports, never the codecs Codecs hides
   const choices = () => {
     const known = knownCodecs(snap().devices, e().address);
     const onRequest = codecsOnRequest(snap().devices, e().address);
-    const ids: string[] = order().filter((id) => codecShown(id, picked(), known, true, onRequest));
+    const ids: string[] = offeredCodecs(order(), snap().settings.developer_mode).filter((id) =>
+      codecShown(id, picked(), known, true, onRequest),
+    );
     const v = value();
     return v && !ids.includes(v) ? [v, ...ids] : ids;
   };

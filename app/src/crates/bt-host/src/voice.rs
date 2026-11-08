@@ -163,6 +163,18 @@ pub fn parse_sco(packet: &[u8]) -> Option<(u16, u8, &[u8])> {
     Some((head & 0x0FFF, ((head >> 12) & 0x03) as u8, payload))
 }
 
+/// The volume (AVRCP absolute volume, 0..127) as an HFP speaker gain
+/// (0..15): headphones play the voice link at their HFP gain, not at the
+/// A2DP volume
+pub fn speaker_gain(volume: u8) -> u8 {
+    ((u32::from(volume.min(127)) * 15 + 63) / 127) as u8
+}
+
+/// An HFP speaker gain (0..15) as a volume (0..127)
+pub fn gain_volume(gain: u8) -> u8 {
+    ((u32::from(gain.min(15)) * 127 + 7) / 15) as u8
+}
+
 /// The voice state on the BTstack thread
 #[derive(Default)]
 pub(crate) struct Voice {
@@ -196,6 +208,11 @@ impl Voice {
         let now = Instant::now();
         self.slc_since = Some(now);
         self.hf_activity = Some(now);
+    }
+
+    /// The ACL of the open audio connection (ours or the headphones')
+    pub fn audio_acl(&self) -> Option<u16> {
+        self.sco.map(|(_, acl)| acl)
     }
 
     /// Any HFP subevent: the headphones are talking
@@ -479,6 +496,21 @@ mod tests {
         assert_eq!(parse_sco(&p), Some((0x0123, 2, &[9u8, 8, 7][..])));
         assert_eq!(parse_sco(&[0x23, 0x01, 4, 1, 2]), None);
         assert_eq!(parse_sco(&[0x23]), None);
+    }
+
+    #[test]
+    fn volume_and_speaker_gain_map_both_ways() {
+        assert_eq!(speaker_gain(0), 0);
+        assert_eq!(speaker_gain(127), 15);
+        assert_eq!(speaker_gain(64), 8);
+        assert_eq!(speaker_gain(200), 15);
+        assert_eq!(gain_volume(0), 0);
+        assert_eq!(gain_volume(15), 127);
+        // A gain the headphones report reads back as the same gain, so
+        // their change is not sent back to them altered
+        for g in 0..=15 {
+            assert_eq!(speaker_gain(gain_volume(g)), g);
+        }
     }
 
     #[test]

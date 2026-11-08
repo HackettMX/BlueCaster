@@ -428,6 +428,8 @@ export function Dialog(props: {
   children: JSX.Element;
   /** Without these two the dialog only closes: what is in it applies at once */
   confirm?: string;
+  /** "shield" when confirming asks for administrator rights */
+  confirmIcon?: IconName;
   cancel?: string;
   danger?: boolean;
   busy?: boolean;
@@ -512,6 +514,7 @@ export function Dialog(props: {
                 {/* With the extra button, busy is the extra's work */}
                 <Button
                   kind={props.danger ? "danger" : props.extra ? "default" : "strong"}
+                  icon={props.confirmIcon}
                   busy={props.busy && !props.extra}
                   disabled={props.busy && !!props.extra}
                   onClick={() => props.onConfirm?.()}

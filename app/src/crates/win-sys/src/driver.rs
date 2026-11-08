@@ -37,18 +37,15 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Get_Parent, CM_LOCATE_DEVNODE_NORMAL, CM_Locate_DevNodeW, CM_REENUMERATE_SYNCHRONOUS, CM_Reenumerate_DevNode,
-    CMP_WaitNoPendingInstallEvents, CR_SUCCESS, DI_ENUMSINGLEINF, DI_FLAGSEX_ALLOWEXCLUDEDDRVS, DI_NEEDREBOOT,
-    DI_NEEDRESTART, DICS_FLAG_GLOBAL, DICS_PROPCHANGE, DIF_PROPERTYCHANGE, DIIDFLAG_NOFINISHINSTALLUI, DIREG_DEV,
-    DiInstallDevice, DiUninstallDevice, SP_CLASSINSTALL_HEADER, SP_DEVINFO_DATA, SP_DEVINSTALL_PARAMS_W,
-    SP_DRVINFO_DATA_V2_W, SP_DRVINFO_DETAIL_DATA_W, SP_PROPCHANGE_PARAMS, SPDIT_CLASSDRIVER, SPDRP_CLASSGUID,
-    SetupDiBuildDriverInfoList, SetupDiCallClassInstaller, SetupDiCreateDevRegKeyW, SetupDiDestroyDriverInfoList,
-    SetupDiEnumDriverInfoW, SetupDiGetDeviceInstallParamsW, SetupDiGetDriverInfoDetailW, SetupDiOpenDevRegKey,
-    SetupDiSetClassInstallParamsW, SetupDiSetDeviceInstallParamsW, SetupDiSetDeviceRegistryPropertyW,
-    SetupDiSetSelectedDriverW,
+    CR_SUCCESS, DI_ENUMSINGLEINF, DI_FLAGSEX_ALLOWEXCLUDEDDRVS, DI_NEEDREBOOT, DI_NEEDRESTART, DICS_FLAG_GLOBAL,
+    DICS_PROPCHANGE, DIF_PROPERTYCHANGE, DIIDFLAG_NOFINISHINSTALLUI, DIREG_DEV, DiInstallDevice, DiUninstallDevice,
+    SP_CLASSINSTALL_HEADER, SP_DEVINFO_DATA, SP_DEVINSTALL_PARAMS_W, SP_DRVINFO_DATA_V2_W, SP_DRVINFO_DETAIL_DATA_W,
+    SP_PROPCHANGE_PARAMS, SPDIT_CLASSDRIVER, SPDRP_CLASSGUID, SetupDiBuildDriverInfoList, SetupDiCallClassInstaller,
+    SetupDiCreateDevRegKeyW, SetupDiDestroyDriverInfoList, SetupDiEnumDriverInfoW, SetupDiGetDeviceInstallParamsW,
+    SetupDiGetDriverInfoDetailW, SetupDiOpenDevRegKey, SetupDiSetClassInstallParamsW, SetupDiSetDeviceInstallParamsW,
+    SetupDiSetDeviceRegistryPropertyW, SetupDiSetSelectedDriverW,
 };
-use windows::Win32::Foundation::{
-    ERROR_INVALID_DEVINST_NAME, ERROR_NO_MORE_ITEMS, ERROR_NO_SUCH_DEVINST, HWND, WAIT_OBJECT_0,
-};
+use windows::Win32::Foundation::{ERROR_INVALID_DEVINST_NAME, ERROR_NO_MORE_ITEMS, ERROR_NO_SUCH_DEVINST, HWND};
 use windows::Win32::System::Registry::{KEY_READ, REG_MULTI_SZ};
 use windows::Win32::System::SystemInformation::GetWindowsDirectoryW;
 use windows::core::{BOOL, GUID, HSTRING, PCWSTR};
@@ -70,6 +67,10 @@ pub const USB_DEVICE_CLASS: GUID = GUID::from_u128(0x88BAE032_5A81_49F0_BC3D_A4F
 const WINUSB_SECTION: &str = "WINUSB";
 /// How long a restore waits for Windows to install the adapter again
 const RESTORE_WAIT: Duration = Duration::from_secs(30);
+/// How often the restored device is looked at meanwhile
+const RESTORE_POLL: Duration = Duration::from_millis(250);
+/// How long a restored device's problem code must stay to be the result
+const PROBLEM_SETTLE: Duration = Duration::from_secs(3);
 
 /// Which kind of driver owns a device
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -800,14 +801,15 @@ fn reenumerate(devinst: u32) -> bool {
 }
 
 /// After a re-enumeration: waits until Windows has installed the device
-/// again and returns its state, None if it did not come back in time
+/// again and returns its state, None if it did not come back in time.
+///
+/// Only the device itself is waited for, not every install it sets off
+/// (issue #86: on a composite adapter, such as MediaTek's, the interfaces,
+/// the radio and a device node per paired device follow it, and waiting
+/// for all of them took most of the restore's time).
 fn wait_for_driver(instance_id: &str) -> Option<DriverState> {
     let start = Instant::now();
-    // SAFETY: plain wait with a timeout in milliseconds.
-    let waited = unsafe { CMP_WaitNoPendingInstallEvents(RESTORE_WAIT.as_millis() as u32) };
-    if waited != WAIT_OBJECT_0.0 {
-        tracing::debug!("driver: CMP_WaitNoPendingInstallEvents returned {waited}");
-    }
+    let mut problem_since: Option<Instant> = None;
     loop {
         // A device back without a driver (problem 28) may only be waiting
         // for its install to start, so that is accepted only at the end
@@ -815,15 +817,33 @@ fn wait_for_driver(instance_id: &str) -> Option<DriverState> {
             && state.present
             && state.kind != DriverKind::None
         {
-            tracing::debug!("driver: {instance_id} back after {:?}", start.elapsed());
-            return Some(state);
+            match state.problem_code {
+                None => {
+                    tracing::debug!("driver: {instance_id} back after {:?}", start.elapsed());
+                    return Some(state);
+                }
+                // A problem may only last while the driver starts; one that
+                // stays is the answer (Code 31: Windows runs another radio)
+                Some(code) => {
+                    let since = *problem_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= PROBLEM_SETTLE {
+                        tracing::debug!(
+                            "driver: {instance_id} back after {:?} with problem code {code}",
+                            start.elapsed()
+                        );
+                        return Some(state);
+                    }
+                }
+            }
+        } else {
+            problem_since = None;
         }
         if start.elapsed() >= RESTORE_WAIT {
             let last = driver_state(instance_id);
             tracing::debug!("driver: waited {:?} for {instance_id}; last state {last:?}", start.elapsed());
             return last.ok().filter(|s| s.present);
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(RESTORE_POLL);
     }
 }
 

@@ -1,6 +1,6 @@
 # BlueCaster (formerly A2DP-Windows-Bridge)
 
-Advanced Bluetooth Audio Transmitter for Windows. It adds the codecs Windows lacks, such as LDAC, LHDC V5, aptX Adaptive and aptX HD, by running its own Bluetooth stack on a USB Bluetooth adapter through WinUSB. No kernel driver or test signing is needed.
+Bluetooth audio transmitter for Windows. It turns an ordinary Bluetooth adapter, a cheap USB dongle or on many laptops the built-in one, from the basic codecs Windows gives it into a Hi-Fi transmitter: LDAC, LHDC V5 and aptX Adaptive at up to 96 kHz (LHDC V5 up to 192 kHz), plus AAC, SBC XQ and aptX. Windows itself offers none of the first three. BlueCaster sets the adapter up by itself and gives it back to Windows with one click ([how it works](https://seiyafunaokajp.github.io/BlueCaster/architecture)).
 
 ![BlueCaster streaming LDAC 990 kbps / 96 kHz to Sony WH-1000XM4 (Home screen)](docs/images/app_sample.png)
 
@@ -21,10 +21,10 @@ Advanced Bluetooth Audio Transmitter for Windows. It adds the codecs Windows lac
 | SBC XQ | up to 552 kbps | 44.1/48 kHz | 16 bit | ❌ | ✅ |
 | SBC | up to ~345 kbps | 44.1/48 kHz | 16 bit | ✅ | ✅ |
 | FastStream | 198/216 kbps | 44.1/48 kHz | 16 bit | ❌ | 🧪 |
-| Opus 05 (PipeWire) | 256 kbps | 48 kHz | 16 bit | ❌ | 🧪 |
+| Opus 05 (PipeWire) | 256 kbps | 48 kHz | 16 bit | ❌ | 🧪 🔧 |
 | LC3 (LE Audio) | 32–124 kbps per channel | 16–48 kHz | 16 bit | Windows 11 | 🧪 |
 
-✅ supported · 🧪 experimental: works against a virtual Bluetooth sink, not yet confirmed with real headphones ([reports welcome](https://github.com/SeiyaFunaokaJP/BlueCaster/issues/11)) · ❌ not supported
+✅ supported · 🧪 experimental: works against a virtual Bluetooth sink, not yet confirmed with real headphones ([reports welcome](https://github.com/SeiyaFunaokaJP/BlueCaster/issues/11)) · 🔧 developer mode only · ❌ not supported
 
 ## Requirements
 
@@ -58,7 +58,7 @@ See the [Setup guide](https://seiyafunaokajp.github.io/BlueCaster/setup) and the
 - **Command line**: `bluecaster-core.exe --cli` ([CLI Mode](https://seiyafunaokajp.github.io/BlueCaster/usage#cli-mode))
 - **Updates**: daily check, updates itself
 - **8 languages**: English, Japanese, Chinese (Simplified / Traditional), Korean, German, French, Spanish
-- **Headset microphone (experimental, developer mode)**: the headphones' microphone as a Windows microphone through a virtual audio cable such as VB-CABLE; classic devices play at call quality meanwhile, LE Audio keeps its quality ([details](https://seiyafunaokajp.github.io/BlueCaster/usage#codecs))
+- **Headset microphone (experimental)**: the headphones' microphone as a Windows microphone through a virtual audio cable such as VB-CABLE; classic devices play at call quality meanwhile, LE Audio keeps its quality ([details](https://seiyafunaokajp.github.io/BlueCaster/usage#codecs))
 - **Works with** third-party apps such as earbud control apps: [Works With](https://seiyafunaokajp.github.io/BlueCaster/works-with) (not supported by this project)
 
 ## Building

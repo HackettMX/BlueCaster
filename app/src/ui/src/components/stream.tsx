@@ -38,12 +38,33 @@ const PLAIN_STATUS: Record<string, string> = {
   "status.connected_fallback": "status.connected",
   "status.connected_fallback_in_use": "status.connected",
   "status.connected_fallback_experimental": "status.connected",
+  "status.connected_fallback_developer": "status.connected",
 };
 
+/** What the core says when the headset microphone does not open: the
+ *  stream plays on, so the status line stays plain and the microphone's
+ *  chip shows it (issue #86: Home was full of text) */
+export const MIC_NOTES: readonly string[] = [
+  "error.headset_mic_loop",
+  "status.headset_mic_failed",
+  "status.headset_mic_output_failed",
+];
+
+/** An error the codec caused, in a few words ("LDAC is unsupported", issue
+ *  #86); null in any other state or for another error */
+export function codecStopText(s: Pick<StreamStatus, "state" | "codec_stop">): string | null {
+  const c = s.state === "error" ? s.codec_stop : null;
+  if (!c) return null;
+  const key = codecLabelKey(c.codec);
+  return t(`status.codec_stop_${c.kind}`, key ? t(key) : c.codec);
+}
+
 /** The device's status line: the core's message, else the state; an error's
- *  text is in its panel, with the fix */
-export function statusText(s: Pick<StreamStatus, "state" | "message">): string {
-  if (s.state === "error") return t("status.error");
+ *  text is in its panel, with the fix (one the codec caused named in a few
+ *  words) */
+export function statusText(s: Pick<StreamStatus, "state" | "message" | "codec_stop">): string {
+  if (s.state === "error") return codecStopText(s) ?? t("status.error");
+  if (MIC_NOTES.includes(s.message.key)) return stateLabel(s.state);
   const plain = PLAIN_STATUS[s.message.key];
   return plain ? t(plain) : tm(s.message) || stateLabel(s.state);
 }
@@ -257,6 +278,7 @@ export function codecDetails(info: StreamInfo): string[] {
 export function fallbackNoteKey(info: StreamInfo, messageKey: string): string | null {
   if (!info.requested_codec) return null;
   if (messageKey === "status.connected_fallback_experimental") return "ui.codec.fallback_experimental";
+  if (messageKey === "status.connected_fallback_developer") return "ui.codec.fallback_developer";
   return info.requested_in_use ? "ui.codec.fallback_in_use" : "ui.codec.fallback_unsupported";
 }
 
@@ -271,7 +293,9 @@ let noteShown: { key: string; at: number } | null = null;
  *  a badge; `aside` goes beside the badge (the flyout's link quality).
  *  `picker` takes the name's place: the codec chosen right there (Home,
  *  the flyout). */
-export function CodecBadge(props: { compact?: boolean; aside?: JSX.Element; picker?: JSX.Element }) {
+/** `voice` false: the headset microphone's codec is on its chip beside
+ *  (Home's card, the flyout), so the line does not grow as it opens */
+export function CodecBadge(props: { compact?: boolean; aside?: JSX.Element; picker?: JSX.Element; voice?: boolean }) {
   const { core } = useApp();
   const info = () => core.state.snap?.stream.info ?? null;
   const name = () => {
@@ -287,7 +311,13 @@ export function CodecBadge(props: { compact?: boolean; aside?: JSX.Element; pick
     const i = info();
     if (!i?.requested_codec) return "";
     const req = codecLabelKey(i.requested_codec);
-    return t("tooltip.codec_fallback_help", req ? t(req) : i.requested_codec, name());
+    // Not the device's doing: developer mode is off (issue #86)
+    const developer = core.state.snap?.stream.message.key === "status.connected_fallback_developer";
+    return t(
+      developer ? "tooltip.codec_fallback_developer" : "tooltip.codec_fallback_help",
+      req ? t(req) : i.requested_codec,
+      name(),
+    );
   };
   const fallbackNote = () => {
     const i = info();
@@ -352,7 +382,9 @@ export function CodecBadge(props: { compact?: boolean; aside?: JSX.Element; pick
                 )}
               </Show>
             </span>
-            <VoiceCodec />
+            <Show when={props.voice !== false}>
+              <VoiceCodec />
+            </Show>
             {props.aside}
           </div>
         </div>
@@ -493,7 +525,8 @@ export function LinkSparkline() {
   const values = createMemo(() => core.link().map((s) => kbps(s.bytes_per_second)));
   const latest = () => {
     const v = values();
-    return v.length ? Math.round(v[v.length - 1]) : null;
+    const last = v[v.length - 1];
+    return last == null ? null : Math.round(last);
   };
   return (
     <div class="link-mini">
@@ -790,7 +823,11 @@ export function WinusbDialog(props: { adapter: AdapterInfo | null; mode: "assign
   // is not (BluetoothFindFirstDevice fails, the list came back empty).
   const [windowsPaired] = createResource(
     () => (props.adapter && props.mode === "restore" ? props.adapter.address : null),
-    (adapter) => app.core.request("device.windows_paired_through", { adapter }).catch(() => [] as string[]),
+    (adapter) =>
+      app.core
+        .request("device.windows_paired_through", { adapter })
+        .then((list) => list.map((d) => d.address))
+        .catch(() => [] as string[]),
   );
   const repair = () => {
     const paired = new Set((windowsPaired() ?? []).map((a) => a.toUpperCase()));
@@ -828,6 +865,7 @@ export function WinusbDialog(props: { adapter: AdapterInfo | null; mode: "assign
       open={props.adapter !== null}
       title={props.mode === "assign" ? t("ui.adapter.assign_title") : t("ui.adapter.restore_title")}
       confirm={props.mode === "assign" ? t("ui.adapter.assign_winusb") : t("ui.adapter.restore_driver")}
+      confirmIcon="shield"
       cancel={t("modal.cancel")}
       busy={busy()}
       danger={props.mode === "restore"}

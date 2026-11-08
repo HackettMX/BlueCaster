@@ -11,15 +11,45 @@ use std::sync::OnceLock;
 pub struct Msg {
     pub key: &'static str,
     pub args: Vec<String>,
+    /// An error that stopped the stream over its codec: which codec, and
+    /// why ([`Msg::codec_stop`])
+    #[serde(skip)]
+    pub codec_stop: Option<CodecStop>,
+}
+
+/// A stream stopped over its codec (issue #86): the tray and the
+/// connection cards name the cause in a few words, and choosing another
+/// codec for that device connects it again
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodecStop {
+    pub codec: codec::CodecKind,
+    pub kind: CodecStopKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecStopKind {
+    /// The device does not offer the codec, or refused it when asked anyway
+    Unsupported,
+    /// The device refused settings of the codec it does not list
+    SettingsUnsupported,
+    /// Another source holds the device's endpoint of the codec
+    InUse,
+    /// The device refused the configuration of a codec it lists
+    Refused,
 }
 
 impl Msg {
     pub fn new(key: &'static str) -> Msg {
-        Msg { key, args: Vec::new() }
+        Msg { key, args: Vec::new(), codec_stop: None }
     }
 
     pub fn with(key: &'static str, args: &[&dyn fmt::Display]) -> Msg {
-        Msg { key, args: args.iter().map(|a| a.to_string()).collect() }
+        Msg { key, args: args.iter().map(|a| a.to_string()).collect(), codec_stop: None }
+    }
+
+    /// `key` naming `codec`, for a stop that `codec` caused
+    pub fn codec_stop(key: &'static str, codec: codec::CodecKind, kind: CodecStopKind) -> Msg {
+        Msg { codec_stop: Some(CodecStop { codec, kind }), ..Msg::with(key, &[&codec.name()]) }
     }
 
     /// The English text
@@ -112,5 +142,13 @@ mod tests {
     fn english_text() {
         let m = Msg::with("status.connecting_retry", &[&2, &3]);
         assert_eq!(m.english(), "Connection failed, trying again (2/3)...");
+    }
+
+    #[test]
+    fn a_codec_stop_names_its_codec() {
+        let m = Msg::codec_stop("error.codec_not_supported", codec::CodecKind::Ldac, CodecStopKind::Unsupported);
+        assert_eq!(m.english(), "Device does not support LDAC");
+        assert_eq!(m.codec_stop, Some(CodecStop { codec: codec::CodecKind::Ldac, kind: CodecStopKind::Unsupported }));
+        assert_eq!(Msg::new("error.codec_configure").codec_stop, None);
     }
 }

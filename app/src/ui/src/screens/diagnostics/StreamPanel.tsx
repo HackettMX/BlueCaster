@@ -3,18 +3,22 @@
 // the radio; the codec and its details, an LE Audio stream's ISO counters,
 // the losses, and the backlog the Bluetooth adapter holds after the send
 // queue, and the playout delay the device reports. In developer mode the
-// encoder's load: its time per time of audio, and per frame.
+// encoder's load: its time per time of audio, and per frame. While a
+// classic device plays over its call link (the headset microphone open,
+// A2DP suspended) the figures are the call link's, measured the same way
+// (what only an A2DP stream has stays empty), the codec is the voice codec,
+// and the Microphone card counts what comes back.
 
 import { createMemo, Show } from "solid-js";
 import { useApp } from "../../app/context";
 import { TimeChart } from "../../components/charts";
 import { CodecDetailsCard } from "../../components/CodecDetails";
-import { QUALITY_QUEUE_BACKLOG_MS } from "../../components/stream";
+import { QUALITY_QUEUE_BACKLOG_MS, voiceCodecName } from "../../components/stream";
 import { t } from "../../i18n";
 import { bitrateNoteKey, codecLabelKey } from "../../lib/codecs";
 import { kbps } from "../../lib/format";
 import type { LinkSample } from "../../ipc/types";
-import { dropsPerSample } from "../../lib/linkstats";
+import { dropsPerSample, percent } from "../../lib/linkstats";
 import { DASH, LinkCharts, LossCard, NotStreaming, Row, useLink } from "./shared";
 
 const ms = (v: number) => `${Math.round(v)} ms`;
@@ -27,10 +31,33 @@ export function StreamPanel() {
   const developer = () => !!core.state.snap?.settings.developer_mode;
   const link = useLink();
   const { samples, times, stream, streaming, live, sending, le, last } = link;
+  /** The call link of a classic device: A2DP is suspended meanwhile */
+  const voice = () => (streaming() && stream().voice?.link === "hfp" ? stream().voice! : null);
   const drops = createMemo(() => dropsPerSample(samples()));
+  const series = (pick: (s: LinkSample) => number | null | undefined) => samples().map((s) => pick(s) ?? null);
+  /** The microphone's packets per sample, and those damaged on the air */
+  const micBad = createMemo(() =>
+    samples().map((s, i) => {
+      const p = samples()[i - 1];
+      return s.voice_rx && p?.voice_rx ? Math.max(0, s.voice_rx.bad - p.voice_rx.bad) : null;
+    }),
+  );
+  /** The microphone since the call link's samples began (the window shown) */
+  const mic = createMemo(() => {
+    const list = samples();
+    const last = list[list.length - 1]?.voice_rx;
+    if (!last) return null;
+    let first = list.length - 1;
+    while (first > 0 && list[first - 1].voice_rx) first--;
+    const base = list[first].voice_rx!;
+    const packets = last.packets - base.packets;
+    return { packets, bad: last.bad - base.bad, concealed: last.concealed - base.concealed };
+  });
 
   const codec = () => {
     const i = stream().info;
+    const v = voice();
+    if (v) return t("ui.diag.voice_codec_value", voiceCodecName(v.codec), v.rate / 1000);
     if (!streaming() || !i) return DASH;
     const key = codecLabelKey(i.codec);
     const note = bitrateNoteKey(i);
@@ -78,7 +105,7 @@ export function StreamPanel() {
   /** The encoder's bitrate: the line the actual bitrate should follow */
   const target = () => {
     const i = stream().info;
-    return streaming() && i && i.bitrate_kbps > 0 ? [{ value: i.bitrate_kbps, kind: "target" as const }] : [];
+    return streaming() && !voice() && i && i.bitrate_kbps > 0 ? [{ value: i.bitrate_kbps, kind: "target" as const }] : [];
   };
   const iso = () => last()?.iso ?? null;
   const isoCount = (pick: (i: NonNullable<ReturnType<typeof iso>>) => number) => {
@@ -93,7 +120,7 @@ export function StreamPanel() {
         <TimeChart
           title={t("quality.bitrate")}
           times={times()}
-          series={[{ values: samples().map((s) => kbps(s.bytes_per_second)) }]}
+          series={[{ values: series((s) => kbps(s.bytes_per_second)) }]}
           min={0}
           refs={target()}
           format={(v) => `${Math.round(v)} kbps`}
@@ -101,14 +128,14 @@ export function StreamPanel() {
         <TimeChart
           title={t("quality.packets")}
           times={times()}
-          series={[{ values: samples().map((s) => s.packets_per_second) }]}
+          series={[{ values: series((s) => s.packets_per_second) }]}
           min={0}
           format={(v) => `${Math.round(v)} /s`}
         />
         <TimeChart
           title={t("quality.queue")}
           times={times()}
-          series={[{ values: samples().map((s) => s.queue_depth) }]}
+          series={[{ values: series((s) => s.queue_depth) }]}
           min={0}
           format={count}
           status={(v) => (v < 8 ? "good" : v < 16 ? "warn" : "bad")}
@@ -116,7 +143,7 @@ export function StreamPanel() {
         <TimeChart
           title={t("ui.diag.queue_wait")}
           times={times()}
-          series={[{ values: samples().map((s) => s.queue_ms ?? null) }]}
+          series={[{ values: series((s) => s.queue_ms) }]}
           min={0}
           refs={[{ value: QUALITY_QUEUE_BACKLOG_MS, kind: "limit" }]}
           format={ms}
@@ -125,7 +152,7 @@ export function StreamPanel() {
         <TimeChart
           title={t("ui.diag.backlog")}
           times={times()}
-          series={[{ values: samples().map((s) => s.controller_backlog_ms ?? null) }]}
+          series={[{ values: series((s) => s.controller_backlog_ms) }]}
           min={0}
           format={ms}
           formatValue={(_, i) => backlogText(samples()[i])}
@@ -138,11 +165,21 @@ export function StreamPanel() {
           format={count}
           status={(v) => (v === 0 ? "good" : v < 3 ? "warn" : "bad")}
         />
+        <Show when={voice()}>
+          <TimeChart
+            title={t("ui.diag.mic_damaged")}
+            times={times()}
+            series={[{ values: micBad() }]}
+            min={0}
+            format={count}
+            status={(v) => (v === 0 ? "good" : v < 3 ? "warn" : "bad")}
+          />
+        </Show>
         <Show when={developer()}>
           <TimeChart
             title={t("ui.diag.encode_load")}
             times={times()}
-            series={[{ values: samples().map((s) => (s.encode ? s.encode.load * 100 : null)) }]}
+            series={[{ values: series((s) => (s.encode ? s.encode.load * 100 : null)) }]}
             min={0}
             format={pct}
           />
@@ -169,8 +206,26 @@ export function StreamPanel() {
         </section>
 
         {/* What the A2DP codec runs with and what the device offered */}
-        <Show when={streaming() && !le() && stream().info}>
+        <Show when={streaming() && !le() && !voice() && stream().info}>
           {(i) => <Show when={i().details}>{(d) => <CodecDetailsCard info={i()} details={d()} />}</Show>}
+        </Show>
+
+        <Show when={mic()}>
+          {(m) => (
+            <section class="card lq-group" aria-labelledby="lq-mic">
+              <h2 id="lq-mic">{t("ui.diag.mic_title")}</h2>
+              <dl class="lq-rows">
+                <Row label={t("ui.diag.mic_received")} value={String(m().packets)} />
+                <Row
+                  label={t("ui.diag.mic_damaged")}
+                  class={m().bad > 0 ? "st-warn" : ""}
+                  value={`${m().bad} (${percent(m().bad, m().packets).toFixed(1)}%)`}
+                />
+                <Row label={t("ui.diag.mic_concealed")} value={String(m().concealed)} />
+              </dl>
+              <p class="hint">{t("ui.diag.mic_help")}</p>
+            </section>
+          )}
         </Show>
 
         <Show when={le() || iso()}>

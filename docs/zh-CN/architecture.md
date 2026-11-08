@@ -211,7 +211,7 @@ Windows 8 及更高版本自带 Microsoft 签名的 WinUSB 驱动程序（`winus
 - 选择编解码器：“自动”会选择远端提供的音质最高的编解码器；如果请求的编解码器远端不提供，则改用“自动”会选择的同一编解码器（对配置文件始终如此，自 issue #86 起；命令行仅在使用 `--fallback` 时），否则视为错误
 - 使用命令行的 `--no-experimental` 时，将实验性编解码器（aptX HD、aptX LL、Opus、Opus 05、FastStream）排除在“自动”和回退之外；应用始终使用它们（来自 2.0.2-beta.7 编解码器页面的 `experimental_codecs` 设置，自 issue #86 起一律视为开启）
 - 当 `auto_codec` 设置开启时（**编解码器 > 自动选择支持的音质最高的编解码器**，自 schema 5 起是适用于所有设备的一项设置），每个 A2DP 配置文件都以“自动”及其默认设置串流；为设备选择的编解码器保留在其配置文件中，供关闭时使用
-- 自动选择关闭时，遵循用户拖动卡片排列的设备编解码器顺序（配置文件的 `codec_order`；`codec::AutoOrder`，为空时表示音质从高到低），用于“自动”的选择以及所选编解码器的回退；自动选择开启时使用默认顺序。FastStream 和 Opus 05 从不会被“自动”选中，也不会作为回退。（2.0.2 的 beta 版本为所有设备使用同一个顺序，即 settings.json 的 `auto_order`，现在已被忽略。）
+- 遵循用户拖动卡片排列的设备编解码器顺序（配置文件的 `codec_order`；`codec::AutoOrder`，为空时表示音质从高到低），用于“自动”的选择以及所选编解码器的回退（自动选择开启时也是如此）。FastStream 和 Opus 05 从不会被“自动”选中，也不会作为回退。（2.0.2 的 beta 版本为所有设备使用同一个顺序，即 settings.json 的 `auto_order`，现在已被忽略。）
 - 选择 aptX 系列的采样率（从远端通告的采样率中选择 44.1 / 48 kHz；由 WASAPI 对捕获的音频重采样）；aptX Adaptive 使用 48 kHz，当选择 96 kHz、音质为高且接收端为 R2 并列出 96 kHz 时使用 96 kHz。设为“自动”的采样率（自动选择时也是如此）会请求 48 kHz，没有 48 kHz 时由各编解码器的选择逻辑采用接收端列出的最佳采样率（issue #86：既不是它列出的最高采样率，也不是 Windows 的混音采样率）
 - 将配置文件的音质映射为编解码器提供的音质（`Quality::for_codec`，issue #86）：LDAC 和 LHDC V5 为高 / 中（`sq`）/ 低（`mq`），LHDC V5 另有中高（`mhq`），aptX Adaptive 为高 / 低延迟，其他所有编解码器为高（设备接受的最高比特率）；编解码器已不再提供的音质（aptX Adaptive 的标准 / 移动，AAC 的较低档位）按高运行
 - 记录设备提供的每个编解码器所列出的内容（`KnownCodecs.caps`：采样率、位深度、最大比特率；`RemoteCaps::listed_*`），使编解码器设置只提供这些选项；SBC 的 bitpool 范围此前就已记录

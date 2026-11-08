@@ -1034,6 +1034,22 @@ option {
   outline-offset: 1px;
 }
 
+/* The keys' heading folds them away (secrets) */
+.pairing-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.pairing-fold:focus-visible {
+  outline: 2px solid var(--accent-fill);
+  outline-offset: 2px;
+}
 .pairing-part + .pairing-part {
   margin-top: var(--s4);
 }
@@ -1048,22 +1064,25 @@ option {
   gap: var(--s2);
   max-width: 100%;
 }
-.pairing-keys {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: var(--s2) var(--s3);
-  align-items: center;
-  margin: var(--s2) 0;
-}
-.pairing-keys dt {
-  color: var(--text-2);
-}
-.pairing-keys dd {
-  margin: 0;
-}
-.pairing-services {
+/* Keys and services: one table look (issue #86) */
+.pairing-table {
   margin-top: var(--s2);
   font-size: var(--fs-14);
+}
+.pairing-keys {
+  margin-bottom: var(--s2);
+}
+/* The names on one line, the value column takes the rest */
+.pairing-keys th[scope="row"] {
+  width: 1%;
+  white-space: nowrap;
+}
+.pairing-keys th,
+.pairing-keys td {
+  vertical-align: middle;
+}
+.pairing-keys .mono {
+  font-size: var(--fs-12);
 }
 .pairing-services td {
   vertical-align: top;
@@ -1633,7 +1652,8 @@ option {
 .codec-badge {
   display: inline-flex;
   align-items: center;
-  gap: var(--s2);
+  /* A wrapped line (SBC's live bitpool) sits close under the first (issue #86) */
+  gap: 0 var(--s2);
   flex-wrap: wrap;
   align-self: flex-start;
   max-width: 100%;
@@ -1692,8 +1712,11 @@ option {
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: var(--s1);
-  padding: 0 var(--s2);
+  justify-content: center;
+  /* An icon alone, one size in every state (issue #86) */
+  width: 1.5rem;
+  height: 1.25rem;
+  padding: 0;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
   background: transparent;
@@ -1728,6 +1751,10 @@ option {
 }
 .headset-chip.waiting .icon {
   color: inherit;
+}
+.headset-chip.warn {
+  border-color: var(--warn-text);
+  color: var(--warn-text);
 }
 .headset-chip:disabled {
   cursor: default;
@@ -1892,6 +1919,9 @@ option {
   gap: var(--s2);
   flex-wrap: wrap;
 }
+.codecs-order .hint {
+  margin: 0;
+}
 .device-codecs {
   display: flex;
   flex-direction: column;
@@ -1979,6 +2009,21 @@ option {
   gap: var(--s3);
   padding: var(--s3) var(--s4) var(--s4);
   border-top: 1px solid var(--border);
+}
+/* Input Source (the headset microphone, issue #86): its label on the left
+   and Off / Auto / On on the right, the device below it always there */
+.input-source {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--border);
+}
+.input-source .row {
+  padding: 0;
+}
+.input-source .hint {
+  margin: 0;
 }
 .device-global,
 .device-add {
@@ -2120,7 +2165,7 @@ option {
 .codec-card.ro:hover:not(.on) {
   border-color: var(--border);
 }
-/* Auto-select off: the cards are dragged into the device's order. The
+/* The cards are dragged into the device's order. The
    pointer as on any card; the hand only while the button is held or a card
    is dragged (issue #86) */
 .codec-card.orderable,
@@ -2836,6 +2881,44 @@ option {
   gap: var(--s1);
   align-items: baseline;
   min-width: 0;
+}
+
+/* Microphone tab: the mic test's buttons and a segmented level bar */
+.mic-test {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+.mic-test-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+.mic-meter {
+  flex: 1 1 16rem;
+  display: flex;
+  gap: 3px;
+  height: 2rem;
+  align-items: stretch;
+  min-width: 0;
+}
+.mic-meter span {
+  flex: 1;
+  min-width: 2px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transition: background-color 60ms linear;
+}
+.mic-meter span.on {
+  background: var(--accent-fill);
+}
+.mic-meter.playing span.on {
+  background: var(--good-text);
+}
+.mic-time {
+  min-width: 7.5em;
+  color: var(--text-2);
 }
 
 /* Link tab: v1's link quality figures */
@@ -3590,14 +3673,35 @@ html.win-flyout body {
 }
 
 /* Taking over Windows' pairings (Audio Devices, setup; issue #86) */
-.import-pairings {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s2) var(--s3);
+/* The setup's import: what it does on the left, its button on the right */
+.import-pairings > .btn {
+  flex-shrink: 0;
 }
-.import-pairings .hint {
+/* Its list of Windows' pairings, each ticked to import it */
+.import-list {
+  list-style: none;
   margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+.check-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s1) 0;
+  cursor: pointer;
+}
+.check-item input {
+  flex-shrink: 0;
+  margin: 0;
+}
+.check-item .mono {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: var(--fs-12);
 }
 
 /* Diagnostics > Radio: the 2.4 GHz band */

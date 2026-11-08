@@ -11,7 +11,7 @@ has_toc: false
 Windows 向け Bluetooth A2DP オーディオストリーミングツール（全コーデック対応）
 {: .fs-6 .fw-300 }
 
-USB Bluetooth アダプターを WinUSB モードで使用し、**LHDC V5、LDAC、aptX Adaptive、aptX HD、aptX、aptX Low Latency、AAC、SBC**（および試験的に **Opus**、PipeWire の **Opus 05**）でシステム音声をストリーミングします。カーネルドライバーやテスト署名は不要です。
+安価な USB ドングル、または多くのノート PC に内蔵の、Windows では基本的なコーデックしか使えない普通の Bluetooth アダプターを、Hi-Fi 送信機に変えます。**LHDC V5・LDAC・aptX Adaptive** を最大 96 kHz（LHDC V5 は 192 kHz）で、ほかに **aptX・AAC・SBC XQ・SBC** に対応。試験的に **aptX HD・aptX Low Latency・Opus・FastStream・LE Audio（LC3）**。アダプターの設定は BlueCaster が行い、ワンクリックで Windows に戻せます（[仕組み](architecture)）。
 
 ![BlueCaster's Codecs screen, streaming LDAC 990 kbps / 48 kHz to Sony WH-1000XM4](../images/app_sample.png)
 
@@ -54,7 +54,7 @@ USB Bluetooth アダプターを WinUSB モードで使用し、**LHDC V5、LDAC
 | SBC XQ | ❌ | ❌ | ✅ | ✅（SBC でデュアルチャネルと bitpool 29 以上を許すシンク） |
 | SBC | ✅ | ✅ | ✅ | ✅ |
 | FastStream | ❌ | ❌ | ✅ | 🧪 実験的（音楽のみ、明示的に選んだとき） |
-| Opus 05（PipeWire 独自の Opus） | ❌ | ❌ | ✅ PipeWire 0.3.57 以降（`opus_05`、相手も PipeWire のときだけ） | 🧪 実験的（明示的に選んだとき） |
+| Opus 05（PipeWire 独自の Opus） | ❌ | ❌ | ✅ PipeWire 0.3.57 以降（`opus_05`、相手も PipeWire のときだけ） | 🧪 実験的（明示的に選んだとき、開発者モードのみ） |
 | LC3（LE Audio、BAP ユニキャスト） | ❌ | ✅ Bluetooth のハードウェアとドライバーが LE Audio に対応した PC のみ | ✅ PipeWire の BAP `lc3`（BlueZ の LE Audio） | 🧪 実験的（デバイスの LE Audio の項目、ゲーミングヘッドセットでは GMAP の低遅延、ISO 対応の Bluetooth 5.2 アダプターが必要、[使い方](usage#le-audio)） |
 
 ✅ 対応 · 🧪 実験的 · ❌ 非対応。どの列も送信側（PC → ヘッドホン）です。「標準」は BlueCaster を使わない OS 自身の Bluetooth オーディオで、Ubuntu の列は Ubuntu 26.04 の PipeWire（`libspa-0.2-bluetooth`）が持つコーデックです。
@@ -111,13 +111,13 @@ BlueCaster は WASAPI でオーディオをキャプチャし、3 つのモー�
 
 | モード | 説明 | 用途 |
 |:-------|:-----|:-----|
-| **システムループバック** | WASAPI ループバックで既定の再生デバイスから全システム音声をキャプチャ | シンプルな構成 -- すべての音声がストリーミングされる |
+| **既定のデバイス** | 既定の再生デバイスから全システム音声をキャプチャ | シンプルな構成 -- すべての音声がストリーミングされる |
 | **仮想デバイス** | ユーザーが選択した仮想オーディオデバイス（VB-CABLE、VoiceMeeter 等）からキャプチャ | 特定のアプリだけ Bluetooth に送り、他の音声はスピーカーに出力 |
 | **アプリ** | 1 つのアプリが再生する音だけを、アプリ自身の処理の後でキャプチャ（Windows 11 / Windows 10 2004 以降） | 1 つのアプリだけを送る、システム全体のエフェクトアプリ（イコライザー、音質補正など）の出力を送る |
 
 **仮想デバイス**モードでは、Windows の既定の再生デバイスを選択した仮想デバイスに切り替えて（**接続中は Windows の既定の出力にする**）、そのループバック出力をキャプチャします。仮想デバイスに出力するアプリの音声が Bluetooth でストリーミングされます。ストリーミングを止めると、元の既定デバイスに戻します。
 
-システムループバックは既定の再生デバイスから音声を奪わないため、音声は Bluetooth とそのデバイスの両方から出ます。選んだ仮想デバイスを開けないときは、代わりにシステムの音声を送り、そのことを表示します。詳しくは[キャプチャモード](usage#capture-modes)を参照してください。
+**既定のデバイス**のキャプチャは既定の再生デバイスから音声を奪わないため、音声は Bluetooth とそのデバイスの両方から出ます。選んだ仮想デバイスを開けないときは、代わりにシステムの音声を送り、そのことを表示します。詳しくは[キャプチャモード](usage#capture-modes)を参照してください。
 
 ## 動作の仕組み
 
@@ -143,7 +143,7 @@ BlueCaster は Windows の Bluetooth スタックを完全にバイパスしま�
 
 ## 主な機能
 
-- **マルチコーデック**: LHDC V5、LDAC、aptX Adaptive、aptX HD、aptX、aptX Low Latency、AAC、SBC XQ、SBC、Opus / Opus 05 / FastStream（試験的）（自動ネゴシエーション対応）
+- **マルチコーデック**: LHDC V5、LDAC、aptX Adaptive、aptX、AAC、SBC XQ、SBC、aptX HD / aptX Low Latency / Opus / Opus 05 / FastStream（試験的）（自動ネゴシエーション対応）
 - **LE Audio（実験的）**: LE Audio のヘッドホン・イヤホンへ LC3 で送信（BAP ユニキャスト、左右一組のイヤホン、ヘッドセットの音量、メディアボタン、GMAP の低遅延）。Bluetooth 5.2 のアイソクロナスチャネルに対応したアダプターが必要です。確かめたのは Bluetooth のエミュレータだけで、実機の LE Audio ヘッドホンではまだ試していません（[使い方](usage#le-audio)を参照）
 - **3 つのキャプチャモード**: システムループバック、仮想オーディオデバイスルーティング、または 1 つのアプリの出力
 - **ウィンドウ・トレイ・CLI**: セットアップと診断はウィンドウ、毎日の接続はトレイのフライアウトとメニュー、ほかにコマンドライン（[使い方](usage)を参照）

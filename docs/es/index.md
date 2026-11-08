@@ -11,7 +11,7 @@ has_toc: false
 Transmisión de audio Bluetooth A2DP para Windows con compatibilidad completa de códecs.
 {: .fs-6 .fw-300 }
 
-Transmite el audio del sistema mediante **LHDC V5, LDAC, aptX Adaptive, aptX HD, aptX, aptX Low Latency, AAC, SBC** y (de forma experimental) **Opus** y el **Opus 05** de PipeWire con un adaptador Bluetooth USB en modo WinUSB, sin controlador de kernel ni firma de prueba.
+Convierte un adaptador Bluetooth corriente -- un adaptador USB económico o, en muchos portátiles, el integrado -- de los códecs básicos que le da Windows en un transmisor Hi-Fi: **LHDC V5, LDAC y aptX Adaptive** hasta 96 kHz (LHDC V5 hasta 192 kHz), además de **aptX, AAC, SBC XQ y SBC**. Experimentales: **aptX HD, aptX Low Latency, Opus, FastStream y LE Audio (LC3)**. BlueCaster configura el adaptador por sí mismo y lo devuelve a Windows con un clic ([cómo funciona](architecture)).
 
 ![BlueCaster's Codecs screen, streaming LDAC 990 kbps / 48 kHz to Sony WH-1000XM4](../images/app_sample.png)
 
@@ -54,7 +54,7 @@ Transmite el audio del sistema mediante **LHDC V5, LDAC, aptX Adaptive, aptX HD,
 | SBC XQ | ❌ | ❌ | ✅ | ✅ (receptores cuyo SBC admite canal dual y bitpool ≥ 29) |
 | SBC | ✅ | ✅ | ✅ | ✅ |
 | FastStream | ❌ | ❌ | ✅ | 🧪 experimental (solo música, si se elige expresamente) |
-| Opus 05 (Opus propio de PipeWire) | ❌ | ❌ | ✅ PipeWire 0.3.57+ (`opus_05`, solo hacia dispositivos PipeWire) | 🧪 experimental (si se elige expresamente) |
+| Opus 05 (Opus propio de PipeWire) | ❌ | ❌ | ✅ PipeWire 0.3.57+ (`opus_05`, solo hacia dispositivos PipeWire) | 🧪 experimental (si se elige expresamente, solo en el modo de desarrollador) |
 | LC3 (LE Audio, BAP unicast) | ❌ | ✅ en PC cuyo hardware y controlador Bluetooth admiten LE Audio | ✅ PipeWire BAP `lc3` (LE Audio de BlueZ) | 🧪 experimental (la entrada LE Audio de un dispositivo; baja latencia GMAP con auriculares gaming; adaptador Bluetooth 5.2 con ISO, [Uso](usage#le-audio)) |
 
 ✅ compatible · 🧪 experimental · ❌ no compatible. Todas las columnas corresponden al lado emisor (PC → auriculares). «Integrado» es el audio Bluetooth propio del sistema operativo, sin BlueCaster; la columna de Ubuntu es el conjunto de códecs de PipeWire en Ubuntu 26.04 (`libspa-0.2-bluetooth`).
@@ -111,13 +111,13 @@ BlueCaster captura el audio mediante WASAPI y ofrece tres modos:
 
 | Modo | Descripción | Caso de uso |
 |:-----|:------------|:---------|
-| **Loopback del sistema** | Captura toda la salida de audio del sistema del dispositivo de reproducción predeterminado mediante loopback de WASAPI | Configuración sencilla: se transmiten todos los sonidos |
+| **Dispositivo predeterminado** | Captura toda la salida de audio del sistema del dispositivo de reproducción predeterminado | Configuración sencilla: se transmiten todos los sonidos |
 | **Dispositivo virtual** | Captura desde un dispositivo de audio virtual elegido por el usuario (p. ej., VB-CABLE, VoiceMeeter) | Enviar aplicaciones concretas a Bluetooth y mantener el resto del audio en los altavoces |
 | **Aplicación** | Captura solo lo que reproduce una aplicación, después de su propio procesamiento (Windows 11 / Windows 10 2004+) | Enviar una aplicación, o la salida de una aplicación de efectos para todo el sistema (ecualizador, mejora de sonido) |
 
 En el modo **Dispositivo virtual**, BlueCaster puede cambiar el dispositivo de reproducción predeterminado de Windows al dispositivo virtual seleccionado (**Usar como salida predeterminada de Windows mientras hay conexión**) y luego captura su salida de loopback. Las aplicaciones que reproducen en el dispositivo virtual se transmiten por Bluetooth. Al detener la transmisión, se restaura el dispositivo predeterminado anterior.
 
-El Loopback del sistema no le quita el audio al dispositivo de reproducción predeterminado: se oye allí y también por Bluetooth. Si no se puede abrir el dispositivo virtual seleccionado, la conexión envía en su lugar el audio del sistema y lo indica. Consulte [Modos de captura](usage#capture-modes).
+El origen **Dispositivo predeterminado** no le quita el audio al dispositivo de reproducción predeterminado: se oye allí y también por Bluetooth. Si no se puede abrir el dispositivo virtual seleccionado, la conexión envía en su lugar el audio del sistema y lo indica. Consulte [Modos de captura](usage#capture-modes).
 
 ## Cómo funciona
 
@@ -143,7 +143,7 @@ BlueCaster omite por completo la pila Bluetooth de Windows. Se comunica directam
 
 ## Funciones
 
-- **Varios códecs**: LHDC V5, LDAC, aptX Adaptive, aptX HD, aptX, aptX Low Latency, AAC, SBC XQ, SBC y (de forma experimental) Opus / Opus 05 / FastStream con negociación automática
+- **Varios códecs**: LHDC V5, LDAC, aptX Adaptive, aptX, AAC, SBC XQ, SBC y (de forma experimental) aptX HD / aptX Low Latency / Opus / Opus 05 / FastStream con negociación automática
 - **LE Audio (experimental)**: LC3 hacia auriculares y auriculares de botón LE Audio (BAP unicast, los dos auriculares de un par, volumen del auricular, botones multimedia, baja latencia GMAP). Necesita un adaptador con canales isócronos de Bluetooth 5.2; solo probado con el emulador de Bluetooth, todavía no con auriculares LE Audio reales ([Uso](usage#le-audio))
 - **Tres modos de captura**: loopback del sistema, enrutamiento a través de un dispositivo de audio virtual o la salida de una sola aplicación
 - **Ventana, bandeja y CLI**: una ventana para la configuración y el diagnóstico, un panel desplegable y un menú en la bandeja para conectarse en el día a día, y una línea de comandos (consulte [Uso](usage))

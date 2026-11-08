@@ -59,7 +59,12 @@ impl LdacEncoder {
             2 => ffi::LDACBT_CHANNEL_MODE_STEREO,
             n => return Err(unsupported(format!("{n} channels"))),
         };
-        // 24-bit audio goes in as int32, MSB-aligned (libldac's S32 format)
+        // 24-bit audio goes in as int32, MSB-aligned (libldac's S32 format):
+        // the float mix arrives at full 32-bit scale (pipeline convert.rs),
+        // as with Android's 32-bit choice (AOSP a2dp_vendor_ldac_encoder.cc,
+        // pcm_wlength 4). The bit depth is no part of LDAC's codec
+        // information, and libldac turns every format into float, so a
+        // "32-bit" choice would stream the same (issue #86).
         let (format, sample_format) = match config.bits_per_sample {
             16 => (PcmFormat::I16, SampleFormat::S16),
             24 => (PcmFormat::I32, SampleFormat::S32),

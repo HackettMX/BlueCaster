@@ -293,10 +293,10 @@ result. Listing adapters and their driver needs no elevation.
   the `auto_codec` setting is on (Codecs > Auto-select the codec with the
   highest quality, one setting for every device since schema 5); the codec
   chosen for the device stays in its profile for when it is off
-- Follows the device's codec order as the user dragged its cards with
-  Auto-select off (the profile's `codec_order`; `codec::AutoOrder`, empty
+- Follows the device's codec order as the user dragged its cards (the
+  profile's `codec_order`; `codec::AutoOrder`, empty
   for highest sound quality first), for Auto's pick and for the fallback of
-  a chosen codec; under Auto-select, the default order. FastStream and Opus
+  a chosen codec, under Auto-select too. FastStream and Opus
   05 are never Auto's pick nor a fallback. (2.0.2's betas had one order for
   every device, settings.json's `auto_order`, now ignored.)
 - Picks the aptX-family sample rate (44.1 / 48 kHz from the rates the remote

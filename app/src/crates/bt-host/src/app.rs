@@ -92,6 +92,21 @@ fn is_realtek_rom_lmp(lmp_subver: u16) -> bool {
     matches!(lmp_subver, 0x1200 | 0x8723 | 0x8821 | 0x8761 | 0x8822 | 0x8852 | 0x8851)
 }
 
+/// The warning for a controller of a vendor whose chips need a firmware
+/// download (MediaTek, Qualcomm, Atheros) when no loader of ours ran
+/// without error in this run: a chip none of them covers, or a loader that
+/// failed. None after a loader's success (its firmware loaded or running
+/// already) and for the emulator's virtual controller.
+fn missing_loader_warning(company: u16, loader_ok: bool, tcp: bool) -> Option<String> {
+    if loader_ok || tcp || !matches!(company, 0x0046 | 0x001D | 0x0045) {
+        return None;
+    }
+    let name = crate::chips::company_name(company).unwrap_or("unknown");
+    Some(format!(
+        "no firmware loader ran for this {name} controller; it runs the firmware it has (ROM only, unless Windows loaded one)"
+    ))
+}
+
 pub(crate) struct HostApp {
     pub shared: Arc<Shared>,
     pub controls: Arc<Controls>,
@@ -152,6 +167,9 @@ pub(crate) struct HostApp {
     loader: Option<Box<dyn ChipLoader>>,
     /// The step and percent last told to setup.on_loader
     loader_shown: Option<(&'static str, Option<u8>)>,
+    /// A chip loader finished without error in this run (its firmware
+    /// loaded, or running already): no "no loader" warning then
+    loader_ok: bool,
 
     // ---- AVRCP ----
     volume_in_flight: Option<Instant>,
@@ -250,6 +268,7 @@ impl HostApp {
             bcm_checked: false,
             loader: None,
             loader_shown: None,
+            loader_ok: false,
             volume_in_flight: None,
             playback_status: AVRCP_PLAYBACK_STATUS_STOPPED,
             playback_prev_frames: 0,
@@ -457,6 +476,7 @@ impl HostApp {
                     bringup::Outcome::Probed => String::new(),
                 };
                 tracing::info!("{vendor} controller: {said}");
+                self.loader_ok = true;
                 self.show_loader_done(vendor, said, true);
                 self.setup_hci_and_power_on(stack, None);
             }
@@ -880,6 +900,52 @@ impl HostApp {
         let status = stack.cmd_read_bd_addr();
         tracing::debug!("probe: Read BD_ADDR sent (0x{status:02X})");
         status == ERROR_CODE_SUCCESS
+    }
+
+    /// While a voice link is open, gives the headphones the volume as their
+    /// HFP speaker gain (+VGS): the voice link plays at that gain, and the
+    /// AVRCP volume does not reach it. `volume` None: the current one.
+    pub fn sync_speaker_gain(&mut self, stack: &Stack, volume: Option<u8>) {
+        let Some(acl) = self.voice.audio_acl() else { return };
+        let c = &self.controls;
+        let volume = volume.or_else(|| {
+            [
+                c.volume_request.load(Ordering::Acquire),
+                c.volume.load(Ordering::Acquire),
+                c.restore_volume.load(Ordering::Acquire),
+            ]
+            .into_iter()
+            .find_map(|v| u8::try_from(v).ok())
+        });
+        let Some(volume) = volume else {
+            tracing::debug!("HFP: volume unknown, the headphones keep their speaker gain");
+            return;
+        };
+        let gain = crate::voice::speaker_gain(volume);
+        let status = stack.hfp_ag_set_speaker_gain(acl, gain);
+        tracing::debug!("HFP: speaker gain {gain} for volume {volume} (0x{status:02x})");
+    }
+
+    /// AT+VGS: the headphones changed their speaker gain on the voice link
+    /// (their buttons): it becomes the volume, so Windows follows and A2DP
+    /// comes back at the same level
+    fn on_speaker_gain(&mut self, stack: &Stack, gain: u8) {
+        if self.voice.audio_acl().is_none() {
+            tracing::debug!("HFP: headphones' speaker gain {gain} (no voice link, AVRCP keeps the volume)");
+            return;
+        }
+        let current = self.controls.volume.load(Ordering::Acquire);
+        if u8::try_from(current).is_ok_and(|v| crate::voice::speaker_gain(v) == gain) {
+            return;
+        }
+        let volume = crate::voice::gain_volume(gain);
+        tracing::info!("HFP: headphones' speaker gain {gain} = volume {volume}");
+        self.controls.volume.store(i32::from(volume), Ordering::Release);
+        let _ = self.events.send(HostEvent::Volume(volume));
+        if self.avrcp_cid != 0 {
+            self.controls.volume_request.store(i32::from(volume), Ordering::Release);
+            self.send_pending_volume(stack);
+        }
     }
 
     /// Sends the queued volume request, if AVRCP is free
@@ -1511,10 +1577,8 @@ impl HostApp {
                 }
             }
         }
-        if matches!(manufacturer, 0x0046 | 0x001D | 0x0045) {
-            tracing::warn!(
-                "this vendor needs a firmware download that is not implemented; the controller runs its ROM firmware only"
-            );
+        if let Some(why) = missing_loader_warning(manufacturer, self.loader_ok, self.setup.tcp) {
+            tracing::warn!("{why}");
         }
         // Broadcom (Cypress / Infineon map to it inside BTstack): the
         // PatchRAM goes in during custom init, which follows this command;
@@ -1990,6 +2054,12 @@ impl HostApp {
                 if let Some(e) = self.voice.on_established(stack, p) {
                     let _ = self.events.send(e);
                 }
+                self.sync_speaker_gain(stack, None);
+            }
+            Some(HFP_SUBEVENT_SPEAKER_VOLUME) => {
+                if let Some(gain) = u8_at(p, 5) {
+                    self.on_speaker_gain(stack, gain);
+                }
             }
             Some(HFP_SUBEVENT_AUDIO_CONNECTION_RELEASED) => {
                 if let Some(e) = self.voice.on_released() {
@@ -2088,6 +2158,7 @@ impl HostApp {
                 let vol = u8_at(p, 6).unwrap_or(0);
                 tracing::info!("AVRCP volume changed to {vol} ({}%)", vol as u32 * 100 / 127);
                 self.controls.volume.store(vol as i32, Ordering::Release);
+                self.sync_speaker_gain(stack, Some(vol));
                 let _ = self.events.send(HostEvent::Volume(vol));
                 // AVRCP needs a new registration after each notification
                 stack.avrcp_enable_notification(self.avrcp_cid, AVRCP_NOTIFICATION_EVENT_VOLUME_CHANGED);
@@ -2384,7 +2455,13 @@ impl App for HostApp {
             Source::Hci => {
                 self.handle_hci(stack, packet);
                 if let Some(le) = self.le.as_mut() {
+                    let found = le.scan_found();
                     le.on_hci(stack, packet);
+                    // An LE Audio advertiser listed: a classic scan running
+                    // beside the LE one shows it at once (BtHost::scan_with)
+                    if le.scan_found() != found {
+                        self.shared.update(|s| s.found_rev += 1);
+                    }
                 }
             }
             Source::A2dp => self.handle_a2dp(stack, packet),
@@ -2573,7 +2650,21 @@ fn find_bcm_hcd(dir: &Path, adapters: &[(u16, u16)]) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectFailure, remove_alias, signaling_failure};
+    use super::{ConnectFailure, missing_loader_warning, remove_alias, signaling_failure};
+
+    #[test]
+    fn no_loader_warning_after_a_loader_ran() {
+        // MediaTek with our loader done (#86): no warning
+        assert_eq!(missing_loader_warning(0x0046, true, false), None);
+        // No loader for the chip, or it failed: the warning stays
+        let w = missing_loader_warning(0x0046, false, false).unwrap();
+        assert!(w.starts_with("no firmware loader ran for this MediaTek controller"), "{w}");
+        assert!(missing_loader_warning(0x001D, false, false).is_some());
+        assert!(missing_loader_warning(0x0045, false, false).is_some());
+        // Vendors without a download, and the emulator
+        assert_eq!(missing_loader_warning(0x005D, false, false), None);
+        assert_eq!(missing_loader_warning(0x0046, false, true), None);
+    }
 
     #[test]
     fn a_device_that_never_answered_is_not_told_to_pair() {

@@ -37,7 +37,7 @@ for reference (`git show b819893:app/src/le_audio/<file>`).
 | `app/src/crates/pipeline/src/le_rx.rs` | The headset microphone: the "le-decode" thread (jitter buffer by sequence number, LC3 decoding with PLC, mono mix) and its output trait `PcmOut` |
 | `app/src/crates/core/src/le_stream.rs` | The session of an LE Audio profile (v1 `a2dp_service_le_audio.cpp`): connect, start, VolumeSync, re-setup after a loss (3 times), the `error.le_audio_*` messages; the headset microphone (`LeMicPath`) into the output `voice.rs` resolves |
 | `app/src/crates/core/src/le_media.rs` | MCP's Windows backend (System Media Transport Controls, media keys) |
-| `app/src/crates/core/src/service.rs` | `HostConfig.le_audio` from the setting or the CLI, the deferred toggle, `scan_devices` (classic + LE entries), `le_stream()` |
+| `app/src/crates/core/src/service.rs` | `HostConfig.le_audio` from the setting or the CLI, the deferred toggle, `scan_devices` (classic + LE entries; also the CLI's `--scan` with `--le-audio`), `le_stream()` |
 | `app/src/crates/core/src/devices.rs` | `le_audio_devices.txt` (`load_le` / `save_le` / `remove_le`) |
 | `app/src/core/src/cli.rs` | `--le-audio`, `--le-device`, `--le-preset`, `--le-low-latency`, `--le-scan`, `--le-sim-volume`, `--mcp-dry-run`, `--ccp-sim`, `--ccp-console` (v1 `le_audio_cli.cpp`'s flow and lines); `--headset-mic`, `--mic-output` (the microphone) |
 | `app/src/core/src/state.rs`, `resident.rs` | The UI's state: LE settings, LE devices, `le_scanning`, `StreamInfo.le`, `LinkSample.iso`, `settings.set`'s `le_audio_deferred`; diagnostics section `[LE Audio (experimental)]` (`crates/core/src/diag.rs`) |
@@ -552,6 +552,17 @@ Users with the setting off get the behaviour of a build without LE:
   is stopped at once; while streaming or scanning the change waits for the
   next scan or connection (`Service::le_audio_deferred()`; the UI shows v1's
   note from `settings.set`'s `le_audio_deferred`).
+- **The device scan** (`Service::scan_devices`) runs the LE scan beside the
+  classic inquiry from its start (scan window 30 ms of every 60 ms), so LE
+  Audio entries show up as they are found, also when the scan is stopped
+  once the classic entry shows or in the first-run setup's long scan; a scan
+  nobody stops scans LE for at least 5 s (`status.le_scanning` while only the
+  LE part runs). Chained extended advertising data is joined before it is
+  parsed. The log has one `LE scan: ...` summary line per scan, and an INFO
+  line for each advertiser without an LE Audio service that has the address
+  or name of a classic device of the scan or `devices.txt` (earbuds whose LE
+  Audio is off still advertise over LE for their app). Emulator scan case
+  `le-audio` (`run_test.py --scan le-audio`).
 - **Devices and profiles.** A dual-mode device has two entries (classic and
   LE Audio, same address); an LE scan never marks a classic entry. LE Audio
   entries are saved in `le_audio_devices.txt` so that `devices.txt` stays

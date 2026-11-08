@@ -235,12 +235,84 @@ pub fn paired_through(instance_id: &str) -> Vec<PairedDevice> {
     found
 }
 
+/// The LE addresses Windows paired through the USB device `instance_id`
+/// that belong to a classic device paired through it too (one device of
+/// both kinds: Windows gives its `BTHLE\DEV_` and `BTHENUM\DEV_` nodes the
+/// same container), as (LE address, classic address). No administrator
+/// rights needed.
+pub fn le_of_classic_through(instance_id: &str) -> Vec<([u8; 6], [u8; 6])> {
+    let le = containers_through("BTHLE", instance_id);
+    let classic = containers_through("BTHENUM", instance_id);
+    let pairs = pair_by_container(&le, &classic);
+    tracing::debug!(
+        "bt_paired: LE of classic through {instance_id}: {}",
+        pairs
+            .iter()
+            .map(|(l, c)| format!("{} -> {}", format_address(l), format_address(c)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    pairs
+}
+
+fn pair_by_container<C: PartialEq>(le: &[([u8; 6], C)], classic: &[([u8; 6], C)]) -> Vec<([u8; 6], [u8; 6])> {
+    le.iter().filter_map(|(l, container)| classic.iter().find(|(_, c)| c == container).map(|(c, _)| (*l, *c))).collect()
+}
+
+/// (address, container ID) of each device node of the enumerator
+/// (`BTHENUM`, `BTHLE`) below the USB device `instance_id`
+fn containers_through(enumerator: &str, instance_id: &str) -> Vec<([u8; 6], windows::core::GUID)> {
+    use crate::usb_adapters::DevInfoSet;
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{
+        DIGCF_ALLCLASSES, SP_DEVINFO_DATA, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+    };
+    use windows::Win32::Devices::Properties::{DEVPKEY_Device_ContainerId, DEVPKEY_Device_Parent};
+    use windows::core::HSTRING;
+
+    // SAFETY: no class, a NUL-terminated enumerator, no window.
+    let set = match unsafe { SetupDiGetClassDevsW(None, &HSTRING::from(enumerator), None, DIGCF_ALLCLASSES) } {
+        Ok(h) => DevInfoSet(h),
+        Err(_) => return Vec::new(),
+    };
+    let parent_of = |id: &str| {
+        let (set, data) = DevInfoSet::open(id).ok()?;
+        set.property_string(&data, &DEVPKEY_Device_Parent)
+    };
+    let mut found = Vec::new();
+    for index in 0.. {
+        let mut data = SP_DEVINFO_DATA { cbSize: size_of::<SP_DEVINFO_DATA>() as u32, ..Default::default() };
+        // SAFETY: valid set; out structure with its size.
+        if unsafe { SetupDiEnumDeviceInfo(set.0, index, &mut data) }.is_err() {
+            break;
+        }
+        let Some(id) = set.instance_id(&data) else { continue };
+        let Some(address) = node_address(enumerator, &id) else { continue };
+        let Some(container) = set.property_guid(&data, &DEVPKEY_Device_ContainerId) else { continue };
+        let mut parent = set.property_string(&data, &DEVPKEY_Device_Parent);
+        for _ in 0..4 {
+            let Some(p) = parent else { break };
+            if p.eq_ignore_ascii_case(instance_id) {
+                found.push((address, container));
+                break;
+            }
+            parent = parent_of(&p);
+        }
+    }
+    found
+}
+
 /// The address of a paired device's own node, `BTHENUM\DEV_581862027AD7\...`
 /// (the service nodes beside it and LE devices are not matched)
 fn device_node_address(instance_id: &str) -> Option<[u8; 6]> {
+    node_address("BTHENUM", instance_id)
+}
+
+/// The address of a device's own node of the enumerator `enumerator`
+/// (`BTHENUM`, `BTHLE`): `<enumerator>\DEV_581862027AD7\...`
+fn node_address(enumerator: &str, instance_id: &str) -> Option<[u8; 6]> {
     let id = instance_id.to_ascii_uppercase();
     let mut parts = id.split('\\');
-    if parts.next()? != "BTHENUM" {
+    if !parts.next()?.eq_ignore_ascii_case(enumerator) {
         return None;
     }
     let hex = parts.next()?.strip_prefix("DEV_")?;
@@ -340,6 +412,14 @@ mod tests {
         );
         assert_eq!(device_node_address(r"BTHLE\DEV_581862027AD7\x"), None);
         assert_eq!(device_node_address(r"BTHENUM\DEV_5818620\x"), None);
+        assert_eq!(node_address("BTHLE", r"BTHLE\Dev_c0aabbccddee\x"), Some([0xC0, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE]));
+    }
+
+    #[test]
+    fn le_and_classic_nodes_pair_by_container() {
+        let le = [([0xC0, 1, 1, 1, 1, 1], 7), ([0xC0, 2, 2, 2, 2, 2], 9)];
+        let classic = [([0x58, 1, 1, 1, 1, 1], 7), ([0x58, 3, 3, 3, 3, 3], 8)];
+        assert_eq!(pair_by_container(&le, &classic), vec![([0xC0, 1, 1, 1, 1, 1], [0x58, 1, 1, 1, 1, 1])]);
     }
 
     /// This PC's devices paired through a USB device (BLUECASTER_ADAPTER=<its

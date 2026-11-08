@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use bluecaster_core::{Service, ServiceOptions};
 use bt_host::HciCapture;
-use ipc::{AclPacket, EncodeLoad, Event, IsoCounters, LinkCounters, LinkSample, LinkTotals};
+use ipc::{AclPacket, EncodeLoad, Event, IsoCounters, LinkCounters, LinkSample, LinkTotals, VoiceRxCounters};
 
 use crate::state::{link_details, remote_chip};
 use tao::event::{Event as TaoEvent, StartCause};
@@ -128,7 +128,11 @@ impl SampleCounters {
 }
 
 /// A link sample from the counters now and those of the last sample; `iso`:
-/// an LE Audio stream's counters (the A2DP media figures are then 0 / None)
+/// an LE Audio stream's counters (the A2DP media figures are then 0 / None);
+/// `voice`: A2DP suspended for a classic device's call link: the media
+/// figures are its SCO payloads, and what only an ACL stream has (airtime,
+/// the send queue, the adapter's backlog, the A2DP encoder, the device's
+/// delay) is None
 fn link_sample(
     time_ms: u64,
     stats: &bt_host::LinkStats,
@@ -136,12 +140,13 @@ fn link_sample(
     now: Instant,
     source_rate: u32,
     iso: Option<IsoCounters>,
+    voice: bool,
 ) -> (LinkSample, SampleCounters) {
     let (total, start, starts) = crate::state::link_totals(stats);
     let acl_packets = stats.acl_packets_sent.load(Ordering::Relaxed);
     let encode_totals = stats.encode.totals();
     let encode_peak = stats.encode.peak_ns.take();
-    let encode = last.and_then(|prev| encode_load(&prev.encode, &encode_totals, encode_peak));
+    let encode = last.and_then(|prev| encode_load(&prev.encode, &encode_totals, encode_peak)).filter(|_| !voice);
     let (bps, pps, acl_ps) = match last {
         Some(prev) => {
             let dt = now.duration_since(prev.at).as_secs_f64().max(0.001);
@@ -153,13 +158,13 @@ fn link_sample(
     };
     let (bps, pps) = if iso.is_some() { (0.0, 0.0) } else { (bps, pps) };
     let link = stats.link();
-    let air = bluecaster_core::link::airtime_on(pps, bps, link.remote_features.as_ref());
+    let air = bluecaster_core::link::airtime_on(pps, bps, link.remote_features.as_ref()).filter(|_| !voice);
     let since = total.since(&start);
     let radio = stats.radio();
     // The most the controller held since the last sample: while an A2DP
     // stream sends
     let backlog = stats.controller_backlog_peak.take();
-    let a2dp = iso.is_none() && source_rate > 0;
+    let a2dp = iso.is_none() && source_rate > 0 && !voice;
     let sample = LinkSample {
         time_ms,
         rssi: radio.rssi,
@@ -169,7 +174,7 @@ fn link_sample(
         afh_map: radio.afh_map.map(|m| m.to_vec()),
         bytes_per_second: bps,
         packets_per_second: pps,
-        queue_depth: if iso.is_some() { 0 } else { stats.queue_depth.load(Ordering::Relaxed) },
+        queue_depth: if iso.is_some() || voice { 0 } else { stats.queue_depth.load(Ordering::Relaxed) },
         dropped: since.dropped,
         capture_dropped: since.capture_dropped,
         airtime: air.map_or(0.0, |a| a.airtime),
@@ -180,14 +185,13 @@ fn link_sample(
             from_features: Some(a.from_features),
         }),
         bandwidth_share: air.map(|a| a.bandwidth_share),
-        queue_capacity: iso.is_none().then_some(bt_host::stats::MEDIA_QUEUE_PACKETS as u32),
+        queue_capacity: (iso.is_none() && !voice).then_some(bt_host::stats::MEDIA_QUEUE_PACKETS as u32),
         // With the audio held back unencoded (developer mode), which waits
         // for the radio as well
-        queue_ms: iso
-            .is_none()
+        queue_ms: (iso.is_none() && !voice)
             .then(|| stats.queue_wait_ms.load(Ordering::Relaxed) + stats.held_ms.load(Ordering::Relaxed)),
         encode,
-        sink_delay_ms: if iso.is_some() { None } else { stats.sink_delay().map(|d| d.as_secs_f64() * 1000.0) },
+        sink_delay_ms: if iso.is_some() || voice { None } else { stats.sink_delay().map(|d| d.as_secs_f64() * 1000.0) },
         source_rate: Some(source_rate),
         counters: Some(LinkCounters { total, stream_start: start, stream_starts: starts }),
         iso,
@@ -197,6 +201,12 @@ fn link_sample(
         link_details: link_details(&link).map(Box::new),
         capture_discontinuities: Some(since.capture_discontinuities),
         capture_lost: Some(since.capture_lost),
+        voice: voice.then_some(true),
+        voice_rx: voice.then(|| VoiceRxCounters {
+            packets: stats.voice_rx_packets.load(Ordering::Relaxed),
+            bad: stats.voice_rx_bad.load(Ordering::Relaxed),
+            concealed: stats.voice_rx_concealed.load(Ordering::Relaxed),
+        }),
     };
     (sample, SampleCounters { at: now, totals: total, acl_packets, encode: encode_totals })
 }
@@ -242,14 +252,18 @@ async fn sampler(state: Arc<CoreState>) {
             stats.controller_backlog_peak.take();
             continue;
         }
-        let (source_rate, le_cis) = state.with_snapshot(|s| match (&s.stream.state, &s.stream.info) {
-            (ipc::StreamState::Streaming, Some(i)) => (i.source_sample_rate, i.le.as_ref().map(|l| l.cis)),
-            _ => (0, None),
+        let (source_rate, le_cis, voice) = state.with_snapshot(|s| match (&s.stream.state, &s.stream.info) {
+            (ipc::StreamState::Streaming, Some(i)) => {
+                let call = s.stream.voice.as_ref().filter(|v| v.link == "hfp");
+                // The uplink captures at the call link's rate
+                (call.map_or(i.source_sample_rate, |v| v.rate), i.le.as_ref().map(|l| l.cis), call.is_some())
+            }
+            _ => (0, None, false),
         });
         // LE Audio (experimental): the sender's counters
         let iso = le_cis.and_then(|cis| state.service.host().map(|h| iso_counters(cis, &h.le_stream_stats())));
         let time_ms = state.started.elapsed().as_millis() as u64;
-        let (sample, counters) = link_sample(time_ms, &stats, last_link, now, source_rate, iso);
+        let (sample, counters) = link_sample(time_ms, &stats, last_link, now, source_rate, iso, voice);
         last_link = Some(counters);
         state.publish(Event::Link(sample));
     }
@@ -585,7 +599,7 @@ mod tests {
         let stats = bt_host::LinkStats::default();
         let r = Ordering::Relaxed;
         let t0 = Instant::now();
-        let (first, total) = link_sample(0, &stats, None, t0, 48000, None);
+        let (first, total) = link_sample(0, &stats, None, t0, 48000, None, false);
         assert_eq!(first.packets_per_second, 0.0);
         assert!(first.acl_packet.is_none());
         assert_eq!(first.queue_capacity, Some(64));
@@ -612,7 +626,7 @@ mod tests {
         stats.capture_lost_frames.store(480 + 960, r);
         // 375 SBC frames (1 s at 48 kHz) took 15 ms, the longest 120 us
         stats.encode.add(375, 15_000_000, 1_000_000_000, 120_000);
-        let (s, _) = link_sample(1000, &stats, Some(total), t0 + Duration::from_secs(1), 48000, None);
+        let (s, _) = link_sample(1000, &stats, Some(total), t0 + Duration::from_secs(1), 48000, None, false);
         assert!((s.packets_per_second - 120.0).abs() < 1e-6);
         assert_eq!(s.acl_packet, Some(AclPacket { name: "3-DH5".into(), slots: 6, from_features: Some(false) }));
         assert_eq!(s.controller_backlog, Some(12));
@@ -635,7 +649,7 @@ mod tests {
         let stats = bt_host::LinkStats::default();
         let r = Ordering::Relaxed;
         let t0 = Instant::now();
-        let (_, total) = link_sample(0, &stats, None, t0, 48000, None);
+        let (_, total) = link_sample(0, &stats, None, t0, 48000, None, false);
         stats.packets_sent.store(120, r);
         stats.bytes_sent.store(120 * 1005, r);
         stats.queue_depth.store(5, r);
@@ -650,7 +664,7 @@ mod tests {
             prefill: 6,
         };
         let iso = Some(iso_counters(2, &le));
-        let (s, _) = link_sample(1000, &stats, Some(total), t0 + Duration::from_secs(1), 48000, iso);
+        let (s, _) = link_sample(1000, &stats, Some(total), t0 + Duration::from_secs(1), 48000, iso, false);
         assert_eq!(
             s.iso,
             Some(IsoCounters { cis: 2, sdu_sets: 1000, silence: 12, underruns: 1, dropped: 3, prefill: 6 })

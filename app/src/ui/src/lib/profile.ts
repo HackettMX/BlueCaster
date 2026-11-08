@@ -51,23 +51,18 @@ export function deviceDefaults(profiles: readonly Profile[], address: string): D
   return p ? deviceFields(p) : null;
 }
 
-/** Headset mode (developer mode, Profile.headset_mic): Auto opens the
+/** Headset mode (Profile.headset_mic): Auto opens the
  *  microphone link only while an app records from the cable; the core
  *  switches it */
 export type HeadsetMode = "off" | "auto" | "on";
 
-/** In the order a click goes through them (Home's and the flyout's chip) */
+/** As Codecs offers them */
 export const HEADSET_MODES: readonly HeadsetMode[] = ["off", "auto", "on"];
 
 /** A profile's headset mode; anything unknown reads as Off */
 export function headsetMode(p: Pick<Profile, "headset_mic">): HeadsetMode {
   const m = p.headset_mic as string;
   return (HEADSET_MODES as readonly string[]).includes(m) ? (m as HeadsetMode) : "off";
-}
-
-/** The mode after `m`: Off -> Auto -> On -> Off */
-export function nextHeadsetMode(m: HeadsetMode): HeadsetMode {
-  return HEADSET_MODES[(HEADSET_MODES.indexOf(m) + 1) % HEADSET_MODES.length];
 }
 
 export function newProfile(): Profile {
@@ -99,9 +94,10 @@ export function newProfile(): Profile {
     max_media_payload: PACKET_DEFAULT,
     le_audio: false,
     le_low_latency: true,
-    headset_mic: "off",
+    headset_mic: "auto",
     mic_device_id: "",
     mic_device_name: "",
+    mic_muted: false,
     sbc_bitpool: 0,
     sbcxq_bitpool: 0,
     sbc_min_bitpool: 0,
@@ -304,7 +300,13 @@ export function deviceKey(d: Pick<Device, "address" | "le_audio">): string {
 export function vbCable(devices: readonly AudioDevice[]): AudioDevice | null {
   const cables = devices.filter((d) => d.is_virtual && /cable/i.test(d.name));
   // The standard one before the 16-channel one
-  return cables.find((d) => !/16ch/i.test(d.name)) ?? cables[0] ?? null;
+  return cables.find((d) => !multichannelCable(d)) ?? cables[0] ?? null;
+}
+
+/** A 16-channel cable ("CABLE In 16ch"): no use as a source or a
+ *  microphone for most people (issue #86), listed in developer mode */
+export function multichannelCable(d: Pick<AudioDevice, "name">): boolean {
+  return /16\s*ch/i.test(d.name);
 }
 
 export function listedDevices(devices: readonly Device[], leAudio: boolean): Device[] {
@@ -332,15 +334,6 @@ export function captureDevice(
     return devices.find((d) => d.id === p.audio_device_id) ?? null;
   }
   return null;
-}
-
-/**
- * The capture source a profile streams: a chosen output device counts in
- * developer mode only (issue #193; the core's Settings::capture_source),
- * System Loopback outside it. The profile keeps its choice.
- */
-export function captureInForce<P extends Pick<Profile, "capture_mode">>(p: P, developer: boolean): P {
-  return p.capture_mode === "output" && !developer ? { ...p, capture_mode: "loopback" } : p;
 }
 
 /**

@@ -118,6 +118,7 @@ export function Flyout() {
             <CodecBadge
               aside={<QualityIndicator />}
               picker={<Show when={entry()}>{(e) => <CodecPicker entry={e()} />}</Show>}
+              voice={false}
             />
           </div>
         </header>

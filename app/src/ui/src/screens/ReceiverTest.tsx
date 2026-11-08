@@ -436,7 +436,7 @@ export function ReceiverTest() {
             <Show
               when={bitDepths(choices().codec).length > 1}
               fallback={
-                <input id={id} class="input readonly" readOnly value={t(`bitdepth.${fixedBitDepth(choices().codec)}`)} />
+                <output id={id} class="input readonly">{t(`bitdepth.${fixedBitDepth(choices().codec)}`)}</output>
               }
             >
               <Select

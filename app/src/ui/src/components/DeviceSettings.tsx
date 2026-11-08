@@ -18,7 +18,6 @@ import { LINKS } from "../lib/links";
 import {
   appCaptureSupport,
   captureDevice,
-  captureInForce,
   deviceFields,
   deviceFieldsComplete,
   entryBase,
@@ -29,6 +28,7 @@ import {
   type DeviceFields,
 } from "../lib/profile";
 import { captureChoices, captureText, captureValue, withCapture } from "./CapturePicker";
+import { InputSource } from "./InputSource";
 import { Banner, Button, Field, IconButton, Select, Toggle, type Option } from "./controls";
 import { Icon } from "./Icon";
 
@@ -85,11 +85,9 @@ export function DeviceSettings(props: { device: Device }) {
   const noVirtual = () => listed() && virtualDevices().length === 0;
   const [appSupport] = createResource(appCaptureSupport);
   const leOnly = () => leEntry() || (profiles().length > 0 && profiles().every((p) => p.le_audio));
-  const developer = () => snap().settings.developer_mode;
   /** The shown settings as a profile (what Home's capture source list
-   *  takes), with the source it streams: outside developer mode a chosen
-   *  output device is shown as System Loopback, and kept */
-  const shown = (): Profile => captureInForce({ ...newestBase(profiles()), ...f, le_audio: leOnly() }, developer());
+   *  takes) */
+  const shown = (): Profile => ({ ...newestBase(profiles()), ...f, le_audio: leOnly() });
   const mode = () => shown().capture_mode;
 
   /** Changes the device's settings: into each of its profiles once complete
@@ -117,29 +115,29 @@ export function DeviceSettings(props: { device: Device }) {
     setSaving(false);
   };
 
-  /** System Loopback, the virtual devices, the output devices (developer
-   *  mode) and the playing apps in one list */
+  /** The sound devices (the Windows default first), the virtual devices
+   *  and the playing apps in one list (issue #86: no "Loopback") */
   const sources = createMemo((): Option<string>[] => {
     const p = shown();
-    const c = captureChoices(p, devices() ?? [], apps() ?? [], appSupport() !== "no", developer());
+    const c = captureChoices(p, devices() ?? [], apps() ?? [], appSupport() !== "no", snap().settings.developer_mode);
     const virtual: Option<string>[] = c.virtual.map((o) => ({ ...o, group: t("capture.virtual") }));
     if (virtual.length === 0 && noVirtual()) {
       virtual.push({ value: "virtual:", label: t("capture.no_virtual_device"), group: t("capture.virtual"), disabled: true });
     }
-    const outputs: Option<string>[] = c.output.map((o) => ({ ...o, group: t("capture.output") }));
+    const outputs: Option<string>[] = c.output.map((o) => ({ ...o, group: t("capture.sound_devices") }));
     const list: Option<string>[] = c.apps.map((o) => ({ ...o, group: t("capture.app") }));
     if (list.length === 0 && apps() !== null && !p.le_audio && appSupport() !== "no") {
       list.push({ value: "app:", label: t("capture.no_app_playing"), group: t("capture.app"), disabled: true });
     }
-    // The Windows default output it records, by name, in its own group as
-    // the other sources (issue #86)
+    // The Windows default output it records, by name, first among the
+    // sound devices (issue #86)
     const output = (devices() ?? []).find((d) => d.is_default)?.name;
     const loopback: Option<string> = {
       value: "loopback",
       label: output ? t("capture.loopback_default", output) : t("capture.loopback_default_none"),
-      group: t("capture.loopback"),
+      group: t("capture.sound_devices"),
     };
-    return [loopback, ...virtual, ...outputs, ...list];
+    return [loopback, ...outputs, ...virtual, ...list];
   });
   const chooseSource = (value: string) => {
     const p = shown();
@@ -194,6 +192,7 @@ export function DeviceSettings(props: { device: Device }) {
           onChange={(v) => void apply({ auto_switch_device: v })}
         />
       </Show>
+      <InputSource device={props.device} devices={devices() ?? []} source={shown()} />
     </div>
   );
 }

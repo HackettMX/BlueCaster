@@ -37,6 +37,9 @@ const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Waits look at the cancel this often
 const POLL: Duration = Duration::from_millis(50);
 const FIND_POLL: Duration = Duration::from_millis(100);
+/// [`BtHost::le_scan_start`]: 30 ms of every 60 ms (0.625 ms units)
+const SHARED_SCAN_INTERVAL: u16 = 0x0060;
+const SHARED_SCAN_WINDOW: u16 = 0x0030;
 
 /// A completion the worker waits for (the first `set` counts)
 #[derive(Default)]
@@ -89,6 +92,28 @@ impl BtHost {
         while Instant::now() < end && !self.le_cancelled() {
             std::thread::sleep(POLL.min(end.saturating_duration_since(Instant::now())));
         }
+        self.le_run(RUN_TIMEOUT, |ctx| ctx.stop_scan()).unwrap_or_default()
+    }
+
+    /// Starts an LE scan that runs beside a classic one
+    /// ([`BtHost::scan_with`]) until [`BtHost::le_scan_stop`]: half the time
+    /// on air, the rest left to the inquiry and name requests. False when LE
+    /// Audio is not ready.
+    pub fn le_scan_start(&self) -> bool {
+        if !self.le_ready() {
+            return false;
+        }
+        tracing::info!("LE Audio: scanning beside the classic scan");
+        self.le_run(RUN_TIMEOUT, |ctx| ctx.start_scan_with(SHARED_SCAN_INTERVAL, SHARED_SCAN_WINDOW)).is_some()
+    }
+
+    /// The advertisers of the running [`BtHost::le_scan_start`] so far
+    pub fn le_scan_results(&self) -> Vec<LeScanResult> {
+        self.le_run(RUN_TIMEOUT, |ctx| ctx.scan_results()).unwrap_or_default()
+    }
+
+    /// Ends [`BtHost::le_scan_start`]'s scan: what it found
+    pub fn le_scan_stop(&self) -> Vec<LeScanResult> {
         self.le_run(RUN_TIMEOUT, |ctx| ctx.stop_scan()).unwrap_or_default()
     }
 

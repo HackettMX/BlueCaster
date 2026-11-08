@@ -33,6 +33,7 @@ import type {
   LogLine,
   Profile,
   ReceiverInfo,
+  MicTestState,
   ReceiverState,
   ServerMessage,
   Settings,
@@ -62,7 +63,7 @@ export type MockScenario =
   | "capped"
   /** Huawei earbuds that list LDAC only once it is asked for (issue #30) */
   | "huawei"
-  /** Developer mode, headset microphone on for the WH-1000XM5 (to CABLE
+  /** Headset microphone on for the WH-1000XM5 (to CABLE
    *  Input) and for the LE Audio earbuds: a stream reports its voice link */
   | "voice";
 
@@ -147,6 +148,7 @@ export function sampleProfile(over: Partial<Profile> = {}): Profile {
     headset_mic: "off",
     mic_device_id: "",
     mic_device_name: "",
+    mic_muted: false,
     sbc_bitpool: 0,
     sbcxq_bitpool: 0,
     sbc_min_bitpool: 0,
@@ -354,7 +356,7 @@ export function sampleSnapshot(scenario: MockScenario = "normal"): Snapshot {
     profiles,
     active_profile: fresh ? null : long ? LONG_NAME : "WH-1000XM5 (LDAC)",
     settings: sampleSettings(
-      voice ? { le_audio_experimental: true, developer_mode: true } : le ? { le_audio_experimental: true } : long ? { language: "ja" } : {},
+      voice ? { le_audio_experimental: true } : le ? { le_audio_experimental: true } : long ? { language: "ja" } : {},
     ),
     update: {
       checking: false,
@@ -414,11 +416,12 @@ const LE_SCAN_RESULTS: Device[] = [
 const sameEntry = (a: Pick<Device, "address" | "le_audio">, address: string, le: boolean) =>
   a.address.toUpperCase() === address.toUpperCase() && a.le_audio === le;
 
-const CABLE: AudioDevice = { id: "{0.0.0.00000000}.{cable}", name: "CABLE Input (VB-Audio Virtual Cable)", is_default: false, is_virtual: true, mix_rate: 44100, mix_channels: 2, mix_bits: 24 };
+const CABLE: AudioDevice = { id: "{0.0.0.00000000}.{cable}", name: "CABLE Input (VB-Audio Virtual Cable)", is_default: false, is_virtual: true, mix_rate: 44100, mix_channels: 2, mix_bits: 24, capture_name: "CABLE Output (VB-Audio Virtual Cable)" };
 const AUDIO_DEVICES: AudioDevice[] = [
-  { id: "{0.0.0.00000000}.{speakers}", name: "Speakers (Realtek(R) Audio)", is_default: true, is_virtual: false, mix_rate: 48000, mix_channels: 2, mix_bits: 32 },
+  { id: "{0.0.0.00000000}.{speakers}", name: "Speakers (Realtek(R) Audio)", is_default: true, is_virtual: false, mix_rate: 48000, mix_channels: 2, mix_bits: 32, capture_name: null },
   CABLE,
-  { id: "{0.0.0.00000000}.{voicemeeter}", name: "Voicemeeter Input (VB-Audio Voicemeeter VAIO)", is_default: false, is_virtual: true, mix_rate: 48000, mix_channels: 8, mix_bits: 32 },
+  { id: "{0.0.0.00000000}.{cable16}", name: "CABLE In 16ch (VB-Audio Virtual Cable)", is_default: false, is_virtual: true, mix_rate: 48000, mix_channels: 16, mix_bits: 24, capture_name: "CABLE Output (VB-Audio Virtual Cable)" },
+  { id: "{0.0.0.00000000}.{voicemeeter}", name: "Voicemeeter Input (VB-Audio Voicemeeter VAIO)", is_default: false, is_virtual: true, mix_rate: 48000, mix_channels: 8, mix_bits: 32, capture_name: "Voicemeeter Out B1 (VB-Audio Voicemeeter VAIO)" },
 ];
 
 const MIXER_APPS: MixerApp[] = [
@@ -650,6 +653,10 @@ export class MockCore implements Transport {
   /** Addresses paired in Windows' Bluetooth (device.windows_paired) */
   windowsPaired: string[] = [];
   windowsPairedThrough: string[] | null = null;
+  /** The call link's microphone packets (link samples) */
+  private voiceRx = { packets: 0, bad: 0, concealed: 0 };
+  /** Windows' names of those (device.windows_paired_through) */
+  windowsNames: Record<string, string> = {};
   /** LE keys of the saved devices (device.pairing), as derived with LE Audio on */
   leKeys: DevicePairing["le_keys"] = null;
   /** Why there are none (device.pairing) */
@@ -690,6 +697,8 @@ export class MockCore implements Transport {
   private streamStart: LinkTotals = { ...ZERO };
   private streamStarts = 0;
   private lastTick = 0;
+  /** The microphone test: what the core would answer, simulated in time */
+  private mic = { phase: "idle", since: 0, recorded: 0, error: null as string | null };
   private receiver: ReceiverState = {
     connection: "off",
     detail: "",
@@ -766,7 +775,10 @@ export class MockCore implements Transport {
       // One radio here: the adapter's pairings are all of Windows', unless
       // a test sets them apart
       case "device.windows_paired_through":
-        return this.windowsPairedThrough ?? this.windowsPaired;
+        return (this.windowsPairedThrough ?? this.windowsPaired).map((address) => ({
+          address,
+          name: this.windowsNames[address] ?? "",
+        }));
       case "device.pairing": {
         const saved = this.snap.devices.some((d) => d.saved && d.address === String(p.address));
         return {
@@ -791,8 +803,10 @@ export class MockCore implements Transport {
           ],
           from_last_connection: false,
         };
-      case "device.import_windows_pairings":
-        return { adapter_found: true, imported: ["00:A2:D0:00:00:02"], kept: [], added: [] };
+      case "device.import_windows_pairings": {
+        const chosen = Array.isArray(p.addresses) ? p.addresses.map(String) : ["00:A2:D0:00:00:02"];
+        return { adapter_found: true, imported: chosen, kept: [], added: [] };
+      }
       case "device.scan_stop":
         this.scanStop?.();
         return null;
@@ -1019,6 +1033,30 @@ export class MockCore implements Transport {
       }
       case "receiver.status":
         return this.receiverState();
+      case "mic_test.record": {
+        const st = this.snap.stream;
+        if (st.state !== "streaming") throw errorInfo("mic_test.not_streaming", "error.mic_test_not_streaming");
+        if (st.info?.codec === "LC3 (LE Audio)") throw errorInfo("mic_test.le_audio", "error.mic_test_le_audio");
+        this.mic = { phase: "starting", since: Date.now(), recorded: 0, error: null };
+        return this.micState();
+      }
+      case "mic_test.stop": {
+        const m = this.micState();
+        if (m.phase === "starting") this.mic.phase = "idle";
+        else if (m.phase === "recording" || m.phase === "playing") {
+          this.mic.recorded = m.recorded_ms;
+          this.mic.phase = "recorded";
+        }
+        return this.micState();
+      }
+      case "mic_test.play":
+        if (this.mic.recorded > 0) this.mic = { ...this.mic, phase: "playing", since: Date.now() };
+        return this.micState();
+      case "mic_test.status":
+        return this.micState();
+      case "mic_test.end":
+        this.mic = { phase: "idle", since: 0, recorded: 0, error: null };
+        return null;
       case "app.check_update": {
         this.snap.update = { ...this.snap.update, checking: true };
         this.emit({ kind: "update", value: this.snap.update });
@@ -1148,6 +1186,13 @@ export class MockCore implements Transport {
       f();
     }, ms * this.speed);
     this.timers.add(t);
+  }
+
+  /** A message on the running stream, as the core sends one (tests: the
+   *  headset microphone that did not open) */
+  noteStream(key: string) {
+    this.snap.stream = { ...this.snap.stream, message: { key, args: [] } };
+    this.emit({ kind: "stream", value: this.snap.stream });
   }
 
   private emit(event: Event) {
@@ -1297,8 +1342,7 @@ export class MockCore implements Transport {
       codec: profile.le_audio ? "lc3" : profile.codec,
       profile: name,
       source: sourceOf(
-        // A chosen output device counts in developer mode only (settings.rs capture_source)
-        profile.capture_mode === "output" && !this.snap.settings.developer_mode ? "loopback" : profile.capture_mode,
+        profile.capture_mode,
         profile.capture_mode === "app" ? profile.app_exe : profile.audio_device_id,
         profile.audio_device_name,
       ),
@@ -1503,14 +1547,14 @@ export class MockCore implements Transport {
     this.later(500, () => this.sbcAbrStep(step + 1));
   }
 
-  /** The voice link a stream of the profile reports: headset mode on in
-   *  developer mode with an output chosen (mSBC for a classic device, LC3
+  /** The voice link a stream of the profile reports: headset mode on
+   *  with an output chosen (mSBC for a classic device, LC3
    *  at 32 kHz for LE Audio), as W3/W4 report it */
   private voiceOf(name: string | null): VoiceStatus | null {
     const p = this.snap.profiles.find((x) => x.name === name);
     // Auto: no application records from the cable in the mock, so its
-    // link waits
-    if (!p || p.headset_mic !== "on" || !p.mic_device_id || !this.snap.settings.developer_mode) return null;
+    // link waits; muted: no link
+    if (!p || p.headset_mic !== "on" || p.mic_muted || !p.mic_device_id) return null;
     return p.le_audio
       ? { codec: "lc3", link: "le", rate: 32000, mic_device_id: p.mic_device_id }
       : { codec: "msbc", link: "hfp", rate: 16000, mic_device_id: p.mic_device_id };
@@ -1660,6 +1704,30 @@ export class MockCore implements Transport {
     });
     this.ensureSlowTimer();
     return this.receiverState();
+  }
+
+  /** The link takes 1.5 s, a recording at most 10 s; a voice-like level */
+  private micState(): MicTestState {
+    const max = 10000;
+    const m = this.mic;
+    const age = Date.now() - m.since;
+    if (m.phase === "starting" && age >= 1500 * this.speed) {
+      m.phase = "recording";
+      m.since = Date.now();
+    } else if (m.phase === "recording" && age >= max) {
+      m.phase = "recorded";
+      m.recorded = max;
+    } else if (m.phase === "playing" && age >= m.recorded) m.phase = "recorded";
+    const now = Date.now() - m.since;
+    const voice = () => Math.max(0, 0.35 * Math.sin(Date.now() / 180) + 0.25 * Math.random());
+    return {
+      phase: m.phase,
+      level: m.phase === "idle" || m.phase === "starting" ? 0 : voice(),
+      recorded_ms: m.phase === "recording" ? Math.min(now, max) : m.recorded,
+      max_ms: max,
+      played_ms: m.phase === "playing" ? Math.min(now, m.recorded) : 0,
+      error: m.error,
+    };
   }
 
   private receiverState(): ReceiverState {
@@ -1818,13 +1886,27 @@ export class MockCore implements Transport {
       return;
     }
     const t = Date.now() / 1000;
-    const kbps = streaming ? (this.snap.stream.info?.bitrate_kbps ?? 0) * (0.96 + 0.06 * Math.sin(t / 2)) : 0;
-    const pps = streaming ? 120 + Math.random() * 6 : 0;
+    // A classic device on its call link (headset microphone open): A2DP is
+    // suspended, as in the core
+    const voice = streaming && this.snap.stream.voice?.link === "hfp";
+    const a2dp = streaming && !voice;
+    // mSBC over eSCO: a 60-byte payload every 7.5 ms (64 kbps)
+    const kbps = voice ? 64 : a2dp ? (this.snap.stream.info?.bitrate_kbps ?? 0) * (0.96 + 0.06 * Math.sin(t / 2)) : 0;
+    const pps = voice ? 133.3 : a2dp ? 120 + Math.random() * 6 : 0;
     const bps = (kbps * 1000) / 8;
-    const avg = pps > 0 ? bps / pps : null;
+    const avg = a2dp && pps > 0 ? bps / pps : null;
+    if (voice) {
+      const n = 33;
+      const bad = Math.random() < 0.6 ? Math.round(Math.random() * 3) : 0;
+      this.voiceRx = {
+        packets: this.voiceRx.packets + n,
+        bad: this.voiceRx.bad + bad,
+        concealed: this.voiceRx.concealed + bad,
+      };
+    }
     const slots = avg === null ? 0 : avg + 4 <= 83 ? 2 : avg + 4 <= 552 ? 4 : Math.ceil((avg + 4) / 1021) * 6;
     // The controller holds a few ACL packets (one per media packet up to its 1021-byte buffer)
-    const backlog = streaming ? Math.max(1, Math.round(3 + 2 * Math.sin(t / 1.7) + Math.random() * 2)) : null;
+    const backlog = a2dp ? Math.max(1, Math.round(3 + 2 * Math.sin(t / 1.7) + Math.random() * 2)) : null;
     const aclPerSecond = pps * Math.max(1, Math.ceil(((avg ?? 0) + 4) / 1021));
     const rises = streaming && Math.random() < 0.02 ? 1 : 0;
     this.failedContacts += rises;
@@ -1838,21 +1920,21 @@ export class MockCore implements Transport {
       afh_map: streaming ? [0xff, 0xff, 0x3f, 0, 0, 0, 0xfe, 0xff, 0xff, 0x7f] : null,
       bytes_per_second: bps,
       packets_per_second: pps,
-      queue_depth: streaming ? Math.max(0, Math.round(2 + 3 * Math.sin(t) + Math.random() * 2)) : 0,
+      queue_depth: a2dp ? Math.max(0, Math.round(2 + 3 * Math.sin(t) + Math.random() * 2)) : 0,
       dropped: this.since(this.totals, this.streamStart).dropped,
       capture_dropped: this.since(this.totals, this.streamStart).capture_dropped,
-      airtime: streaming ? pps * slots * 625e-6 : 0,
+      airtime: a2dp ? pps * slots * 625e-6 : 0,
       avg_packet_bytes: avg,
       acl_packet:
         avg === null
           ? null
           : { name: avg + 4 <= 83 ? "3-DH1" : avg + 4 <= 552 ? "3-DH3" : "3-DH5", slots, from_features: true },
-      bandwidth_share: streaming ? (pps * ((avg ?? 0) + 4) * 8) / 1000 / 2178.13 : null,
-      queue_capacity: 64,
-      queue_ms: streaming ? Math.max(0, Math.round(10 + 10 * Math.sin(t))) : 0,
-      sink_delay_ms: streaming ? 187.5 : null,
-      encode: streaming ? { load: 0.004 + 0.001 * Math.sin(t), avg_us: 11 + Math.random() * 2, max_us: 30 + Math.random() * 20 } : null,
-      source_rate: streaming ? (this.snap.stream.info?.source_sample_rate ?? 0) : 0,
+      bandwidth_share: a2dp ? (pps * ((avg ?? 0) + 4) * 8) / 1000 / 2178.13 : null,
+      queue_capacity: voice ? null : 64,
+      queue_ms: a2dp ? Math.max(0, Math.round(10 + 10 * Math.sin(t))) : voice ? null : 0,
+      sink_delay_ms: a2dp ? 187.5 : null,
+      encode: a2dp ? { load: 0.004 + 0.001 * Math.sin(t), avg_us: 11 + Math.random() * 2, max_us: 30 + Math.random() * 20 } : null,
+      source_rate: voice ? (this.snap.stream.voice?.rate ?? 0) : streaming ? (this.snap.stream.info?.source_sample_rate ?? 0) : 0,
       counters: { total: { ...this.totals }, stream_start: { ...this.streamStart }, stream_starts: this.streamStarts },
       controller_backlog: backlog,
       controller_backlog_ms: backlog !== null && aclPerSecond > 0 ? (backlog * 1000) / aclPerSecond : null,
@@ -1891,6 +1973,7 @@ export class MockCore implements Transport {
         : null,
       capture_discontinuities: this.since(this.totals, this.streamStart).capture_discontinuities,
       capture_lost: this.since(this.totals, this.streamStart).capture_lost,
+      ...(voice ? { voice: true, voice_rx: { ...this.voiceRx } } : {}),
     };
     this.onMessage({ type: "event", rev: this.rev, event: { kind: "link", value: sample } });
   }
@@ -1989,6 +2072,11 @@ export function mockFromUrl(): MockCore {
   const mock = new MockCore({ scenario, window: win });
   mock.noVirtual = q.has("novirtual");
   mock.captureDrops = q.has("capturedrops");
+  // ?winpaired: headphones Windows paired through the adapter (the setup's import)
+  if (q.has("winpaired")) {
+    mock.windowsPaired = ["00:A2:D0:00:00:02", "38:18:4C:00:00:07"];
+    mock.windowsNames = { "00:A2:D0:00:00:02": "EarFun Air Pro 4", "38:18:4C:00:00:07": "WF-1000XM5" };
+  }
   if (q.has("otherradio")) {
     mock.setOtherRadio({ name: "MediaTek Bluetooth Adapter", paired: q.get("otherradio") === "paired" });
   }

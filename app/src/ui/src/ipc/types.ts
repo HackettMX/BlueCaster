@@ -41,6 +41,7 @@ import type { VendorMode as BVendorMode } from "./bindings/VendorMode";
 import type { VendorOverride as BVendorOverride } from "./bindings/VendorOverride";
 import type { ReceiverInfo as BReceiverInfo } from "./bindings/ReceiverInfo";
 import type { ReceiverState as BReceiverState } from "./bindings/ReceiverState";
+import type { MicTestState as BMicTestState } from "./bindings/MicTestState";
 import type { ReceiverStats as BReceiverStats } from "./bindings/ReceiverStats";
 import type { ServerMessage as BServerMessage } from "./bindings/ServerMessage";
 import type { Settings as BSettings } from "./bindings/Settings";
@@ -53,6 +54,7 @@ import type { VoiceStatus as BVoiceStatus } from "./bindings/VoiceStatus";
 import type { UpdateState as BUpdateState } from "./bindings/UpdateState";
 import type { VerboseState as BVerboseState } from "./bindings/VerboseState";
 import type { WindowsImport as BWindowsImport } from "./bindings/WindowsImport";
+import type { WindowsPairedDevice as BWindowsPairedDevice } from "./bindings/WindowsPairedDevice";
 
 export type Wire<T> = T extends bigint
   ? number
@@ -108,6 +110,7 @@ export type VendorMode = BVendorMode;
 export type VendorOverride = Wire<BVendorOverride>;
 export type ReceiverInfo = Wire<BReceiverInfo>;
 export type ReceiverState = Wire<BReceiverState>;
+export type MicTestState = Wire<BMicTestState>;
 export type ReceiverStats = Wire<BReceiverStats>;
 export type ServerMessage = Wire<BServerMessage>;
 export type Settings = Wire<BSettings>;
@@ -121,6 +124,7 @@ export type DevicePairing = Wire<BDevicePairing>;
 export type DeviceService = Wire<BDeviceService>;
 export type ServiceList = Wire<BServiceList>;
 export type WindowsImport = Wire<BWindowsImport>;
+export type WindowsPairedDevice = Wire<BWindowsPairedDevice>;
 
 export type MethodName = Method["method"];
 
@@ -133,7 +137,7 @@ interface Results {
   "state.snapshot": Snapshot;
   "device.scan": Device[];
   "device.windows_paired": string[];
-  "device.windows_paired_through": string[];
+  "device.windows_paired_through": WindowsPairedDevice[];
   "device.pairing": DevicePairing;
   "device.services": ServiceList;
   "device.import_windows_pairings": WindowsImport;
@@ -161,6 +165,10 @@ interface Results {
   "receiver.discover": ReceiverInfo[];
   "receiver.connect": ReceiverState;
   "receiver.status": ReceiverState;
+  "mic_test.record": MicTestState;
+  "mic_test.stop": MicTestState;
+  "mic_test.play": MicTestState;
+  "mic_test.status": MicTestState;
   "app.check_update": UpdateState;
   "settings.set": SettingsApplied;
 }

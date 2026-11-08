@@ -2,15 +2,16 @@
 // its codec cards, the codecs it offered when it last connected in green
 // and the others in red (hidden unless asked for), each with its settings
 // behind "...", and a dot beside the device's name that is green while it
-// streams. "Auto-select the codec with the highest quality" is one setting
-// for every device (settings.auto_codec, on by default; each device had its
-// own before): on, the cards only show what Auto picks, in the default
-// order (highest sound quality first), and a click on one, or on its "...",
-// offers to turn Auto-select off; off, choosing a card is choosing that
-// device's codec (a device with none chosen yet, its profile's codec
-// "auto", goes on with Auto's pick), and the cards are dragged (or moved
-// with Alt+arrow keys) into the device's own order (its profile's
-// codec_order, issue #86 round 8). A card the device does not offer is
+// streams. The cards are dragged into the device's own order (its
+// profile's codec_order, issue #86 round 8; with Alt+arrow keys too while
+// Auto-select is off), highest sound quality first unless changed; Auto
+// takes the first card the device offers. "Auto-select the codec with the
+// highest quality" is one setting for every device (settings.auto_codec,
+// on by default; each device had its own before): on, the cards show what
+// Auto picks, and a click on one, or on its "...", offers to turn
+// Auto-select off; off, choosing a card is choosing that device's codec (a
+// device with none chosen yet, its profile's codec "auto", goes on with
+// Auto's pick). A card the device does not offer is
 // chosen like any other (issue #86: without Auto-select the choice is the
 // user's): the core asks for it anyway (the profile's codec_forced) and the
 // stream stops with an error if the device refuses it. A codec chosen while
@@ -44,13 +45,12 @@ import { unwrap } from "solid-js/store";
 import { useApp } from "../app/context";
 import { saveSettings } from "../app/settings";
 import { CodecCard, CodecSettings, type CodecChoice } from "../components/CodecCards";
-import { Banner, Button, Check, Dialog, Field, Segmented, Select, Toggle, type Option } from "../components/controls";
+import { Banner, Button, Check, Dialog, Toggle } from "../components/controls";
 import { Icon } from "../components/Icon";
 import { stateLabel } from "../components/stream";
 import { t } from "../i18n";
 import type { AudioDevice, Profile, Snapshot } from "../ipc/types";
 import {
-  AUTO_ORDER,
   autoKeepsCodecSettings,
   CARD_ORDER,
   cardOrder,
@@ -58,7 +58,9 @@ import {
   codecLabelKey,
   codecSpec,
   codecSupport,
+  developerOnly,
   effectiveCodec,
+  offeredCodecs,
   capsForSettings,
   sbcCapsForSettings,
   isDefaultOrder,
@@ -68,11 +70,7 @@ import {
 } from "../lib/codecs";
 import {
   audioEntries,
-  HEADSET_MODES,
-  headsetMode,
-  type HeadsetMode,
   captureDevice,
-  captureInForce,
   codecsOnRequest,
   entryBase,
   entryByKey,
@@ -170,14 +168,14 @@ async function saveEntry(
   return ok ? saved.name : null;
 }
 
-/** Saves a device's headset mode or microphone output (developer mode):
- *  the Codecs screen, Home's and the flyout's chip. The core opens or
+/** Saves a device's headset mode, microphone output (Codecs) or mute
+ *  (Home's and the flyout's chip). The core opens or
  *  closes the microphone link (Auto: as apps record from the output).
  *  True once saved. */
 export async function saveHeadsetMic(
   app: ReturnType<typeof useApp>,
   entry: AudioEntry,
-  patch: Partial<Pick<Profile, "headset_mic" | "mic_device_id" | "mic_device_name">>,
+  patch: Partial<Pick<Profile, "headset_mic" | "mic_device_id" | "mic_device_name" | "mic_muted">>,
 ): Promise<boolean> {
   return (await saveEntry(app, entry, (base) => ({ ...base, ...patch }))) !== null;
 }
@@ -233,15 +231,20 @@ export function pickedCodec(
 ): string | null {
   const p = entry.profile ?? entryBase(entry, snap.profiles);
   const codec = p.codec;
-  const known = knownCodecs(snap.devices, entry.address);
+  // Outside developer mode its codecs are left out, as the core does: one
+  // chosen is used as one the device does not offer, never asked for anyway
+  const developer = snap.settings.developer_mode;
+  const known = offeredCodecs(knownCodecs(snap.devices, entry.address), developer);
+  const blocked = !developer && developerOnly(codec);
   // One it may offer once chosen stays chosen (issue #30)
-  if (!autoAll && codecsOnRequest(snap.devices, entry.address).includes(codec)) return codec;
+  if (!autoAll && !blocked && codecsOnRequest(snap.devices, entry.address).includes(codec)) return codec;
   // One chosen on its card though the device does not offer it: that one;
   // one it no longer offers: the one used instead (issue #86)
   if (!autoAll && codec !== "auto") {
+    if (blocked) return effectiveCodec(codec, known, true, order);
     return p.codec_forced ? codec : (effectiveCodec(codec, known, true, order) ?? codec);
   }
-  return streamingCodec(snap, entry) ?? effectiveCodec("auto", known, true, autoAll ? AUTO_ORDER : order);
+  return streamingCodec(snap, entry) ?? effectiveCodec("auto", known, true, order);
 }
 
 /** Whether a codec's card shows: the one picked always, the others unless
@@ -282,15 +285,12 @@ export function Codecs() {
   // A card, or its "...", clicked under Auto-select (issue #86 round 8):
   // what follows once it is turned off (null: the dialog is closed)
   const [locked, setLocked] = createSignal<(() => void) | null>(null);
-  // The PC's output devices with their formats, read in developer mode
-  // (Auto matching them, the headset microphone's output), again when the
-  // window comes back (changed in Windows meanwhile)
-  const developer = () => snap().settings.developer_mode;
+  // The PC's output devices with their formats (the headset microphone's
+  // output, Auto matching them in developer mode), again when the window
+  // comes back (changed in Windows meanwhile)
   const [audioDevices, setAudioDevices] = createSignal<AudioDevice[]>([]);
-  const loadDevices = () => {
-    if (developer()) void core.request("audio.devices").then(setAudioDevices, () => {});
-  };
-  createEffect(on(developer, loadDevices));
+  const loadDevices = () => void core.request("audio.devices").then(setAudioDevices, () => {});
+  loadDevices();
   window.addEventListener("focus", loadDevices);
   onCleanup(() => window.removeEventListener("focus", loadDevices));
 
@@ -380,7 +380,7 @@ function DeviceCodecs(props: {
   // The format Windows plays its source in (one app: the default output, as
   // the core reads it)
   const sourceFormat = () => {
-    const p = captureInForce(shown(), snap().settings.developer_mode);
+    const p = shown();
     const d =
       p.capture_mode === "app"
         ? props.audioDevices.find((x) => x.is_default)
@@ -392,12 +392,13 @@ function DeviceCodecs(props: {
   const support = (id: string) => codecSupport(id, known(), onRequest());
   // The device's order while it is being dragged (null: the saved one)
   const [dragOrder, setDragOrder] = createSignal<CodecId[] | null>(null);
-  // Its cards' order: Auto-select's is the default one (highest sound
-  // quality first), read-only
-  const order = (): CodecId[] => (props.auto ? [...CARD_ORDER] : (dragOrder() ?? cardOrder(shown().codec_order)));
+  // Its cards' order, which Auto follows under Auto-select too
+  const order = (): CodecId[] => dragOrder() ?? cardOrder(shown().codec_order);
   const picked = () => pickedCodec(snap(), e(), props.auto, order());
+  // Opus 05's card only in developer mode (issue #86); hidden, it keeps its
+  // place in the order
   const cards = () =>
-    order()
+    offeredCodecs(order(), snap().settings.developer_mode)
       .filter((id) => codecShown(id, picked(), known(), props.hide, onRequest()))
       .map((id) => codecSpec(id));
   const [settingsOf, setSettingsOf] = createSignal<CodecSpec | null>(null);
@@ -561,7 +562,7 @@ function DeviceCodecs(props: {
     el.style.transform = `translate(${dx}px, ${dy}px)`;
   };
   const onPointerDown = (ev: PointerEvent) => {
-    if (props.auto || locked() || ev.button !== 0) return;
+    if (locked() || ev.button !== 0) return;
     const target = ev.target as Element;
     const cell = target.closest<HTMLElement>(".codec-cell[data-codec]");
     if (!cell || target.closest(".codec-more")) return;
@@ -720,11 +721,14 @@ function DeviceCodecs(props: {
                 readOnly={props.auto}
                 // Only supported codecs shown: no "Supported" tag on each
                 support={props.hide && support(c.id) === "offered" ? null : support(c.id)}
-                orderable={!props.auto}
+                orderable
                 dragging={dragging() === c.id}
-                describedBy={hintId}
+                // The keys need a card that takes the focus (not under Auto-select)
+                describedBy={props.auto ? undefined : hintId}
                 onPick={() => void choose(c.id)}
                 onReadOnly={(settings) => {
+                  // The click that ends a drag
+                  if (swallowClick) return;
                   // Developer mode: the codec's settings apply under Auto-select
                   if (settings && autoKeepsCodecSettings(snap().settings)) return setSettingsOf(c);
                   props.onLocked(() => (settings ? setSettingsOf(c) : void choose(c.id)));
@@ -741,15 +745,22 @@ function DeviceCodecs(props: {
         <span class="sr-only" role="status" aria-live="polite">
           {said()}
         </span>
-        <Show when={!props.auto && !shownInDefaultOrder(order(), cards().map((c) => c.id))}>
+        {/* Visible hint for dragging (the cards' description above has the
+            keys too); Reset beside it while the order is changed */}
+        <Show when={cards().length > 1}>
           <div class="codecs-order">
-            <Button
-              icon="arrow_reset"
-              disabled={busy() || ordering()}
-              onClick={() => flip(() => void saveOrder([...CARD_ORDER]))}
-            >
-              {t("ui.codecs.order_reset")}
-            </Button>
+            <p class="hint" aria-hidden="true">
+              {t("ui.codecs.order_hint")}
+            </p>
+            <Show when={!shownInDefaultOrder(order(), cards().map((c) => c.id))}>
+              <Button
+                icon="arrow_reset"
+                disabled={busy() || ordering()}
+                onClick={() => flip(() => void saveOrder([...CARD_ORDER]))}
+              >
+                {t("ui.codecs.order_reset")}
+              </Button>
+            </Show>
           </div>
         </Show>
         <Show when={known().length === 0}>
@@ -777,85 +788,6 @@ function DeviceCodecs(props: {
           }}
         />
       </Show>
-      <Show when={snap().settings.developer_mode}>
-        <HeadsetMic entry={e()} audioDevices={props.audioDevices} />
-      </Show>
     </section>
-  );
-}
-
-/** Headset mode of a device (developer mode): its microphone rendered to
- *  an output device of the PC, a virtual cable whose recording side apps
- *  use as a microphone (the virtual devices listed first). Off, Auto (only
- *  while an app records from it) or On. A classic device plays in call
- *  quality while the microphone is open; LE Audio keeps its own. */
-function HeadsetMic(props: { entry: AudioEntry; audioDevices: readonly AudioDevice[] }) {
-  const app = useApp();
-  const snap = () => app.core.state.snap!;
-  const shown = (): Profile => props.entry.profile ?? entryBase(props.entry, snap().profiles);
-  const mode = () => headsetMode(shown());
-  const [busy, setBusy] = createSignal(false);
-  const save = async (patch: Partial<Profile>) => {
-    setBusy(true);
-    await saveHeadsetMic(app, props.entry, patch);
-    setBusy(false);
-  };
-  const outputs = (): Option<string>[] => {
-    const p = shown();
-    const list = [...props.audioDevices].sort((a, b) => Number(b.is_virtual) - Number(a.is_virtual));
-    const options: Option<string>[] = list.map((d) => ({
-      value: d.id,
-      label: d.name,
-      group: d.is_virtual ? t("capture.virtual") : t("capture.output"),
-    }));
-    // One chosen before and not there now: by its name
-    if (p.mic_device_id && !list.some((d) => d.id === p.mic_device_id)) {
-      options.unshift({ value: p.mic_device_id, label: p.mic_device_name || p.mic_device_id });
-    }
-    if (!p.mic_device_id) options.unshift({ value: "", label: t("ui.codec.none"), disabled: true });
-    return options;
-  };
-  const chooseOutput = (id: string) => {
-    const d = props.audioDevices.find((x) => x.id === id);
-    if (!d || id === shown().mic_device_id) return;
-    void save({ mic_device_id: d.id, mic_device_name: d.name });
-  };
-  return (
-    <div class="headset-mic">
-      <div class="headset-mic-mode">
-        <span class="row-label" title={t("ui.headset_mic_hint")}>
-          {t("ui.headset_mic")}
-        </span>
-        <Segmented<HeadsetMode>
-          label={t("ui.headset_mic")}
-          value={mode()}
-          options={HEADSET_MODES.map((m) => ({ value: m, label: t(`ui.headset_mic_${m}`), disabled: busy() }))}
-          onChange={(m) => void save({ headset_mic: m })}
-        />
-      </div>
-      <Show when={mode() === "auto"}>
-        <span class="hint">{t("ui.headset_mic_auto_hint")}</span>
-      </Show>
-      <Show when={mode() !== "off"}>
-        <Field label={t("ui.mic_output")} hint={t("ui.mic_output_hint")} stacked>
-          {(id, describedBy) => (
-            <Select
-              id={id}
-              describedBy={describedBy}
-              value={shown().mic_device_id}
-              options={outputs()}
-              disabled={busy()}
-              onChange={chooseOutput}
-            />
-          )}
-        </Field>
-        <Show when={!shown().mic_device_id}>
-          <p class="field-warn">{t("ui.headset_mic_no_output")}</p>
-        </Show>
-        <Show when={!props.entry.le_audio}>
-          <p class="field-warn">{t("ui.headset_mic_quality")}</p>
-        </Show>
-      </Show>
-    </div>
   );
 }

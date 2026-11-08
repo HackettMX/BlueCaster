@@ -1,11 +1,12 @@
 // The capture source choices of a device (its settings on Audio Devices):
-// System Loopback, a virtual device, a playing app, or (developer mode, issue
-// #193) one output device whichever is the default. The source is the
+// System Loopback, a virtual device, a playing app, or one output device
+// whichever is the default (issue #193). The source is the
 // device's: the choice is saved into all the device's profiles (issue #86);
 // a stream in use takes it without reconnecting (profile.save in the core).
 // Home chose it too until issue #86 put the codec and the link latency there.
 
 import { t } from "../i18n";
+import { multichannelCable } from "../lib/profile";
 import type { AudioApp, AudioDevice, Profile } from "../ipc/types";
 import type { IconName } from "./icons";
 
@@ -36,10 +37,9 @@ export function captureValue(p: Profile): string {
   return "loopback";
 }
 
-/** The choices: virtual devices, every output device (developer mode
- *  only), and playing apps, the profile's own also when it is not there now.
+/** The choices: virtual devices, every output device, and playing apps, the profile's own also when it is not there now.
  *  No apps for LE Audio (error.le_audio_capture) or on a Windows that cannot
- *  capture one app. */
+ *  capture one app. The 16-channel cable only in developer mode (issue #86). */
 export function captureChoices(
   p: Profile,
   devices: readonly AudioDevice[],
@@ -47,7 +47,9 @@ export function captureChoices(
   appsOk: boolean,
   developer = false,
 ): { virtual: Choice[]; output: Choice[]; apps: Choice[] } {
-  const virtual = devices.filter((d) => d.is_virtual).map((d) => ({ value: `virtual:${d.id}`, label: d.name }));
+  const virtual = devices
+    .filter((d) => d.is_virtual && (developer || !multichannelCable(d) || captureValue(p) === `virtual:${d.id}`))
+    .map((d) => ({ value: `virtual:${d.id}`, label: d.name }));
   if (p.capture_mode === "virtual" && p.audio_device_id && !virtual.some((c) => c.value === captureValue(p))) {
     virtual.unshift({
       value: captureValue(p),
@@ -56,10 +58,8 @@ export function captureChoices(
   }
   // The other outputs: each device is listed once, virtual ones under Virtual
   // Device
-  const output: Choice[] = developer
-    ? devices.filter((d) => !d.is_virtual).map((d) => ({ value: `output:${d.id}`, label: d.name }))
-    : [];
-  if (developer && p.capture_mode === "output" && p.audio_device_id && !output.some((c) => c.value === captureValue(p))) {
+  const output: Choice[] = devices.filter((d) => !d.is_virtual).map((d) => ({ value: `output:${d.id}`, label: d.name }));
+  if (p.capture_mode === "output" && p.audio_device_id && !output.some((c) => c.value === captureValue(p))) {
     output.unshift({
       value: captureValue(p),
       label: t("capture.volume_sync_missing", p.audio_device_name || p.audio_device_id),

@@ -475,7 +475,7 @@ export function CodecSettings(props: {
     return (
       <Field label={title} stacked>
         {(id) => (
-          <Show when={only() === undefined} fallback={<input id={id} class="input readonly" readOnly value={label(only()!)} />}>
+          <Show when={only() === undefined} fallback={<output id={id} class="input readonly">{label(only()!)}</output>}>
             <Select id={id} value={v[key]} options={options()} onChange={(x) => set(key, x)} />
           </Show>
         )}
@@ -571,7 +571,7 @@ export function CodecSettings(props: {
           when={onlyRate() === undefined}
           fallback={
             <Field label={t("connection.sample_rate")}>
-              {(id) => <input id={id} class="input readonly" readOnly value={`${onlyRate()} Hz`} />}
+              {(id) => <output id={id} class="input readonly">{`${onlyRate()} Hz`}</output>}
             </Field>
           }
         >
@@ -599,7 +599,7 @@ export function CodecSettings(props: {
           when={onlyDepth() === undefined}
           fallback={
             <Field label={t("connection.bit_depth")}>
-              {(id) => <input id={id} class="input readonly" readOnly value={t(`bitdepth.${onlyDepth()}`)} />}
+              {(id) => <output id={id} class="input readonly">{t(`bitdepth.${onlyDepth()}`)}</output>}
             </Field>
           }
         >
@@ -673,7 +673,7 @@ export function CodecSettings(props: {
           {/* Fixed for each codec, unless chosen above (issue #86) */}
           <Show when={!props.developer || v.codec === "sbcxq"}>
             <Field label={t("ui.diag.cd_channel_mode")}>
-              {(id) => <input id={id} class="input readonly" readOnly value={t(`ui.diag.cd_mode.${sbcMode()}`)} />}
+              {(id) => <output id={id} class="input readonly">{t(`ui.diag.cd_mode.${sbcMode()}`)}</output>}
             </Field>
           </Show>
         </Show>

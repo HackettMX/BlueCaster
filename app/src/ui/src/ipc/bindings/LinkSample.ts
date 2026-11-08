@@ -5,6 +5,7 @@ import type { IsoCounters } from "./IsoCounters";
 import type { LinkCounters } from "./LinkCounters";
 import type { LinkDetails } from "./LinkDetails";
 import type { RemoteChip } from "./RemoteChip";
+import type { VoiceRxCounters } from "./VoiceRxCounters";
 
 /**
  * Link quality, 4 times a second while subscribed
@@ -121,4 +122,15 @@ capture_lost?: number | null,
  * The channels the link hops over: 10 bytes, bit n = Bluetooth
  * channel n (2402 + n MHz). Null while there is no reading.
  */
-afh_map?: Array<number> | null, };
+afh_map?: Array<number> | null, 
+/**
+ * A classic device plays over its call link (the headset microphone
+ * is open): A2DP is suspended, and the media figures above are the
+ * call link's (SCO payloads sent, the uplink capture). None: not on a
+ * call link
+ */
+voice?: boolean, 
+/**
+ * The call link's way back (the microphone), while on it
+ */
+voice_rx?: VoiceRxCounters | null, };

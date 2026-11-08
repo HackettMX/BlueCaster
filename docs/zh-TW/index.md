@@ -11,7 +11,7 @@ has_toc: false
 適用於 Windows、支援所有轉碼器的藍牙 A2DP 音訊串流工具。
 {: .fs-6 .fw-300 }
 
-使用處於 WinUSB 模式的 USB 藍牙介面卡，以 **LHDC V5、LDAC、aptX Adaptive、aptX HD、aptX、aptX Low Latency、AAC、SBC** 及（實驗性的）**Opus** 與 PipeWire 的 **Opus 05** 串流系統音訊 -- 不需要核心驅動程式，也不需要測試簽章。
+把一般的藍牙介面卡（便宜的 USB 介面卡，或許多筆電的內建介面卡）從 Windows 只給的基本轉碼器，變成 Hi-Fi 發射器：**LHDC V5、LDAC 與 aptX Adaptive** 最高 96 kHz（LHDC V5 最高 192 kHz），以及 **aptX、AAC、SBC XQ 與 SBC**。實驗性：**aptX HD、aptX Low Latency、Opus、FastStream 與 LE Audio（LC3）**。BlueCaster 會自行設定介面卡，一鍵即可交還給 Windows（[運作方式](architecture)）。
 
 ![BlueCaster's Codecs screen, streaming LDAC 990 kbps / 48 kHz to Sony WH-1000XM4](../images/app_sample.png)
 
@@ -54,7 +54,7 @@ has_toc: false
 | SBC XQ | ❌ | ❌ | ✅ | ✅（SBC 允許雙聲道且 bitpool ≥ 29 的接收端） |
 | SBC | ✅ | ✅ | ✅ | ✅ |
 | FastStream | ❌ | ❌ | ✅ | 🧪 實驗性（僅限音樂，需明確選擇） |
-| Opus 05（PipeWire 自有的 Opus） | ❌ | ❌ | ✅ PipeWire 0.3.57+（`opus_05`，僅限 PipeWire 裝置） | 🧪 實驗性（需明確選擇） |
+| Opus 05（PipeWire 自有的 Opus） | ❌ | ❌ | ✅ PipeWire 0.3.57+（`opus_05`，僅限 PipeWire 裝置） | 🧪 實驗性（需明確選擇，僅限開發人員模式） |
 | LC3（LE Audio，BAP 單播） | ❌ | ✅ 僅限藍牙硬體與驅動程式支援 LE Audio 的 PC | ✅ PipeWire BAP `lc3`（BlueZ LE Audio） | 🧪 實驗性（裝置的 LE Audio 項目；電競耳機使用 GMAP 低延遲；需要支援 ISO 的 Bluetooth 5.2 介面卡，[使用方式](usage#le-audio)） |
 
 ✅ 支援 · 🧪 實驗性 · ❌ 不支援。所有欄位皆為傳送端（PC → 耳機）。「內建」指不使用 BlueCaster 時作業系統本身的藍牙音訊；Ubuntu 欄位為 Ubuntu 26.04 的 PipeWire 轉碼器組合（`libspa-0.2-bluetooth`）。
@@ -111,13 +111,13 @@ BlueCaster 透過 WASAPI 擷取音訊，提供三種模式：
 
 | 模式 | 說明 | 使用情境 |
 |:-----|:------------|:---------|
-| **系統回送** | 透過 WASAPI 回送，擷取預設播放裝置的所有系統音訊輸出 | 設定簡單 -- 串流所有聲音 |
+| **預設裝置** | 擷取預設播放裝置的所有系統音訊輸出 | 設定簡單 -- 串流所有聲音 |
 | **虛擬裝置** | 從使用者選取的虛擬音訊裝置（例如 VB-CABLE、VoiceMeeter）擷取 | 將特定應用程式導向藍牙，其他音訊仍從喇叭播放 |
 | **應用程式** | 僅擷取單一應用程式播放的內容（經該應用程式本身處理後）（Windows 11 / Windows 10 2004 以上） | 傳送單一應用程式，或系統層級效果應用程式（等化器、音效增強器）的輸出 |
 
 在 **虛擬裝置** 模式下，BlueCaster 可以將 Windows 預設播放裝置切換為所選的虛擬裝置（**連線時設為 Windows 預設輸出**），再擷取其回送輸出。輸出到該虛擬裝置的應用程式會透過藍牙串流。停止串流時，會還原先前的預設裝置。
 
-系統回送不會把音訊從預設播放裝置上移走：音訊會同時在該裝置與藍牙上播放。若無法開啟所選的虛擬裝置，連線會改為傳送系統音訊，並會加以說明。請參閱 [擷取模式](usage#capture-modes)。
+**預設裝置** 來源不會把音訊從預設播放裝置上移走：音訊會同時在該裝置與藍牙上播放。若無法開啟所選的虛擬裝置，連線會改為傳送系統音訊，並會加以說明。請參閱 [擷取模式](usage#capture-modes)。
 
 ## 運作方式
 
@@ -143,7 +143,7 @@ BlueCaster 完全繞過 Windows 藍牙堆疊。它透過 WinUSB 直接與 USB �
 
 ## 功能
 
-- **多轉碼器**：LHDC V5、LDAC、aptX Adaptive、aptX HD、aptX、aptX Low Latency、AAC、SBC XQ、SBC 及（實驗性的）Opus / Opus 05 / FastStream，自動協商
+- **多轉碼器**：LHDC V5、LDAC、aptX Adaptive、aptX、AAC、SBC XQ、SBC 及（實驗性的）aptX HD / aptX Low Latency / Opus / Opus 05 / FastStream，自動協商
 - **LE Audio（實驗性）**：以 LC3 傳送到 LE Audio 耳機與耳塞式耳機（BAP 單播、一對耳機的左右兩耳、耳機音量、媒體按鍵、GMAP 低延遲）。需要支援 Bluetooth 5.2 等時通道的介面卡；只在藍牙模擬器上測試過，尚未在實際的 LE Audio 耳機上確認（請參閱[使用方式](usage#le-audio)）
 - **三種擷取模式**：系統回送、虛擬音訊裝置路由，或單一應用程式的輸出
 - **視窗、系統匣與 CLI**：用於設定與診斷的視窗、日常連線用的系統匣快顯視窗與選單，以及命令列（請參閱 [使用方式](usage)）

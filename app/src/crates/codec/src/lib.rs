@@ -250,6 +250,14 @@ impl CodecKind {
         )
     }
 
+    /// Only in developer mode (issue #86): PipeWire's Opus 05, which only
+    /// PipeWire implements and which is not verified with one. Otherwise
+    /// the app neither shows it nor uses it: a device's is left out as if
+    /// it did not offer it ([`caps::RemoteCaps::without_developer_codecs`]).
+    pub fn developer_only(self) -> bool {
+        matches!(self, CodecKind::Opus05)
+    }
+
     /// Whether the encoder for this codec is built in
     pub fn available(self) -> bool {
         match self {

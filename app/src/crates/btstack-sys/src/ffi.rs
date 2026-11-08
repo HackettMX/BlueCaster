@@ -29,6 +29,7 @@ unsafe extern "C" {
     pub fn bluecaster_hfp_ag_release(acl_handle: u16) -> u8;
     pub fn bluecaster_hfp_ag_audio_connect(acl_handle: u16) -> u8;
     pub fn bluecaster_hfp_ag_audio_release(acl_handle: u16) -> u8;
+    pub fn bluecaster_hfp_ag_set_speaker_gain(acl_handle: u16, gain: u8) -> u8;
     pub fn bluecaster_sco_send(sco_handle: u16, payload: *const u8, len: u16) -> u8;
     pub fn bluecaster_sco_request_can_send_now(sco_handle: u16);
     pub fn bluecaster_sco_packet_length(sco_handle: u16) -> u16;
@@ -311,6 +312,18 @@ unsafe extern "C" {
 
     // ---- BTstack: LE device DB ----
     pub fn le_device_db_max_count() -> c_int;
+    pub fn le_device_db_add(addr_type: c_int, addr: *mut u8, irk: *mut u8) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    pub fn le_device_db_encryption_set(
+        index: c_int,
+        ediv: u16,
+        rand: *mut u8,
+        ltk: *mut u8,
+        key_size: c_int,
+        authenticated: c_int,
+        authorized: c_int,
+        secure_connection: c_int,
+    );
     pub fn le_device_db_info(index: c_int, addr_type: *mut c_int, addr: *mut u8, irk: *mut u8);
     #[allow(clippy::too_many_arguments)]
     pub fn le_device_db_encryption_get(

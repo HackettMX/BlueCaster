@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "../app/App";
+import { ICONS } from "../components/icons";
 import { FALLBACK_NOTE_MS } from "../components/stream";
 import { setLanguage, t } from "../i18n";
 import { MockCore, type MockOptions } from "../ipc/mock";
@@ -26,6 +27,9 @@ afterEach(async () => {
   mock = null;
   await setLanguage("en");
 });
+
+/** A button with the administrator shield (it starts a UAC prompt) */
+const shielded = (b: HTMLElement) => b.querySelector("svg.icon path")?.getAttribute("d") === ICONS.shield;
 
 /** A device's card on Home (its button is "Connect" on every card) */
 const homeCard = (name: string) => screen.findByRole("group", { name });
@@ -55,9 +59,12 @@ describe("Home", () => {
     m.emit({ kind: "adapter", value: m.snap.adapter });
     fireEvent.click(within(wh).getByRole("button", { name: "Connect" }));
     const replace = await screen.findByRole("button", { name: "Replace with WinUSB driver" });
+    expect(shielded(replace)).toBe(true);
     fireEvent.click(replace);
     const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Replace with WinUSB driver" }));
+    const confirm = within(dialog).getByRole("button", { name: "Replace with WinUSB driver" });
+    expect(shielded(confirm)).toBe(true);
+    fireEvent.click(confirm);
     await waitFor(() => expect(screen.queryByRole("button", { name: "Replace with WinUSB driver" })).toBeNull());
     expect(document.querySelector(".banner.error, .banner-error")).toBeNull();
   });
@@ -326,6 +333,17 @@ describe("every screen renders", () => {
     });
   }
 
+  it("the adapter's driver buttons carry the administrator shield, others not", async () => {
+    start("#/adapter");
+    const restore = await screen.findByRole("button", { name: t("ui.adapter.restore_driver") });
+    expect(shielded(restore)).toBe(true);
+    expect(shielded(screen.getByRole("button", { name: t("ui.adapter.restart") }))).toBe(false);
+    fireEvent.click(restore);
+    const dialog = await screen.findByRole("dialog", { name: t("ui.adapter.restore_title") });
+    expect(shielded(within(dialog).getByRole("button", { name: t("ui.adapter.restore_driver") }))).toBe(true);
+    expect(shielded(within(dialog).getByRole("button", { name: t("modal.cancel") }))).toBe(false);
+  });
+
   it("diagnostics tabs", async () => {
     start("#/diagnostics");
     // The stream tab first
@@ -350,6 +368,8 @@ describe("every screen renders", () => {
     // Step 2: one explanation and one button, which switches the driver and
     // downloads the firmware (issue #86)
     const setUp = await screen.findByRole("button", { name: "Set up this adapter" });
+    // It changes the driver: an administrator prompt
+    expect(shielded(setUp)).toBe(true);
     expect(screen.getByText(/removes the adapter from Windows/)).toBeInTheDocument();
     expect(screen.getByText("rtl8761bu_fw.bin, rtl8761bu_config.bin")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Replace with WinUSB driver" })).toBeNull();

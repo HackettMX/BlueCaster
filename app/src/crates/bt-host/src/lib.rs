@@ -17,6 +17,7 @@ pub mod chips;
 pub mod events;
 pub mod intel;
 mod le;
+pub mod le_import;
 pub mod link_details;
 pub mod link_keys;
 pub mod media;
@@ -42,7 +43,7 @@ use codec::caps::{Configuration, RemoteCaps};
 use hci_transport::{TcpH4, UsbSelector, UsbTransport};
 
 use app::{HostApp, Job, Setup};
-pub use btstack_sys::{CtkdOutcome, LeKeys, expect_transport_loss, set_ctkd};
+pub use btstack_sys::{CtkdOutcome, ImportedLeBond, LeBondAdded, LeKeys, expect_transport_loss, set_ctkd};
 pub use capture::HciCapture;
 pub use events::{addr_str, parse_addr};
 pub use le::iso_recv::{
@@ -1670,6 +1671,13 @@ impl BtHost {
         self.call(Duration::from_secs(2), move |_, s| s.le_keys_or_why(&addr))
     }
 
+    /// Adds an LE bond of the classic device `classic` taken from Windows
+    /// (see [`le_import`] while LE is off); None when the stack did not
+    /// answer
+    pub fn add_le_bond(&self, classic: [u8; 6], bond: ImportedLeBond) -> Option<LeBondAdded> {
+        self.call(Duration::from_secs(2), move |_, s| s.add_le_bond_of_classic(&classic, &bond))
+    }
+
     /// The service records `addr` lists in SDP, asked over the link the
     /// stack has to it (it never connects for this). Answered within
     /// [`sdp_services::DEADLINE`] and a little more.
@@ -1963,7 +1971,10 @@ impl BtHost {
     pub fn request_volume(&self, volume: u8) {
         tracing::debug!("volume request: {volume}");
         self.controls.volume_request.store(volume.min(127) as i32, Ordering::Release);
-        self.post(|app, s| app.send_pending_volume(s));
+        self.post(move |app, s| {
+            app.sync_speaker_gain(s, Some(volume));
+            app.send_pending_volume(s)
+        });
     }
 
     /// Volume to set as soon as AVRCP connects, before any audio (None: keep

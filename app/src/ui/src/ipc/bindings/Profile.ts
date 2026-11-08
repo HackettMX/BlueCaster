@@ -32,9 +32,8 @@ sample_rate: number,
  */
 bit_depth: number, 
 /**
- * loopback, virtual, output, app. "output" (developer mode, issue
- * #193): the output device audio_device_id, whichever is the Windows
- * default; outside developer mode it streams System Loopback
+ * loopback, virtual, output, app. "output" (issue #193): the output
+ * device audio_device_id, whichever is the Windows default
  */
 capture_mode: string, audio_device_id: string, audio_device_name: string, auto_switch_device: boolean, app_exe: string, app_name: string, 
 /**
@@ -55,7 +54,7 @@ le_audio: boolean,
  */
 le_low_latency: boolean, 
 /**
- * Headset mode (developer mode only): the headphones' microphone is
+ * Headset mode: the headphones' microphone is
  * rendered to mic_device_id. "off" (the default) | "on" | "auto";
  * anything else reads as off. "on": classic devices switch playback to
  * the voice link (mono call quality) for as long as they stream;
@@ -74,6 +73,11 @@ mic_device_id: string,
  * Its friendly name, for display when the device is missing
  */
 mic_device_name: string, 
+/**
+ * The microphone muted (Home's and the flyout's chip): no voice link,
+ * as with headset_mic "off"; headset_mic is kept for unmuting
+ */
+mic_muted: boolean, 
 /**
  * SBC / SBC XQ: the bitpool to encode with, within what the device
  * allows (0 = by quality)
@@ -119,9 +123,8 @@ sbc_channel_mode: string,
 codec_settings: { [key in string]: CodecValues }, 
 /**
  * The device's codec order (codec keys) as dragged on the Codecs
- * screen with Auto-select off: Auto, and a chosen codec the device
+ * screen: Auto, under Auto-select too, and a chosen codec the device
  * does not offer, take the first one in it the device offers (issue
- * #86 round 8). Empty: highest sound quality first. Not used under
- * Auto-select.
+ * #86 round 8). Empty: highest sound quality first.
  */
 codec_order: Array<string>, };
