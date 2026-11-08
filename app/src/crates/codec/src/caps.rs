@@ -592,6 +592,9 @@ pub struct RemoteCaps {
     /// Vendor SEPs of a known codec that were not taken
     /// ([`VendorCapability::Ignored`]): what [`Self::forcing`] asks first
     pub ignored: Vec<(CodecKind, RemoteSep)>,
+    /// SBC / SBC XQ settings not held to what the sink lists
+    /// ([`Self::unlisted`]): SBC XQ's bitpool then goes up to SBC's 53
+    pub sbc_unlisted: bool,
 }
 
 /// How a vendor codec capability was taken, for the log
@@ -1118,6 +1121,7 @@ impl RemoteCaps {
                     c.min_bitpool = 2;
                     c.max_bitpool = u8::MAX;
                 }
+                caps.sbc_unlisted = true;
             }
             CodecKind::Aac => {
                 if let Some(c) = caps.aac_caps.as_mut() {
@@ -1351,7 +1355,13 @@ impl RemoteCaps {
                 // range as PipeWire's select_config: up to the largest XQ
                 // bitpool of the rate, within the sink's range; the encoder's
                 // bitpool (by quality) is never above it.
-                let cap = if kind == CodecKind::SbcXq { sbc::xq_max_bitpool(sample_rate) } else { SBC_MAX_BITPOOL };
+                // Its settings not held to the sink's list: up to 53 as SBC
+                // (issue #86)
+                let cap = if kind == CodecKind::SbcXq && !self.sbc_unlisted {
+                    sbc::xq_max_bitpool(sample_rate)
+                } else {
+                    SBC_MAX_BITPOOL
+                };
                 // The profile's minimum bitpool, when set, raises the
                 // minimum within that range (the encoder never goes below it)
                 let (min_bitpool, max_bitpool) = self.sbc_bitpool_range(cap);
@@ -1737,6 +1747,20 @@ mod tests {
         assert_eq!(sbc.listed_sample_rates(CodecKind::Sbc), vec![44100, 48000]);
         // The configuration still keeps to what BlueCaster encodes
         assert_eq!(sbc.sbc_bitpool_range(SBC_MAX_BITPOOL).1, SBC_MAX_BITPOOL);
+    }
+
+    #[test]
+    fn sbc_xq_goes_up_to_53_when_not_held_to_the_list() {
+        let mut caps = RemoteCaps::default();
+        caps.add_sbc_caps(1, SbcCapabilities { max_bitpool: SBC_MAX_BITPOOL, ..sbc_all() });
+        let xq_max =
+            |c: &RemoteCaps| match c.configuration_with(CodecKind::SbcXq, 48000, 2, 16, false, Default::default()) {
+                Ok(Configuration { request: ConfigRequest::Sbc { max_bitpool, .. }, .. }) => max_bitpool,
+                other => panic!("{other:?}"),
+            };
+        assert_eq!(xq_max(&caps), sbc::xq_max_bitpool(48000));
+        // Issue #86: "Show only options it supports" off
+        assert_eq!(xq_max(&caps.unlisted(CodecKind::SbcXq)), SBC_MAX_BITPOOL);
     }
 
     #[test]

@@ -100,6 +100,22 @@ pub fn set_default_render_device(id: &str) -> Result<(), CaptureError> {
     })
 }
 
+/// Whether an application records from the capture side paired with the
+/// render endpoint `id` (a virtual cable's "CABLE Output" for "CABLE
+/// Input"; [`audio_policy::capture_sessions_active`]): an audio session on
+/// it is active. `Ok(None)`: no capture endpoint pairs with it (same
+/// container, else same adapter name).
+pub fn mic_capture_active(id: &str) -> Result<Option<bool>, CaptureError> {
+    let _com = com()?;
+    audio_policy::capture_sessions_active(id).map_err(|e| {
+        if not_found(e.code().0) {
+            CaptureError::DeviceNotFound(id.to_owned())
+        } else {
+            CaptureError::windows("capture sessions", e.code().0, e.message())
+        }
+    })
+}
+
 /// Shared-mode mix rate of a render device (None = the default one), for
 /// the "auto" sample rate: what a loopback capture delivers without a
 /// preferred rate. None if the device cannot be opened.
@@ -252,6 +268,11 @@ mod tests {
         form_factor: Some(1), // Speakers
         container_id: Some(0x1234_5678_9abc_def0_1234_5678_9abc_def0),
     };
+
+    #[test]
+    fn an_unknown_output_has_no_capture_side() {
+        assert!(matches!(mic_capture_active("{0.0.0.00000000}.{not-a-device}"), Err(CaptureError::DeviceNotFound(_))));
+    }
 
     #[test]
     fn virtual_by_name() {

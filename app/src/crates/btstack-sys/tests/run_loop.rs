@@ -66,8 +66,9 @@ fn one_run(shared: &Arc<Shared>) {
             stack.add_hci_event_handler();
             stack.a2dp_source_init();
             stack.avrcp_init();
-            // HFP too: its RFCOMM service is set up and torn down each run
-            stack.hfp_ag_init();
+            // HFP too (with voice: codec negotiation, the SCO handler): its
+            // RFCOMM service is set up and torn down each run
+            stack.hfp_ag_init(true);
             stack.sdp_register_records(2, 1);
             assert!(stack.create_stream_endpoint(0, 0, &[0x3F, 0x15, 2, 53], &[0x11, 0x15, 2, 53]).is_some());
             stack.power_on().expect("power on");

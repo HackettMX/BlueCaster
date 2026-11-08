@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use audio_capture::{Capture, CaptureOptions, Format, Running, SampleFormat, Sink, Source};
-use bt_host::{BtHost, ConfigureError, ConnectFailure, MediaSink, ReconnectError};
+use bt_host::{BtHost, ConfigureError, ConnectFailure, HeadsetMic, MediaSink, ReconnectError};
 use codec::caps::{self, ConfigError, Configuration, RemoteCaps, Unavailable};
 use codec::{CodecKind, Encoder, EncoderConfig, PeerParams, Quality};
 use pipeline::{BufferPreset, CaptureInput, InputFormat, Pipeline, PipelineConfig, SampleType};
@@ -70,6 +70,16 @@ pub struct StreamRequest {
     /// LE Audio (experimental) instead of A2DP: the le_stream session
     /// streams to `device` and these extra devices. None: A2DP.
     pub le: Option<bt_host::LeRequest>,
+    /// Headset mode (developer mode, docs/headset-mic-dev.md): the
+    /// headphones' microphone goes to `mic_output`. Classic devices switch
+    /// to the HFP voice link once streaming ([`crate::voice`]); Auto: only
+    /// while an application records from the output's capture side.
+    pub headset_mic: HeadsetMic,
+    /// Where the microphone goes: a render endpoint id (the profile's
+    /// `mic_device_id`), from the command line also a friendly-name part or
+    /// a path ending in ".wav" (written instead of rendered). None or
+    /// empty: the default output device.
+    pub mic_output: Option<String>,
 }
 
 /// The bitpools of a request ([`crate::profiles::Profile::bitpools`]; 0 = Auto)
@@ -1164,6 +1174,7 @@ fn peer_params(remote: &RemoteCaps, kind: CodecKind, channels: u32, req: &Stream
             _ => 0,
         },
         sbc,
+        sbc_unlisted: remote.sbc_unlisted,
         opus_frame_ms,
         opus_channels,
         opus_max_bitrate,
@@ -1277,6 +1288,74 @@ fn start_pipeline(
         sink,
         host.stats().clone(),
     )
+}
+
+/// The A2DP side of headset mode ([`crate::voice::A2dp`]): what the session
+/// stops and starts around the voice link
+struct A2dpSide<'a> {
+    inner: &'a Inner,
+    host: &'a BtHost,
+    pipeline: &'a mut Option<Pipeline>,
+    active: &'a mut ActiveSource,
+    input: &'a SharedInput,
+    input_format: &'a mut Format,
+    info: &'a mut StreamInfo,
+    source: &'a SourceRequest,
+    kind: CodecKind,
+    encoder_config: &'a EncoderConfig,
+    channels: u32,
+    rate: u32,
+}
+
+impl crate::voice::A2dp for A2dpSide<'_> {
+    fn suspend(&mut self) {
+        self.active.stop();
+        if let Some(p) = self.pipeline.take()
+            && let Some(s) = p.stop()
+        {
+            self.host.return_media_sink(s);
+        }
+        self.host.stop_stream();
+        tracing::debug!("voice: A2DP suspended");
+    }
+
+    fn resume(&mut self) -> Result<(), Msg> {
+        if !self.host.start_stream() {
+            tracing::warn!("voice: A2DP did not start again");
+            return Err(Msg::new("error.stream_start"));
+        }
+        let opened = open_source(self.source, self.rate)?;
+        let format = source_format(&opened, self.rate);
+        let Some(sink) = self.host.take_media_sink() else { return Err(Msg::new("error.encode_thread")) };
+        let encoder = match codec::create(self.kind, self.encoder_config) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("encoder: {e}");
+                self.host.return_media_sink(sink);
+                return Err(Msg::new("error.encoder_init"));
+            }
+        };
+        self.info.bitrate_kbps = encoder.bitrate_kbps();
+        let (p, new_input) = start_pipeline(encoder, format, self.channels, self.encoder_config.mtu, sink, self.host);
+        if let Ok(mut i) = self.input.0.lock() {
+            *i = new_input;
+        }
+        *self.pipeline = Some(p);
+        if format != *self.input_format {
+            tracing::debug!("voice: capture format {:?} -> {format:?}", *self.input_format);
+            *self.input_format = format;
+            self.info.source_channels = format.channels as u32;
+            self.info.source_bits = (format.sample_format.bytes_per_sample() * 8) as u32;
+        }
+        let Some(active) = start_source(opened, self.source, self.rate, self.input) else {
+            return Err(Msg::new("error.audio_capture_start"));
+        };
+        *self.active = active;
+        self.info.source.waiting = self.active.waiting();
+        self.inner.stream_info(self.info.clone());
+        tracing::info!("voice: A2DP resumed ({} {} kbps)", self.kind.name(), self.info.bitrate_kbps);
+        Ok(())
+    }
 }
 
 /// Marks the stack as having carried a stream to the device when the
@@ -1526,6 +1605,9 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
     // its settings go by what BlueCaster has, not by what the device lists
     // (never under Auto-select, which keeps to what streams)
     let mut unlisted = (req.unlisted_options && req.codec == Some(kind)).then_some(kind);
+    // What the device lists, to tell later whether the switch matters
+    // ([`Inner::unlisted_keeps`])
+    let mut listed_remote = remote.clone();
     if unlisted.is_some() {
         tracing::warn!("codec: {} settings beyond what the device lists (the user's choice)", kind.name());
         remote = as_asked(remote, None, unlisted);
@@ -1698,6 +1780,7 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
             Err(_) if stopped() => return inner.notify(StreamState::Idle, Msg::new("status.ready")),
             Err(f) => return inner.notify(StreamState::Error, rom_or(&host, connect_error(Some(f)))),
         };
+        listed_remote = remote.clone();
         kind = CodecKind::Sbc;
         unlisted = None;
         if req.codec.is_some() && replaced.is_none() {
@@ -1736,6 +1819,15 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         }
     };
     let kind = kind;
+    // Whether "Show only options it supports" on or off sets up this very
+    // stream: then turning it gives no reconnect (issue #86)
+    let keeps = |on: bool| {
+        let u = (on && req.codec == Some(kind)).then_some(kind);
+        as_asked(listed_remote.clone(), None, u)
+            .configuration_with(kind, format.sample_rate, channels, bits, vbr, req.sbc_params(kind))
+            .is_ok_and(|c| c == config)
+    };
+    inner.set_unlisted_keeps([keeps(false), keeps(true)]);
     let fallback_text = replaced.as_ref().map(|(wanted, why)| {
         let key = match why {
             Unavailable::SepInUse { .. } => "status.connected_fallback_in_use",
@@ -1873,6 +1965,8 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         tracing::info!("send queue: packets dropped after {queue_wait} ms (developer mode)");
     }
     let mut health = StreamHealth::start(host.stats().clone(), format.sample_rate, active.health());
+    // Headset mode (developer mode): the voice link instead of A2DP
+    let mut headset = crate::voice::HeadsetMode::new(req.headset_mic, req.mic_output.clone());
     while !stopped() {
         inner.wait_tick(Duration::from_millis(200));
         if stopped() {
@@ -1887,7 +1981,25 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         // Another source chosen: only the capture changes, the encoder (at
         // the same rate) and the link go on. A source that cannot start ends
         // the session as it would at its start.
-        if let Some(next) = inner.take_source_change() {
+        if headset.active()
+            && let Some(next) = inner.take_source_change()
+        {
+            // The voice link's uplink captures it; A2DP takes it on resuming
+            tracing::info!("audio source: {current_source} -> {next} (headset mode)");
+            default_guard.follow(&next);
+            headset.change_source(&next);
+            let choice = crate::volume_sync::EndpointChoice::for_stream(&req.volume_sync, &next);
+            if choice != volume_choice {
+                if let Some(mut v) = volume.take() {
+                    v.stop();
+                }
+                volume = choice.clone().map(crate::volume_sync::VolumeSyncer::new);
+                volume_choice = choice;
+            }
+            info.source = next.info();
+            inner.stream_info(info.clone());
+            current_source = next;
+        } else if let Some(next) = inner.take_source_change() {
             tracing::info!("audio source: {current_source} -> {next}");
             // Stopped first: a driver's endpoints may not capture side by side
             active.stop();
@@ -1937,7 +2049,13 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
 
         // Other bitpools chosen: the link allows the whole range, so only
         // the encoder changes (issue #86: the slider is heard as it moves)
-        if let Some(b) = inner.take_bitpool_change() {
+        if headset.active()
+            && let Some(b) = inner.take_bitpool_change()
+        {
+            // Taken by the encoder A2DP resumes with
+            encoder_req.set_bitpools(b);
+            encoder_config.peer = peer_params(&remote, kind, channels, &encoder_req);
+        } else if let Some(b) = inner.take_bitpool_change() {
             encoder_req.set_bitpools(b);
             encoder_config.peer = peer_params(&remote, kind, channels, &encoder_req);
             let sink = pipeline.take().and_then(Pipeline::stop);
@@ -1975,7 +2093,10 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         }
 
         // Application capture follows the app: it may quit and start again
-        if let ActiveSource::App(app) = &mut active {
+        // (A2DP's capture: stopped while the voice link runs)
+        if let ActiveSource::App(app) = &mut active
+            && !headset.active()
+        {
             if app.exited() {
                 tracing::info!("{} exited, waiting for it to start again", app.exe);
                 app.detach();
@@ -1988,7 +2109,9 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         // Device capture that Windows ended (device removed, disabled, its
         // format changed or taken in exclusive mode) is opened again: at
         // once, every second for ten tries, then every ten seconds
-        if let ActiveSource::Capture(dev) = &mut active {
+        if let ActiveSource::Capture(dev) = &mut active
+            && !headset.active()
+        {
             if dev.ended() {
                 let why = dev.running.as_ref().and_then(Running::end_reason);
                 tracing::warn!("audio capture ended ({why:?}), opening the device again");
@@ -2047,6 +2170,38 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         // again on it
         let lost = host.check_disconnected();
         let check = check_link(lost, host.stalled(), inner.power.stale(), inner.power.suspending());
+        if check == LinkCheck::Fine {
+            let mut side = A2dpSide {
+                inner,
+                host: &host,
+                pipeline: &mut pipeline,
+                active: &mut active,
+                input: &input,
+                input_format: &mut input_format,
+                info: &mut info,
+                source: &current_source,
+                kind,
+                encoder_config: &encoder_config,
+                channels,
+                rate: format.sample_rate,
+            };
+            if let Err(m) = headset.tick(inner, &host, &current_source, &mut side) {
+                inner.notify(StreamState::Error, m);
+                lost_for_good = true;
+                break;
+            }
+        } else if headset.link_lost(inner) {
+            // A2DP's capture again, for the pipeline the reconnect starts
+            match open_source(&current_source, format.sample_rate) {
+                Ok(opened) => {
+                    input_format = source_format(&opened, format.sample_rate);
+                    if let Some(a) = start_source(opened, &current_source, format.sample_rate, &input) {
+                        active = a;
+                    }
+                }
+                Err(m) => tracing::warn!("voice: the capture does not open again: {}", m.english()),
+            }
+        }
         if needs_auto_reconnect(check) && !inner.auto_reconnect() {
             tracing::info!("link check {check:?}: reconnecting is off, the session ends");
             if check == LinkCheck::SleepThrough {
@@ -2276,6 +2431,10 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
             if pipeline.is_some() && !changed { "reset" } else { "started anew" }
         );
         encoder_config = new_config;
+        if r.config != config {
+            // Set up from what the device lists now: the switch restarts
+            inner.set_unlisted_keeps([false; 2]);
+        }
         config = r.config;
         // Resume with the same encoder when nothing changed; otherwise, and
         // on a new stack (its media sink is new), with a new pipeline
@@ -2333,6 +2492,7 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
             default_guard = DefaultDeviceGuard::switch_to(id, name);
             switch_default_again = false;
         }
+        headset.reconnected(inner);
         inner.notify(StreamState::Streaming, Msg::new("status.reconnected"));
     }
 
@@ -2343,6 +2503,7 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         session_start.elapsed().as_secs(),
         stopped()
     );
+    headset.end(inner, &host);
     health.finish(active.health());
     active.stop();
     if let Some(p) = pipeline.take()

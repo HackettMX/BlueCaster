@@ -225,6 +225,11 @@ extern "C" fn bluecaster_rs_transport_send(packet_type: u8, packet: *const u8, s
     })
 }
 
+#[unsafe(no_mangle)]
+extern "C" fn bluecaster_rs_transport_set_sco_config(voice_setting: u16, connections: u8) {
+    guard((), || transport::set_sco_config(voice_setting, connections))
+}
+
 // ---- HCI dump ----
 
 #[unsafe(no_mangle)]

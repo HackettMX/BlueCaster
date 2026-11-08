@@ -28,6 +28,15 @@
 //!
 //! Hidden is the default of every run; [`crate::Stack::set_le_hidden`]
 //! (before hci_init) turns it off when LE Audio is on.
+//!
+//! # SCO hidden
+//!
+//! ENABLE_SCO_OVER_HCI (headset microphone) makes HCI init send Write
+//! Synchronous Flow Control Enable and Write Default Erroneous Data
+//! Reporting to every controller that lists them; BTstack has no switch for
+//! it at run time. Without voice ([`crate::Stack::set_sco_hidden`], the
+//! default of every run) their supported-commands bits are cleared the same
+//! way, so HCI init stays as it was without SCO support.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -76,6 +85,33 @@ pub trait HciBackend: Send {
     fn usb_descriptors(&mut self) -> Option<UsbDescriptors> {
         None
     }
+    /// Whether this backend is an "H2" (USB isochronous) transport: BTstack
+    /// then sizes SCO payloads to 3 ms of audio, takes
+    /// HCI_EVENT_SCO_CAN_SEND_NOW from the transport as its send token
+    /// (deliver it as an event: `[0x6F, 0]`) and calls
+    /// [`set_sco_config`](Self::set_sco_config). Only asynchronous backends
+    /// can be; TCP returns false (SCO flows like ACL there).
+    fn is_h2(&self) -> bool {
+        false
+    }
+    /// BTstack's set_sco_config (H2 only): the voice setting (bit 0x0020:
+    /// 16-bit samples) and the number of SCO connections (0: none left).
+    /// The USB backend starts or stops its isochronous pipes here.
+    fn set_sco_config(&mut self, _voice_setting: u16, _connections: u8) {}
+    /// Whether SCO data can flow now (H2: the isochronous pipes run). Read
+    /// when an audio connection is up, after BTstack's set_sco_config.
+    fn sco_ready(&self) -> bool {
+        true
+    }
+}
+
+/// Which of the shim's transport tables BTstack gets
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportKind {
+    Sync = 0,
+    Async = 1,
+    /// Asynchronous, named "H2_..." (SCO over USB isochronous)
+    H2 = 2,
 }
 
 /// bmRequestType's type bits
@@ -230,6 +266,30 @@ thread_local! {
     static RAW: Cell<bool> = const { Cell::new(false) };
     /// The open adapter's broken commands ([`broken_command_bits`])
     static BROKEN: Cell<&'static [(usize, u8)]> = const { Cell::new(&[]) };
+    /// The SCO commands of HCI init are hidden from BTstack (module docs)
+    static SCO_HIDDEN: Cell<bool> = const { Cell::new(true) };
+}
+
+// ---- SCO hidden ----
+
+/// The supported-commands bits (octet, bit) BTstack's HCI init sends a
+/// command for because ENABLE_SCO_OVER_HCI is compiled in: Write
+/// Synchronous Flow Control Enable and Write Default Erroneous Data
+/// Reporting (hci.c, SUPPORTED_HCI_COMMANDS)
+pub const SCO_INIT_COMMAND_BITS: [(usize, u8); 2] = [(10, 4), (18, 3)];
+
+/// See [`crate::Stack::set_sco_hidden`]. False (and no change) once a
+/// backend is installed.
+pub(crate) fn set_sco_hidden(hidden: bool) -> bool {
+    if BACKEND.with(|b| b.borrow().is_some()) {
+        return false;
+    }
+    SCO_HIDDEN.with(|h| h.set(hidden));
+    true
+}
+
+pub(crate) fn sco_hidden() -> bool {
+    SCO_HIDDEN.with(|h| h.get())
 }
 
 // ---- LE hidden: pure functions ----
@@ -426,6 +486,7 @@ pub(crate) fn reset() {
     FAILED.store(false, Ordering::Release);
     CONTROLLER_ISO.store(0, Ordering::Release);
     LE_HIDDEN.with(|h| h.set(true));
+    SCO_HIDDEN.with(|h| h.set(true));
     RAW.with(|r| r.set(false));
     BROKEN.with(|b| b.set(&[]));
 }
@@ -434,15 +495,40 @@ pub(crate) fn failed() -> bool {
     FAILED.load(Ordering::Acquire)
 }
 
-pub(crate) fn install(backend: Box<dyn HciBackend>) -> bool {
+pub(crate) fn install(backend: Box<dyn HciBackend>) -> TransportKind {
     let is_async = backend.is_async();
-    tracing::debug!(target: "hci", "transport installed (async {is_async})");
+    let h2 = is_async && backend.is_h2();
+    tracing::debug!(target: "hci", "transport installed (async {is_async}, H2 {h2})");
     BACKEND.with(|b| *b.borrow_mut() = Some(backend));
-    is_async
+    kind()
 }
 
 pub(crate) fn is_async() -> bool {
     BACKEND.with(|b| b.borrow().as_ref().is_some_and(|b| b.is_async()))
+}
+
+/// The installed backend's kind (synchronous when none)
+pub(crate) fn kind() -> TransportKind {
+    BACKEND.with(|b| match b.borrow().as_ref() {
+        Some(b) if b.is_async() && b.is_h2() => TransportKind::H2,
+        Some(b) if b.is_async() => TransportKind::Async,
+        _ => TransportKind::Sync,
+    })
+}
+
+/// The installed backend's [`HciBackend::sco_ready`] (false without one)
+pub(crate) fn sco_ready() -> bool {
+    BACKEND.with(|b| b.borrow().as_ref().is_some_and(|b| b.sco_ready()))
+}
+
+/// BTstack's set_sco_config (the H2 transport only)
+pub(crate) fn set_sco_config(voice_setting: u16, connections: u8) {
+    tracing::debug!(target: "hci", "SCO config: voice setting 0x{voice_setting:04X}, {connections} connection(s)");
+    BACKEND.with(|b| {
+        if let Some(backend) = b.borrow_mut().as_mut() {
+            backend.set_sco_config(voice_setting, connections);
+        }
+    });
 }
 
 pub(crate) fn open() -> bool {
@@ -604,6 +690,9 @@ fn deliver(packet_type: u8, buf: &mut [u8], hidden: bool) {
             CONTROLLER_ISO.store(if iso { 2 } else { 1 }, Ordering::Release);
         }
         patch_broken_commands(buf, BROKEN.with(|b| b.get()));
+        if sco_hidden() {
+            patch_broken_commands(buf, &SCO_INIT_COMMAND_BITS);
+        }
         if hidden {
             le_hidden_patch_event(buf);
         }
@@ -732,6 +821,22 @@ mod tests {
         let before = failed.clone();
         patch_broken_commands(&mut failed, bits);
         assert_eq!(failed, before);
+    }
+
+    #[test]
+    fn sco_init_commands_hidden_without_voice() {
+        // Write Synchronous Flow Control Enable, Write Default Erroneous
+        // Data Reporting: as hci.c's SUPPORTED_HCI_COMMANDS has them
+        assert_eq!(SCO_INIT_COMMAND_BITS, [(10, 4), (18, 3)]);
+        let mut p = command_complete(0x1002, &[0xFF; 64]);
+        patch_broken_commands(&mut p, &SCO_INIT_COMMAND_BITS);
+        assert_eq!((p[6 + 10], p[6 + 18]), (0xEF, 0xF7));
+        assert_eq!(p[6..].iter().filter(|&&b| b != 0xFF).count(), 2);
+        // Hidden by default (this thread has no backend), off for voice
+        assert!(sco_hidden());
+        assert!(set_sco_hidden(false));
+        assert!(!sco_hidden());
+        assert!(set_sco_hidden(true));
     }
 
     #[test]

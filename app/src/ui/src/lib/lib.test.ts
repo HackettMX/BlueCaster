@@ -553,7 +553,7 @@ describe("bug report", () => {
 
   it("leaves out what it does not know and cuts a long log", () => {
     const long = info + "  T+1.000 INFO bt_host: connecting to AA:BB:CC:xx:xx:xx\n".repeat(400);
-    const url = bugReportUrl({ ...base, info: long, codec: "opus05" });
+    const url = bugReportUrl({ ...base, info: long, codec: "not-a-codec" });
     const q = new URL(url).searchParams;
     expect(q.has("codec")).toBe(false);
     expect(q.has("adapter")).toBe(false);

@@ -340,7 +340,7 @@ impl SbcEncoder {
     /// the sink's range
     pub fn new_xq(config: &EncoderConfig) -> Result<SbcEncoder, EncoderError> {
         // Never above the configuration's maximum for the rate
-        let cap = xq_max_bitpool(config.sample_rate);
+        let cap = if config.peer.sbc_unlisted { SBC_MAX_BITPOOL } else { xq_max_bitpool(config.sample_rate) };
         let wanted = match config.peer.sbc_bitpool {
             0 => xq_bitpool(config.quality, config.sample_rate),
             n => n.min(cap),
@@ -745,6 +745,14 @@ mod tests {
         // SBC XQ: up to its cap of the rate
         assert_eq!(SbcEncoder::new_xq(&with(40, 0, (2, 53), Quality::Mobile)).unwrap().bitpool(), 40);
         assert_eq!(SbcEncoder::new_xq(&with(53, 0, (2, 53), Quality::Mobile)).unwrap().bitpool(), 47);
+        // Not held to the sink's list: up to SBC's 53 (issue #86)
+        let unlisted = |bitpool| {
+            let mut c = with(0, bitpool, (2, 53), Quality::High);
+            c.peer.sbc_unlisted = true;
+            c
+        };
+        assert_eq!(SbcEncoder::new_xq(&unlisted(53)).unwrap().bitpool(), 53);
+        assert_eq!(SbcEncoder::new_xq(&unlisted(0)).unwrap().bitpool(), 47);
     }
 
     #[test]

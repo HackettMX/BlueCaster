@@ -19,6 +19,16 @@
  * Several captures (one per sink of a group) are read together; each CIS
  * line of the report names its capture (1, 2, ... in the order given).
  *
+ * Source ASEs (the headset microphone of a conversational stream): the
+ * direction of each ASE comes from the GATT characteristic discovery (Read
+ * By Type responses: Sink ASE 0x2BC4 / Source ASE 0x2BC5) and the ASE
+ * notifications (ASE id by handle). ISO data of the other direction (sent
+ * side: controller -> host, BlueCaster receiving; --received: host ->
+ * controller, the headset sending) on a CIS with a source ASE is the
+ * microphone: checked the same way and reported as "=== Microphone N" with
+ * its own labels (Mic config / Mic SDUs / Mic frames / Mic audio / Mic PCM
+ * file, a mono <prefix>.mic.<n>.lc3.wav), one per CIS.
+ *
  * Like the A2DP part it does not link BTstack, only liblc3 (Apache-2.0).
  *
  * SPDX-License-Identifier: Apache-2.0 OR MIT
@@ -66,6 +76,8 @@ uint32_t sf_code_to_hz(uint8_t c) {
 /* Keys: capture file index in the upper bits, so handles of several
  * captures (several controllers) do not collide */
 uint32_t fkey(int file, uint16_t handle) { return ((uint32_t)file << 16) | handle; }
+/* Stream key bit of a microphone stream (the source ASE of a CIS) */
+const uint32_t MIC_KEY = 0x40000000u;
 
 struct AseConfig {
     bool codec = false;
@@ -88,6 +100,23 @@ struct AseConfig {
         return strf("LC3 %u Hz %s ms %u octets", sample_rate, frame_us == 7500 ? "7.5" : "10", octets);
     }
 };
+
+/* A mono 16-bit WAV (the microphone) */
+void write_mono_wav(const std::string &path, const std::vector<int16_t> &samples, uint32_t rate) {
+    FILE *f = fopen(path.c_str(), "wb");
+    if (!f) { fprintf(stderr, "Cannot create %s\n", path.c_str()); return; }
+    uint32_t data = (uint32_t)(samples.size() * 2);
+    uint8_t h[44];
+    auto p16 = [&](int o, uint32_t v) { h[o] = (uint8_t)v; h[o + 1] = (uint8_t)(v >> 8); };
+    auto p32 = [&](int o, uint32_t v) { p16(o, v); p16(o + 2, v >> 16); };
+    memcpy(h, "RIFF", 4); p32(4, 36 + data);
+    memcpy(h + 8, "WAVEfmt ", 8); p32(16, 16); p16(20, 1); p16(22, 1);
+    p32(24, rate); p32(28, rate * 2); p16(32, 2); p16(34, 16);
+    memcpy(h + 36, "data", 4); p32(40, data);
+    fwrite(h, 1, 44, f);
+    fwrite(samples.data(), 2, samples.size(), f);
+    fclose(f);
+}
 
 struct WavOut {
     std::string path;
@@ -117,6 +146,7 @@ struct CisStream {
     uint64_t order = 0;              /* creation order */
     uint16_t handle = 0, acl = 0;
     uint8_t ase = 0;
+    bool mic = false;                /* the source ASE: the headset microphone */
     AseConfig cfg;
     uint64_t sdus = 0, frames = 0, gaps = 0, missing = 0, bad_len = 0, status_err = 0, fragments = 0,
              decode_err = 0, ts_bad = 0;
@@ -143,8 +173,11 @@ public:
         case 0x01: on_event(file, p, n); break;
         case 0x02: on_acl(file, false, p, n); break;
         case 0x03: on_acl(file, true, p, n); break;
-        case 0x0C: if (!received_) on_iso(file, p, n); else iso_other_++; break;
-        case 0x0D: if (received_) on_iso(file, p, n); else iso_other_++; break;
+        /* host -> controller: what BlueCaster sends (sink audio), or with
+         * --received the headset's microphone; controller -> host the
+         * other way round */
+        case 0x0C: on_iso(file, p, n, received_); break;
+        case 0x0D: on_iso(file, p, n, !received_); break;
         default: break;
         }
     }
@@ -188,12 +221,14 @@ private:
             for (uint8_t i = 0; i < count && i < it->second.second.size() && 6u + 2u * (i + 1u) <= len; i++) {
                 uint32_t k = fkey(file, le16(e + 6 + 2 * i) & 0x0FFF);
                 retired |= retire(k);
+                retire(k | MIC_KEY);
                 cis_ids_[k] = {cig, it->second.second[i]};
             }
             if (retired) session_[file]++;
         } else if (code == 0x3E && len >= 7 && e[0] == 0x1A) {    /* LE CIS Request */
             uint16_t acl = le16(e + 1) & 0x0FFF, cis = le16(e + 3) & 0x0FFF;
             if (retire(fkey(file, cis))) session_[file]++;
+            retire(fkey(file, cis) | MIC_KEY);
             cis_acl_[fkey(file, cis)] = acl;
             cis_ids_[fkey(file, cis)] = {e[5], e[6]};
         } else if (code == 0x05 && len >= 4) {                    /* Disconnection Complete */
@@ -222,11 +257,29 @@ private:
         uint16_t l2len = le16(buf.data());
         if (buf.size() < 4u + l2len) return;
         uint16_t cid = le16(buf.data() + 2);
-        if (cid == 0x0004) on_att(file, handle, buf.data() + 4, l2len);
+        if (cid == 0x0004) on_att(file, handle, in, buf.data() + 4, l2len);
         buf.clear();
     }
 
-    void on_att(int file, uint16_t acl, const uint8_t *a, size_t n) {
+    void on_att(int file, uint16_t acl, bool in, const uint8_t *a, size_t n) {
+        if (n >= 7 && a[0] == 0x08) {   /* Read By Type Request: the type asked for */
+            rbt_type_[std::make_tuple(file, acl, in)] = n == 7 ? le16(a + 5) : 0;
+            return;
+        }
+        if (n >= 2 && a[0] == 0x09) {   /* Read By Type Response: characteristic declarations */
+            auto rq = rbt_type_.find(std::make_tuple(file, acl, !in));
+            uint8_t el = a[1];
+            if (rq == rbt_type_.end() || rq->second != 0x2803 || el != 7) return;
+            for (size_t o = 2; o + el <= n; o += el)
+                char_uuid_[std::make_tuple(file, acl, le16(a + o + 3))] = le16(a + o + 5);
+            return;
+        }
+        if (n >= 4 && a[0] == 0x1B) {   /* Handle Value Notification: ASE values */
+            auto u = char_uuid_.find(std::make_tuple(file, acl, le16(a + 1)));
+            if (u != char_uuid_.end() && (u->second == 0x2BC4 || u->second == 0x2BC5))
+                ase_source_[std::make_tuple(file, acl, a[3])] = u->second == 0x2BC5;
+            return;
+        }
         if (n < 4 || (a[0] != 0x12 && a[0] != 0x52)) return;   /* Write Request / Command */
         const uint8_t *v = a + 3;
         size_t len = n - 3;
@@ -304,17 +357,23 @@ private:
         return true;
     }
 
-    CisStream *stream_for(int file, uint16_t handle) {
-        uint32_t k = fkey(file, handle);
+    /* The stream of a CIS: the sink ASE's (mic: the source ASE's) */
+    CisStream *stream_for(int file, uint16_t handle, bool mic) {
+        uint32_t k = fkey(file, handle) | (mic ? MIC_KEY : 0);
         auto it = streams_.find(k);
         if (it != streams_.end()) return it->second.get();
-        auto ids = cis_ids_.find(k);
-        auto acl = cis_acl_.find(k);
+        auto ids = cis_ids_.find(fkey(file, handle));
+        auto acl = cis_acl_.find(fkey(file, handle));
         if (ids == cis_ids_.end() || acl == cis_acl_.end()) return nullptr;
         for (auto &a : ase_) {
             if (std::get<0>(a.first) != file || std::get<1>(a.first) != acl->second) continue;
             const AseConfig &c = a.second;
             if (!c.codec || !c.qos || c.cig != ids->second.first || c.cis != ids->second.second) continue;
+            /* The direction: known from the ASE notifications; an ASE of
+             * unknown direction counts as a sink ASE (as before) */
+            auto dir = ase_source_.find(a.first);
+            bool source = dir != ase_source_.end() && dir->second;
+            if (source != mic) continue;
             auto s = std::make_unique<CisStream>();
             s->key = k;
             s->file = file;
@@ -324,13 +383,14 @@ private:
             s->acl = acl->second;
             s->ase = std::get<2>(a.first);
             s->cfg = c;
+            s->mic = mic;
             for (int ch = 0; ch < c.channels(); ch++) {
                 s->decoder_mem.emplace_back(lc3_decoder_size(c.frame_us, (int)c.sample_rate));
                 s->decoders.push_back(lc3_setup_decoder(c.frame_us, (int)c.sample_rate, 0,
                                                         s->decoder_mem.back().data()));
             }
-            printf("[%9.3f] CIS 0x%03X (CIG %u CIS %u) on ACL 0x%03X: ASE %u, %s, %d channel(s)\n", t_, handle,
-                   c.cig, c.cis, s->acl, s->ase, c.desc().c_str(), c.channels());
+            printf("[%9.3f] CIS 0x%03X (CIG %u CIS %u) on ACL 0x%03X: %sASE %u, %s, %d channel(s)\n", t_, handle,
+                   c.cig, c.cis, s->acl, mic ? "source " : "", s->ase, c.desc().c_str(), c.channels());
             CisStream *raw = s.get();
             streams_[k] = std::move(s);
             return raw;
@@ -338,14 +398,15 @@ private:
         return nullptr;
     }
 
-    void on_iso(int file, const uint8_t *p, size_t n) {
+    void on_iso(int file, const uint8_t *p, size_t n, bool mic) {
         if (n < 4) return;
         uint16_t handle = le16(p) & 0x0FFF;
         uint8_t pb = (p[1] >> 4) & 0x03;
         bool ts = (p[1] & 0x40) != 0;
         uint16_t len = le16(p + 2) & 0x3FFF;
         if (4u + len > n) { problem("truncated ISO packet"); return; }
-        CisStream *s = stream_for(file, handle);
+        CisStream *s = stream_for(file, handle, mic);
+        if (!s && mic) { iso_other_++; return; }   /* the other direction, no source ASE known */
         if (!s) { problem("ISO data on a CIS without a known ASE configuration"); return; }
         if (pb != 0x02) {   /* only complete SDUs are expected (BlueCaster sends them whole) */
             s->fragments++;
@@ -412,6 +473,12 @@ private:
     std::map<uint32_t, std::pair<uint8_t, uint8_t>> cis_ids_;   /* fkey(CIS) -> (CIG, CIS ID) */
     std::map<uint32_t, uint16_t> cis_acl_;                       /* fkey(CIS) -> ACL handle */
     std::map<std::tuple<int, uint16_t, uint8_t>, AseConfig> ase_;
+    /* (file, ACL, ASE id) -> source ASE (from the notifications) */
+    std::map<std::tuple<int, uint16_t, uint8_t>, bool> ase_source_;
+    /* (file, ACL, value handle) -> characteristic UUID (16-bit) */
+    std::map<std::tuple<int, uint16_t, uint16_t>, uint16_t> char_uuid_;
+    /* (file, ACL, direction of the request) -> Read By Type's type */
+    std::map<std::tuple<int, uint16_t, bool>, uint16_t> rbt_type_;
     std::map<uint32_t, std::vector<uint8_t>> acl_rx_;
     std::map<uint32_t, std::unique_ptr<CisStream>> streams_;   /* current, by handle */
     std::vector<std::unique_ptr<CisStream>> done_;              /* ended (handle set up again) */
@@ -434,7 +501,12 @@ int LeAnalyzer::finish() {
     /* One stream per set-up (session) and LC3 configuration, in the order
      * they started */
     std::vector<std::pair<std::string, std::vector<CisStream *>>> groups;
+    std::vector<CisStream *> mics;
     for (auto &e : done_) {
+        if (e->mic) {
+            mics.push_back(e.get());
+            continue;
+        }
         std::string key = strf("%d %s CIG %u", e->session, e->cfg.desc().c_str(), e->cfg.cig);
         auto g = std::find_if(groups.begin(), groups.end(), [&](const auto &x) { return x.first == key; });
         if (g == groups.end()) groups.push_back({key, {e.get()}});
@@ -529,6 +601,54 @@ int LeAnalyzer::finish() {
             any_problem = true;
             printf("  Result        : %zu kind(s) of problem found\n", issues.size());
             for (const auto &s : issues) printf("    - %s\n", s.c_str());
+        }
+    }
+    /* The microphones: one per CIS with a source ASE, mono */
+    int mic_index = 0;
+    for (CisStream *s : mics) {
+        mic_index++;
+        const AseConfig &cfg = s->cfg;
+        printf("\n=== Microphone %d (LE Audio, CIG %u, source ASE) ===\n", mic_index, cfg.cig);
+        printf("  Mic config    : %s, %d channel(s)\n", cfg.desc().c_str(), cfg.channels());
+        printf("  Mic CIS       : 0x%03X, ASE %u on ACL 0x%03X, location 0x%x, sequence %d-%d, capture %d\n",
+               s->handle, s->ase, s->acl, cfg.allocation, s->first_seq, s->last_seq, s->file + 1);
+        printf("  Mic SDUs      : %llu\n", (unsigned long long)s->sdus);
+        printf("  Mic frames    : %llu (LC3 frames)\n", (unsigned long long)s->frames);
+        printf("  Mic audio     : %.3f s at %u Hz\n", (double)s->sdus * cfg.frame_us * cfg.blocks / 1e6,
+               cfg.sample_rate);
+        std::vector<std::string> issues;
+        if (s->gaps) issues.push_back(strf("mic CIS 0x%03X: %llu sequence gap(s), %llu SDU(s) missing", s->handle,
+                                           (unsigned long long)s->gaps, (unsigned long long)s->missing));
+        if (s->bad_len) issues.push_back(strf("mic CIS 0x%03X: %llu SDU(s) with a wrong length", s->handle,
+                                              (unsigned long long)s->bad_len));
+        if (s->status_err) issues.push_back(strf("mic CIS 0x%03X: %llu SDU(s) with packet status errors", s->handle,
+                                                 (unsigned long long)s->status_err));
+        if (s->fragments) issues.push_back(strf("mic CIS 0x%03X: %llu fragmented ISO packet(s)", s->handle,
+                                                (unsigned long long)s->fragments));
+        if (s->decode_err) issues.push_back(strf("mic CIS 0x%03X: %llu LC3 decoding error(s)", s->handle,
+                                                 (unsigned long long)s->decode_err));
+        if (wav_ && !s->pcm.empty()) {
+            int samples = lc3_frame_samples(cfg.frame_us, (int)cfg.sample_rate) * cfg.blocks;
+            int64_t lo = s->pcm.begin()->first, hi = s->pcm.rbegin()->first;
+            std::vector<int16_t> mono((size_t)(hi - lo + 1) * samples, 0);
+            for (auto &e : s->pcm) {
+                size_t base = (size_t)(e.first - lo) * samples;
+                for (int i = 0; i < samples; i++) {
+                    int sum = 0;
+                    for (auto &ch : e.second) sum += ch[i];
+                    mono[base + i] = (int16_t)(sum / (int)e.second.size());
+                }
+            }
+            std::string path = strf("%s.mic.%d.lc3.wav", prefix_.c_str(), mic_index);
+            write_mono_wav(path, mono, cfg.sample_rate);
+            printf("  Mic PCM file  : %s\n", path.c_str());
+        }
+        if (issues.empty()) {
+            printf("  Mic result    : OK, no problems found\n");
+        } else {
+            any_problem = true;
+            printf("  Mic result    : %zu kind(s) of problem found\n", issues.size());
+            for (const auto &x : issues) printf("    - %s\n", x.c_str());
         }
     }
     if (!problems_.empty()) {

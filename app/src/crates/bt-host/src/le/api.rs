@@ -20,6 +20,7 @@ use le_audio::plan::StreamPlan;
 use le_audio::sdu_queue::{SduQueue, SduSet};
 
 use super::core::{ConnectResult, LeCtx, LeDone};
+use super::iso_recv::{LeRxHandle, LeRxStats, LeRxStream, RX_RING_SDUS};
 use super::iso_send::queue_depth;
 use super::{
     LeAddr, LeDeviceId, LeDeviceInfo, LeScanResult, LeSduSink, LeStreamRequest, LeStreamStarted, LeStreamStats,
@@ -242,22 +243,55 @@ impl BtHost {
             }
         };
 
-        // The jitter buffer, with the silence for underruns
+        // The jitter buffer, with the silence for underruns (one SDU per CIS
+        // with a sink direction)
         let queue = Arc::new(Mutex::new(SduQueue::new()));
+        let sending = plan.sink_cis().count();
         tracing::debug!(
-            "LE Audio: jitter buffer for {} CIS, controller queue depth {}",
-            plan.cis.len(),
-            queue_depth(iso_count, plan.cis.len()).max(1)
+            "LE Audio: jitter buffer for {sending} CIS, controller queue depth {}",
+            queue_depth(iso_count, sending).max(1)
         );
         queue
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .configure(queue_depth(iso_count, plan.cis.len()).max(1), silence(&plan));
+            .configure(queue_depth(iso_count, sending).max(1), silence(&plan));
         let status = LeStreamStatus { active: false, plan: plan.clone(), devices, summary: plan.describe() };
+
+        // The microphone's SDUs: a lock-free ring from the BTstack thread
+        let mut rx_handle = None;
+        let mut rx_producer = None;
+        if let Some(src) = &plan.source {
+            let (producer, consumer) = rtrb::RingBuffer::new(RX_RING_SDUS);
+            let stats = Arc::new(LeRxStats::default());
+            let streams = plan
+                .source_cis()
+                .filter_map(|c| {
+                    c.source_ase.map(|s| LeRxStream {
+                        device_id: c.device_id,
+                        cis_id: c.cis_id,
+                        ase_id: s.ase_id,
+                        channels: s.channels,
+                        octets: s.octets,
+                    })
+                })
+                .collect();
+            rx_handle = Some(LeRxHandle {
+                consumer,
+                streams,
+                sample_rate: src.preset.sampling_hz,
+                frame_us: u32::from(src.preset.frame_us),
+                preset: src.preset.name.clone(),
+                stats: stats.clone(),
+            });
+            rx_producer = Some((producer, stats));
+        } else if !plan.source_note.is_empty() {
+            tracing::warn!("LE Audio: streaming without the microphone: {}", plan.source_note);
+        }
 
         let why = Arc::new(Mutex::new(String::new()));
         let (q, st, w) = (queue.clone(), status.clone(), why.clone());
-        let ok = self.le_wait(START_TIMEOUT, true, move |ctx, done| ctx.start_unicast(plan, q, st, w, done));
+        let ok =
+            self.le_wait(START_TIMEOUT, true, move |ctx, done| ctx.start_unicast(plan, q, rx_producer, st, w, done));
         if !ok {
             let why = why.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let reason = if !why.is_empty() {
@@ -273,7 +307,10 @@ impl BtHost {
         }
         let status = self.le_run(RUN_TIMEOUT, |ctx| ctx.stream_status()).flatten().unwrap_or(status);
         tracing::info!("LE Audio: streaming: {}", status.summary);
-        Ok(LeStreamStarted { status, sink: LeSduSink::new(queue) })
+        if let Some(s) = status.plan.describe_source() {
+            tracing::info!("LE Audio: streaming: {s}");
+        }
+        Ok(LeStreamStarted { status, sink: LeSduSink::new(queue), rx: rx_handle })
     }
 
     /// Disable / release the ASEs, remove the CIG (devices stay connected;
@@ -348,7 +385,7 @@ impl BtHost {
             if config.code.is_some() { "encrypted" } else { "open" }
         );
         let status = LeStreamStatus { active: true, plan, devices: Vec::new(), summary };
-        Ok(LeStreamStarted { status, sink: LeSduSink::new(queue) })
+        Ok(LeStreamStarted { status, sink: LeSduSink::new(queue), rx: None })
     }
 
     /// Ends the broadcast: LE Terminate BIG, advertising off (waits up to

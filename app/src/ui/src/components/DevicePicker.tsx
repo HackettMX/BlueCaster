@@ -250,14 +250,41 @@ export function DevicePicker(props: {
     setBusy(false);
   };
   // A device Windows' Bluetooth has paired too may be taken by both: asked
-  // first (issue #86). LE Audio entries and a list Windows cannot give pass.
-  const [windowsPaired, setWindowsPaired] = createSignal<{ name: string; go: () => void } | null>(null);
+  // first (issue #86). Paired through this very adapter, its pairing can be
+  // imported instead of pairing again (`adapter`). LE Audio entries and a
+  // list Windows cannot give pass.
+  const [windowsPaired, setWindowsPaired] = createSignal<{
+    name: string;
+    address: string;
+    adapter: string | null;
+    go: () => void;
+  } | null>(null);
+  const [importing, setImporting] = createSignal(false);
   const unlessWindowsPaired = async (address: string, name: string, leAudio: boolean, go: () => void) => {
     if (leAudio) return go();
+    const same = (a: string) => a.toUpperCase() === address.toUpperCase();
+    const adapter = snap().adapter.adapters.find((a) => a.driver === "winusb" && a.address)?.address ?? null;
+    const through = adapter
+      ? await app.core.request("device.windows_paired_through", { adapter }).catch(() => [] as string[])
+      : [];
+    if ((through ?? []).some(same)) return setWindowsPaired({ name: name || address, address, adapter, go });
     const paired = await app.core.request("device.windows_paired").catch(() => []);
-    if ((paired ?? []).some((a) => a.toUpperCase() === address.toUpperCase())) {
-      setWindowsPaired({ name: name || address, go });
+    if ((paired ?? []).some(same)) {
+      setWindowsPaired({ name: name || address, address, adapter: null, go });
     } else go();
+  };
+  // Windows' key of that one device, then on as with a new one: it connects
+  // without pairing again
+  const importWindows = async () => {
+    const w = windowsPaired();
+    if (!w?.adapter || importing()) return;
+    setImporting(true);
+    const ok = await app.run(() =>
+      app.core.request("device.import_windows_pairings", { adapter: w.adapter!, address: w.address }),
+    );
+    setImporting(false);
+    setWindowsPaired(null);
+    if (ok) w.go();
   };
   // Developer mode: a saved classic device's services and pairing key, from
   // its Services tag (issue #86)
@@ -303,7 +330,7 @@ export function DevicePicker(props: {
           <span class="mono muted">{d.address}</span>
         </span>
         <span class="tags">
-          <Show when={d.saved && !props.savedOnly && snap().settings.developer_mode && !d.le_audio}>
+          <Show when={d.saved && !props.savedOnly && !d.le_audio}>
             <button type="button" class="tag tag-button" onClick={() => setPairingOf(d)}>
               {t("ui.pairing.services")}
             </button>
@@ -620,8 +647,14 @@ export function DevicePicker(props: {
       <Dialog
         open={windowsPaired() !== null}
         title={t("ui.devices.windows_paired_title")}
-        confirm={t("ui.devices.add_anyway")}
+        confirm={t(windowsPaired()?.adapter ? "ui.devices.add_new" : "ui.devices.add_anyway")}
         cancel={t("modal.cancel")}
+        busy={importing()}
+        extra={
+          windowsPaired()?.adapter
+            ? { label: t("ui.devices.import_one"), icon: "shield", onClick: () => void importWindows() }
+            : undefined
+        }
         onConfirm={() => {
           const w = windowsPaired();
           setWindowsPaired(null);
@@ -629,7 +662,12 @@ export function DevicePicker(props: {
         }}
         onCancel={() => setWindowsPaired(null)}
       >
-        <p>{t("ui.devices.windows_paired_text", windowsPaired()?.name ?? "")}</p>
+        <p>
+          {t(
+            windowsPaired()?.adapter ? "ui.devices.windows_import_text" : "ui.devices.windows_paired_text",
+            windowsPaired()?.name ?? "",
+          )}
+        </p>
       </Dialog>
       <Dialog
         open={forgetting() !== null}

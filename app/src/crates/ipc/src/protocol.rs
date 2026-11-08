@@ -470,6 +470,26 @@ pub struct StreamStatus {
     /// the battery shows as unknown
     #[serde(default)]
     pub battery_refused: bool,
+    /// The voice link (headset microphone, developer mode): Some only while
+    /// it carries audio, cleared on Idle / Error / Reconnecting like the
+    /// battery
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub voice: Option<VoiceStatus>,
+}
+
+/// The headset microphone's voice link (StreamStatus.voice)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+
+pub struct VoiceStatus {
+    /// "cvsd" | "msbc" | "lc3_swb" | "lc3"
+    pub codec: String,
+    /// "hfp" (classic: playback is mono call quality) | "le"
+    pub link: String,
+    /// Sampling rate of the voice link in Hz (8000 / 16000 / 32000 / 48000 ...)
+    pub rate: u32,
+    /// Microphone output device in use (id), empty while not rendering
+    pub mic_device_id: String,
 }
 
 /// A connection profile, as in profiles.json
@@ -522,6 +542,23 @@ pub struct Profile {
     /// default; other headsets get the media configuration either way)
     #[serde(default = "yes")]
     pub le_low_latency: bool,
+    /// Headset mode (developer mode only): the headphones' microphone is
+    /// rendered to mic_device_id. "off" (the default) | "on" | "auto";
+    /// anything else reads as off. "on": classic devices switch playback to
+    /// the voice link (mono call quality) for as long as they stream;
+    /// "auto": only while an application records from mic_device_id's
+    /// capture side (the cable's "CABLE Output"), full-quality A2DP
+    /// otherwise. LE Audio keeps its media quality either way ("auto" is
+    /// "on" there).
+    #[serde(default = "headset_mic_off")]
+    pub headset_mic: String,
+    /// Render endpoint id that receives the microphone (a virtual cable's
+    /// input). Empty = none chosen: headset mode stays off
+    #[serde(default)]
+    pub mic_device_id: String,
+    /// Its friendly name, for display when the device is missing
+    #[serde(default)]
+    pub mic_device_name: String,
     /// SBC / SBC XQ: the bitpool to encode with, within what the device
     /// allows (0 = by quality)
     #[serde(default)]
@@ -606,6 +643,10 @@ impl Default for CodecValues {
 
 fn yes() -> bool {
     true
+}
+
+fn headset_mic_off() -> String {
+    "off".into()
 }
 
 fn battery_low() -> u8 {
@@ -722,6 +763,10 @@ pub struct Settings {
     pub battery_low_percent: u8,
     pub check_updates_on_startup: bool,
     pub include_prereleases: bool,
+    /// Developer > alphas too, in force while developer_mode is on (an
+    /// older core has none: off)
+    #[serde(default)]
+    pub include_alphas: bool,
     /// The headphones' buttons act as Windows media keys (every device)
     pub media_keys: bool,
     /// Connect a device that went away again by itself (on by default).
@@ -1463,7 +1508,7 @@ pub enum Method {
     DevicePairing { address: String },
     /// -> ServiceList: the services a classic device lists, asked over the
     /// connection BlueCaster has to it, else the list from its last connection
-    /// since the core started (developer mode only)
+    /// since the core started
     #[serde(rename = "device.services")]
     DeviceServices { address: String },
     /// -> string[]: the addresses of the classic devices Windows' Bluetooth
@@ -1475,9 +1520,15 @@ pub enum Method {
     /// -> WindowsImport: takes over the link keys Windows' Bluetooth keeps
     /// for the adapter with the Bluetooth address `adapter`, so the devices
     /// it paired with that adapter connect without pairing again, and saves
-    /// the audio ones (an administrator prompt)
+    /// the audio ones (an administrator prompt); `address`: that device's
+    /// only (Connect on a device Windows paired, issue #86)
     #[serde(rename = "device.import_windows_pairings")]
-    DeviceImportWindowsPairings { adapter: String },
+    DeviceImportWindowsPairings {
+        adapter: String,
+        #[ts(optional = nullable)]
+        #[serde(default)]
+        address: Option<String>,
+    },
     /// Removes a saved device; `le_audio` true: its LE Audio entry (absent
     /// or false: the classic one)
     #[serde(rename = "device.forget")]
@@ -1935,6 +1986,34 @@ pub struct DevicePairing {
     /// while LE Audio and developer mode are on, issue #86), None when it
     /// has none or no stack with LE Audio runs
     pub le_keys: Option<LeKeysInfo>,
+    /// Why there are no LE keys; None when there are
+    pub le_keys_missing: Option<LeKeysMissing>,
+}
+
+/// Why BlueCaster has no LE keys of a classic device (issue #86)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum LeKeysMissing {
+    /// No stack runs
+    NoStack,
+    /// LE Audio is off, so nothing is asked
+    NoLe,
+    /// Not asked since Bluetooth started (no connection since)
+    NotAsked,
+    /// Asked, no answer yet
+    Asking,
+    /// The link is not encrypted with Secure Connections
+    NotSecure,
+    /// The device opened the connection; only one BlueCaster opens asks
+    DeviceLed,
+    /// The device does not support it
+    NoSupport,
+    /// The device refused
+    Refused,
+    /// The device did not answer
+    NoAnswer,
+    /// The device answered without keys
+    NoneGiven,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -2182,8 +2261,38 @@ mod tests {
             "max_media_payload": 1023}))
         .unwrap();
         assert!(!profile.le_audio);
-        let le = Profile { le_audio: true, ..profile };
+        assert!(profile.headset_mic == "off" && profile.mic_device_id.is_empty() && profile.mic_device_name.is_empty());
+        let le = Profile {
+            le_audio: true,
+            headset_mic: "auto".into(),
+            mic_device_id: "{cable}".into(),
+            mic_device_name: "CABLE Input".into(),
+            ..profile
+        };
         assert_eq!(serde_json::from_value::<Profile>(serde_json::to_value(&le).unwrap()).unwrap(), le);
+        assert_eq!(serde_json::to_value(&le).unwrap()["headset_mic"], "auto");
+
+        // A stream status without voice, and one with it
+        let st: StreamStatus = serde_json::from_value(serde_json::json!({
+            "state": "streaming", "message": {"key": "", "args": []}, "profile": "P", "info": null,
+            "volume": null}))
+        .unwrap();
+        assert!(st.voice.is_none());
+        let voice = StreamStatus {
+            voice: Some(VoiceStatus {
+                codec: "msbc".into(),
+                link: "hfp".into(),
+                rate: 16000,
+                mic_device_id: "{cable}".into(),
+            }),
+            ..st
+        };
+        let j = serde_json::to_value(&voice).unwrap();
+        assert_eq!(
+            j["voice"],
+            serde_json::json!({"codec": "msbc", "link": "hfp", "rate": 16000, "mic_device_id": "{cable}"})
+        );
+        assert_eq!(serde_json::from_value::<StreamStatus>(j).unwrap(), voice);
 
         let settings: Settings = serde_json::from_value(serde_json::json!({
             "language": "en", "theme": "system", "start_with_windows": false, "start_minimized": false,

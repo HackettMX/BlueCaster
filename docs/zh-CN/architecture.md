@@ -122,6 +122,7 @@ USB 传输保留了 v1 中真实适配器所需的恢复措施：打开适配器
 | 2. 组件 | `aptx-adaptive` | Rust 编写的 aptX Adaptive 编码器（内置自 AKS-Logic/aptx-adaptive-linux，MIT） |
 | 2. 组件 | `codec` | `Encoder` trait、SBC 编码器（Bluedroid 编码器的 Rust 移植版）、C 编码器的安全封装、Codec Information 解析以及编解码器选择 |
 | 2. 组件 | `audio-capture` | WASAPI 捕获（`wasapi` crate）：系统环回、虚拟设备、单个应用（进程环回）；设备和应用列表、测试音、按应用的音量（音量合成器） |
+| 2. 组件 | `voice-link` | 耳机麦克风的音频（开发者模式）：向所选输出设备播放单声道 PCM（WASAPI）、为上行方向将捕获缩混为单声道，以及基于 SCO 负载的语音编解码器 CVSD / mSBC / LC3-SWB |
 | 3. 引擎 | `bt-host` | 在独立线程上运行 BTstack，由命令和类型化事件驱动：GAP、A2DP Source、AVRCP、SDP、用于直通（`rfcomm.*`）的 RFCOMM 信道、链接密钥、设备的 SDP 服务、AFH、固件加载和芯片加载程序（`bringup`）、芯片探测和芯片脚本、HCI 捕获（`.pklg`）、LE Audio（`le/`） |
 | 2. 组件 | `le-audio` | LE Audio（实验性）：不依赖 BTstack 和 Windows 的逻辑（assigned numbers、LTV、PACS / ASCS PDU、预设、CSIP / VCP / MCP / CCP 模型） |
 | 3. 引擎 | `pipeline` | PCM 环形缓冲区、格式转换、缩混、编码、媒体负载、发送节奏控制、ABR |

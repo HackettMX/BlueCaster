@@ -117,6 +117,7 @@ export interface AdapterFirmware {
   /** The core can fetch the files from linux-firmware */
   firmware_download?: boolean;
   vendor_note: { key: string; args: string[] } | null;
+  driver?: "winusb" | "bluetooth" | "other" | "none";
 }
 
 /**
@@ -174,17 +175,74 @@ export function chipStatus(
   return { kind: "unchecked", files, present };
 }
 
-/** The adapter card's short firmware state: a language key and its colour */
+/**
+ * Where another vendor's adapter gets its firmware (issue #86: the Realtek
+ * chip choice means nothing to it): its vendor's Windows driver (MediaTek,
+ * Qualcomm), the Wi-Fi driver (Marvell), files in the firmware folder
+ * (Intel; Broadcom's optional), or none needed. Null for Realtek, an
+ * unknown chip and one BlueCaster cannot use.
+ */
+export type VendorFirmware = "driver" | "wifi" | "folder" | "optional" | "none";
+export function vendorFirmware(a: Pick<AdapterFirmware, "vendor_note">): VendorFirmware | null {
+  switch (a.vendor_note?.key) {
+    case "firmware.vendor_mediatek":
+    case "firmware.vendor_qualcomm":
+      return "driver";
+    case "firmware.vendor_marvell":
+      return "wifi";
+    case "firmware.vendor_intel":
+      return "folder";
+    case "firmware.vendor_broadcom":
+      return "optional";
+    case "firmware.vendor_csr":
+    case "firmware.vendor_barrot":
+    case "firmware.vendor_actions":
+      return "none";
+    default:
+      return null;
+  }
+}
+
+/** The running stack's firmware loader on this adapter (on WinUSB, its
+ *  vendor's): how it went, null when none ran on it */
+export function loaderOutcome(
+  a: Pick<AdapterFirmware, "vendor" | "driver">,
+  loader: { vendor: string; ok?: boolean | null } | null | undefined,
+): "ok" | "failed" | "running" | null {
+  if (!loader || a.driver !== "winusb" || loader.vendor.toLowerCase() !== a.vendor.toLowerCase()) return null;
+  return loader.ok === true ? "ok" : loader.ok === false ? "failed" : "running";
+}
+
+const VENDOR_FIRMWARE_TAGS: Record<VendorFirmware, string> = {
+  driver: "ui.adapter.firmware_from_driver",
+  wifi: "ui.adapter.firmware_from_wifi",
+  folder: "ui.adapter.firmware_from_folder",
+  optional: "ui.adapter.firmware_optional",
+  none: "ui.adapter.firmware_not_needed",
+};
+
+/** The adapter card's short firmware state: a language key (its argument,
+ *  if any) and its colour */
 export function adapterFirmwareTag(
   a: AdapterFirmware,
   setting: ChipSetting,
-): { key: string; status: "good" | "warn" | "bad" } {
+  loader?: { vendor: string; ok?: boolean | null } | null,
+): { key: string; args?: string[]; status: "good" | "warn" | "bad" } {
   if (a.firmware_present === true) return { key: "firmware.present", status: "good" };
   if (a.firmware_present === false) {
-    return { key: a.firmware_invalid ? "firmware.invalid_short" : "firmware.missing_short", status: "bad" };
+    // Needed once the adapter is on WinUSB: amber before (issue #86)
+    const status = a.driver === undefined || a.driver === "winusb" ? "bad" : "warn";
+    return { key: a.firmware_invalid ? "firmware.invalid_short" : "firmware.missing_short", status };
   }
   // BlueCaster cannot use it: red, as a missing file (issue #86)
   if (a.vendor_note?.key === "firmware.vendor_unsupported") return { key: "ui.adapter.firmware_unsupported", status: "bad" };
+  const source = vendorFirmware(a);
+  if (source) {
+    const outcome = loaderOutcome(a, loader);
+    if (outcome === "failed") return { key: "ui.adapter.firmware_load_failed", status: "bad" };
+    if (outcome === "ok") return { key: "ui.adapter.firmware_loaded", status: "good" };
+    return { key: VENDOR_FIRMWARE_TAGS[source], args: source === "driver" ? [a.vendor] : undefined, status: "good" };
+  }
   if (a.vendor_note || setting.bt_chip_pid === CHIP_NOT_REALTEK) return { key: "ui.adapter.firmware_not_realtek", status: "good" };
   return { key: "ui.adapter.firmware_choose_chip", status: "warn" };
 }

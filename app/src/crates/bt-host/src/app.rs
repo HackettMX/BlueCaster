@@ -31,7 +31,7 @@ use crate::sdp_services::SdpServices;
 use crate::shared::Shared;
 use crate::stats::LinkStats;
 use crate::{AfhClassification, ConnectFailure, Controls, DiscoveredDevice, HostEvent, InitFailure, MediaKey};
-use crate::{intel, mediatek, qualcomm};
+use crate::{intel, mediatek, qualcomm, realtek_btnic};
 
 pub(crate) type Job = Box<dyn FnOnce(&mut HostApp, &Stack) + Send>;
 
@@ -71,6 +71,9 @@ pub(crate) struct Setup {
     pub broadcom_ids: Vec<(u16, u16)>,
     /// HFP audio gateway for the headphones' battery level
     pub battery: bool,
+    /// The HFP audio gateway also offers the audio connection
+    /// (HostConfig::voice)
+    pub voice: bool,
     /// Told where a loader is (HostConfig::on_loader)
     pub on_loader: Option<crate::bringup::LoaderHook>,
     /// Run the chip probe instead of HCI init (BtHost::probe): its report
@@ -115,6 +118,8 @@ pub(crate) struct HostApp {
     pub remote_addr: Option<[u8; 6]>,
     /// ACL handle of the HFP service level connection, once up
     pub hfp_acl: Option<u16>,
+    /// The HFP audio connection (headset microphone)
+    pub voice: crate::voice::Voice,
     pub streaming: bool,
     /// Codec of the configured stream (RTP or not)
     pub stream_codec: Option<CodecKind>,
@@ -225,6 +230,7 @@ impl HostApp {
             remote_seid: 0,
             remote_addr: None,
             hfp_acl: None,
+            voice: Default::default(),
             streaming: false,
             stream_codec: None,
             endpoints: HashMap::new(),
@@ -314,6 +320,22 @@ impl HostApp {
         let loader = qualcomm::Loader::new(Box::new(move |name| {
             read_firmware_file(&dir, "qca", name).or_else(|| qualcomm::from_windows_driver(name))
         }));
+        self.start_loader(stack, Box::new(loader));
+    }
+
+    /// The download of a Realtek chip whose firmware only Realtek's Windows
+    /// driver has (crate::realtek_btnic), then HCI init: the firmware folder
+    /// first, then the driver
+    pub fn start_realtek_driver_loader(&mut self, stack: &Stack, chip: &'static str, file: &'static str) {
+        let dir = self.setup.firmware_dir.clone();
+        tracing::info!("Realtek {chip}: checking its firmware (experimental), folder {}", dir.display());
+        let loader = realtek_btnic::Loader::new(
+            Box::new(move |name| {
+                read_firmware_file(&dir, "realtek", name).or_else(|| realtek_btnic::from_windows_driver(name))
+            }),
+            chip,
+            file,
+        );
         self.start_loader(stack, Box::new(loader));
     }
 
@@ -521,10 +543,10 @@ impl HostApp {
             AVRCP_FEATURE_MASK_CATEGORY_PLAYER_OR_RECORDER,
         );
         self.register_endpoints(stack);
-        // Battery level (experimental, off by default): HFP's service level
-        // connection only, no audio
-        if self.setup.battery {
-            stack.hfp_ag_init();
+        // Battery level: HFP's service level connection; with voice
+        // (headset microphone, developer mode) also the audio connection
+        if self.setup.battery || self.setup.voice {
+            stack.hfp_ag_init(self.setup.voice);
         }
         // LE Audio (experimental, off by default): SM, GATT client / server,
         // ISO. Nothing of it runs while the setting is off.
@@ -1058,6 +1080,11 @@ impl HostApp {
         if ev == HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS {
             tracing::trace!("HCI completed packets: {:02X?}", p.get(2..));
         }
+        // The controller's SCO buffer length, which BTstack's H2 path
+        // asserts on (crate::voice)
+        if let Some(b) = btstack_sys::events::read_buffer_size(p) {
+            self.voice.on_buffer_size(&b);
+        }
         match ev {
             BTSTACK_EVENT_STATE => match u8_at(p, 2) {
                 Some(state @ (1 | 3..)) => tracing::debug!("HCI state {state} ({:?})", stack.hci_state()),
@@ -1310,6 +1337,13 @@ impl HostApp {
                     "HCI disconnection (handle 0x{handle:04x}, reason 0x{reason:02x}: {})",
                     hci_error_string(reason)
                 );
+                // The audio connection's SCO link: released even if HFP
+                // never says so
+                if u8_at(p, 2) == Some(0)
+                    && let Some(e) = self.voice.on_disconnected(handle)
+                {
+                    let _ = self.events.send(e);
+                }
                 let lost = self.shared.update(|s| {
                     s.acl_down = true;
                     s.acl_links.retain(|&(h, _, _)| h != handle);
@@ -1836,6 +1870,9 @@ impl HostApp {
                     self.avrcp_cid = 0;
                 }
                 if let Some(acl) = self.hfp_acl.take() {
+                    if let Some(e) = self.voice.stop(stack) {
+                        let _ = self.events.send(e);
+                    }
                     stack.hfp_ag_release(acl);
                 }
                 if let Some(addr) = self.remote_addr {
@@ -1907,8 +1944,13 @@ impl HostApp {
     /// Opens the HFP service level connection to the headphones, where they
     /// report their battery (the headphones may also open it themselves)
     fn connect_hfp(&mut self, stack: &Stack) {
-        if !self.setup.battery || self.hfp_acl.is_some() {
-            tracing::debug!("HFP: not connecting (battery {}, acl {:?})", self.setup.battery, self.hfp_acl);
+        if !(self.setup.battery || self.setup.voice) || self.hfp_acl.is_some() {
+            tracing::debug!(
+                "HFP: not connecting (battery {}, voice {}, acl {:?})",
+                self.setup.battery,
+                self.setup.voice,
+                self.hfp_acl
+            );
             return;
         }
         let Some(addr) = self.remote_addr else { return };
@@ -1916,12 +1958,14 @@ impl HostApp {
         tracing::info!("HFP: opening the service level connection to {} (0x{status:02x})", addr_str(&addr));
     }
 
-    fn handle_hfp(&mut self, p: &[u8]) {
+    fn handle_hfp(&mut self, stack: &Stack, p: &[u8]) {
+        self.voice.on_hf_activity();
         match subevent(p) {
             Some(HFP_SUBEVENT_SERVICE_LEVEL_CONNECTION_ESTABLISHED) => {
                 let status = u8_at(p, 5).unwrap_or(0xFF);
                 if status == 0 {
                     self.hfp_acl = le16(p, 3);
+                    self.voice.on_slc_established();
                     tracing::debug!("HFP: service level connection on ACL {:04X?}", self.hfp_acl);
                     tracing::info!("HFP: service level connection established");
                 } else {
@@ -1938,6 +1982,19 @@ impl HostApp {
             Some(HFP_SUBEVENT_SERVICE_LEVEL_CONNECTION_RELEASED) => {
                 tracing::info!("HFP: service level connection released");
                 self.hfp_acl = None;
+                if let Some(e) = self.voice.on_released() {
+                    let _ = self.events.send(e);
+                }
+            }
+            Some(HFP_SUBEVENT_AUDIO_CONNECTION_ESTABLISHED) => {
+                if let Some(e) = self.voice.on_established(stack, p) {
+                    let _ = self.events.send(e);
+                }
+            }
+            Some(HFP_SUBEVENT_AUDIO_CONNECTION_RELEASED) => {
+                if let Some(e) = self.voice.on_released() {
+                    let _ = self.events.send(e);
+                }
             }
             // AT+BIEV: HF indicator 2, 0..100 percent
             Some(HFP_SUBEVENT_HF_INDICATOR) => {
@@ -2306,6 +2363,20 @@ impl App for HostApp {
             self.rfcomm.on_packet(stack, packet_type, channel, packet);
             return;
         }
+        // SCO data as well as HCI_EVENT_SCO_CAN_SEND_NOW
+        if source == Source::Sco {
+            if let Some(e) = self.voice.on_sco(stack, packet_type, packet) {
+                let _ = self.events.send(e);
+            }
+            return;
+        }
+        // LE Audio's ISO data (a headset microphone) as well as its events
+        if source == Source::Iso {
+            if let Some(le) = self.le.as_mut() {
+                le.on_iso(stack, packet_type, packet);
+            }
+            return;
+        }
         if packet_type != HCI_EVENT_PACKET {
             return;
         }
@@ -2320,12 +2391,12 @@ impl App for HostApp {
             Source::AvdtpSink => self.handle_sep(packet),
             Source::Hfp => {
                 if event_type(packet) == Some(HCI_EVENT_HFP_META) {
-                    self.handle_hfp(packet)
+                    self.handle_hfp(stack, packet)
                 }
             }
             Source::SdpClient => self.rfcomm.on_sdp(stack, packet),
             Source::SdpServices => self.sdp_services.on_event(packet),
-            Source::Rfcomm => {}
+            Source::Rfcomm | Source::Sco => {}
             Source::Avrcp | Source::AvrcpController | Source::AvrcpTarget => {
                 if event_type(packet) == Some(HCI_EVENT_AVRCP_META) {
                     self.handle_avrcp(stack, packet)
@@ -2347,11 +2418,7 @@ impl App for HostApp {
                     le.on_att_event(packet);
                 }
             }
-            Source::Iso => {
-                if let Some(le) = self.le.as_mut() {
-                    le.on_iso(stack, packet);
-                }
-            }
+            Source::Iso => {}
         }
     }
 

@@ -35,6 +35,7 @@ use super::bap::{self, Unicast, UnicastEnv, UnicastTimer};
 use super::broadcast::Broadcast;
 use super::gatt_client::{GattChar, GattClient, GattService};
 use super::gatt_server::{AttRead, AttWrite, GattServer, WriteAction};
+use super::iso_recv::{IsoRx, LeRxStats, RxSdu};
 use super::iso_send::IsoSender;
 use super::module::{LeGroupHooks, LeModule, LeModuleSetup};
 use super::modules::tmap_gmap::TmapGmapModule;
@@ -88,6 +89,9 @@ pub struct LeDevice {
     // ---- PACS (sink direction: we are the audio source) ----
     pub sink_pacs: Vec<PacRecord>,
     pub sink_locations: u32,
+    /// Source direction (the headset microphone)
+    pub source_pacs: Vec<PacRecord>,
+    pub source_locations: u32,
     pub available_sink_contexts: u16,
     pub available_source_contexts: u16,
     pub supported_sink_contexts: u16,
@@ -119,6 +123,8 @@ impl LeDevice {
             services: Vec::new(),
             sink_pacs: Vec::new(),
             sink_locations: 0,
+            source_pacs: Vec::new(),
+            source_locations: 0,
             available_sink_contexts: 0,
             available_source_contexts: 0,
             supported_sink_contexts: 0,
@@ -164,6 +170,10 @@ impl LeDevice {
 
     pub fn sink_ase_count(&self) -> usize {
         self.ases.iter().filter(|a| a.sink).count()
+    }
+
+    pub fn source_ase_count(&self) -> usize {
+        self.ases.iter().filter(|a| !a.sink).count()
     }
 }
 
@@ -281,6 +291,13 @@ pub struct LeCore {
     /// Sink PAC records per characteristic (con, value handle): a device may
     /// have several
     pub(crate) sink_pacs_by_char: BTreeMap<(u16, u16), Vec<PacRecord>>,
+    /// Source PAC records per characteristic, as `sink_pacs_by_char`
+    pub(crate) source_pacs_by_char: BTreeMap<(u16, u16), Vec<PacRecord>>,
+    /// The microphone: the ring's producer from le_start_stream until the
+    /// stream receives, then the receiver
+    pub(crate) rx_producer: Option<rtrb::Producer<RxSdu>>,
+    pub(crate) rx_stats: Arc<LeRxStats>,
+    pub(crate) rx: Option<IsoRx>,
 }
 
 /// The LE core for one hook or callback (BTstack thread)
@@ -1063,6 +1080,7 @@ impl<'a> LeCtx<'a> {
             self.core.gatt.detach(handle);
             self.core.server.on_disconnected(handle);
             self.core.sink_pacs_by_char.retain(|(c, _), _| *c != handle);
+            self.core.source_pacs_by_char.retain(|(c, _), _| *c != handle);
             if let Some(d) = self.device_mut(id) {
                 tracing::info!("LE Audio: {} disconnected (0x{reason:02x})", d.addr);
                 d.acl = CON_HANDLE_INVALID;
@@ -1247,6 +1265,9 @@ impl<'a> LeCtx<'a> {
                 sink_pacs: d.sink_pacs.clone(),
                 sink_locations: d.sink_locations,
                 available_sink_contexts: d.available_sink_contexts,
+                source_pacs: d.source_pacs.clone(),
+                source_locations: d.source_locations,
+                available_source_contexts: d.available_source_contexts,
                 ases: d.ases.clone(),
             });
         }
@@ -1264,6 +1285,7 @@ impl<'a> LeCtx<'a> {
         &mut self,
         plan: StreamPlan,
         queue: SharedSduQueue,
+        rx: Option<(rtrb::Producer<RxSdu>, Arc<LeRxStats>)>,
         status: LeStreamStatus,
         why: Arc<Mutex<String>>,
         done: LeDone,
@@ -1289,6 +1311,14 @@ impl<'a> LeCtx<'a> {
         tracing::debug!("LE Audio: unicast start: {}", plan.describe());
         self.core.queue = Some(queue);
         self.core.status = Some(status);
+        self.core.rx = None;
+        match rx {
+            Some((producer, stats)) => {
+                self.core.rx_producer = Some(producer);
+                self.core.rx_stats = stats;
+            }
+            None => self.core.rx_producer = None,
+        }
         self.with_unicast(|u, env| {
             u.start(
                 env,
@@ -1309,6 +1339,8 @@ impl<'a> LeCtx<'a> {
     pub(crate) fn stop_unicast(&mut self, done: LeDone) {
         tracing::debug!("LE Audio: unicast stop (state machine present {})", self.core.unicast.is_some());
         self.core.iso.stop(self.stack);
+        self.core.rx = None;
+        self.core.rx_producer = None;
         if self.core.unicast.is_none() {
             done(true);
             return;
@@ -1331,18 +1363,10 @@ impl<'a> LeCtx<'a> {
                 last_error: d.last_error,
                 sink_locations: d.sink_locations,
                 sink_ases: d.sink_ase_count(),
-                pacs: d
-                    .sink_pacs
-                    .iter()
-                    .filter(|r| r.lc3)
-                    .map(|r| {
-                        format!(
-                            "LC3 rates 0x{:04x} ch 0x{:02x} octets {}-{}",
-                            r.caps.sampling_frequencies, r.caps.channel_counts, r.caps.min_octets, r.caps.max_octets
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; "),
+                pacs: describe_pacs(&d.sink_pacs),
+                source_locations: d.source_locations,
+                source_ases: d.source_ase_count(),
+                source_pacs: describe_pacs(&d.source_pacs),
                 roles: String::new(),
             })
             .collect();
@@ -1408,6 +1432,21 @@ impl<'a> LeCtx<'a> {
             }
         }
     }
+}
+
+/// The LC3 PAC records for LeDeviceInfo, e.g. "LC3 rates 0x00b4 ch 0x03
+/// octets 26-155" (records joined by "; ")
+fn describe_pacs(pacs: &[PacRecord]) -> String {
+    pacs.iter()
+        .filter(|r| r.lc3)
+        .map(|r| {
+            format!(
+                "LC3 rates 0x{:04x} ch 0x{:02x} octets {}-{}",
+                r.caps.sampling_frequencies, r.caps.channel_counts, r.caps.min_octets, r.caps.max_octets
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Polls every 20 ms (at most 2 s) until the device's link is down
@@ -1568,6 +1607,21 @@ impl UnicastEnv for LeCtx<'_> {
         self.core.iso.stop(self.stack);
     }
 
+    fn start_receiving(&mut self, cis_handles: &[u16]) {
+        if self.core.rx.is_some() {
+            return;
+        }
+        let Some(producer) = self.core.rx_producer.take() else {
+            tracing::debug!("LE Audio: CIS {cis_handles:04X?} carry a microphone, no receiver asked for");
+            return;
+        };
+        self.core.rx = Some(IsoRx::new(producer, cis_handles, self.core.rx_stats.clone()));
+    }
+
+    fn stop_receiving(&mut self) {
+        self.core.rx = None;
+    }
+
     fn cis_down(&mut self, handle: u16) {
         tracing::debug!("LE Audio: CIS 0x{handle:04X} down");
         self.core.iso.on_cis_down(self.stack, handle);
@@ -1578,6 +1632,7 @@ impl UnicastEnv for LeCtx<'_> {
             tracing::warn!("LE Audio: stream lost: {why}");
         }
         self.core.iso.stop(self.stack);
+        self.core.rx = None;
     }
 
     fn stream_state(&mut self, plan: &StreamPlan, streaming: bool) {
@@ -1685,6 +1740,10 @@ impl LeCore {
             timers_changed: false,
             gatt_retry: None,
             sink_pacs_by_char: BTreeMap::new(),
+            source_pacs_by_char: BTreeMap::new(),
+            rx_producer: None,
+            rx_stats: Arc::default(),
+            rx: None,
         }
     }
 
@@ -1749,6 +1808,7 @@ impl LeCore {
         self.rpa_cache.clear();
         self.gatt = GattClient::new();
         self.sink_pacs_by_char.clear();
+        self.source_pacs_by_char.clear();
         self.shared.iso_len.store(0, Ordering::Release);
         self.shared.iso_count.store(0, Ordering::Release);
         self.unicast = Some(Unicast::default());
@@ -1789,6 +1849,8 @@ impl LeCore {
             m.on_stack_deinit();
         }
         self.iso.stop(stack);
+        self.rx = None;
+        self.rx_producer = None;
         if let Some(c) = self.connect.take() {
             c.result.lock().unwrap_or_else(|e| e.into_inner()).error = "Bluetooth stopped".into();
             (c.done)(false);
@@ -1847,10 +1909,21 @@ impl LeCore {
         }
     }
 
-    /// The ISO handler: HCI_EVENT_CIS_CAN_SEND_NOW / _BIS_CAN_SEND_NOW
-    /// (incoming ISO data of source ASEs is not used)
-    pub(crate) fn on_iso(&mut self, stack: &Stack, packet: &[u8]) {
-        if self.initialized {
+    /// The ISO handler: HCI_EVENT_CIS_CAN_SEND_NOW / _BIS_CAN_SEND_NOW, and
+    /// HCI ISO data (the microphone of source ASEs). The packet type comes
+    /// first: an ISO data packet's first byte is the handle's low byte and
+    /// could look like an event code.
+    pub(crate) fn on_iso(&mut self, stack: &Stack, packet_type: u8, packet: &[u8]) {
+        if !self.initialized {
+            return;
+        }
+        if super::iso_recv::is_iso_data(packet_type) {
+            if let Some(rx) = self.rx.as_mut() {
+                rx.on_packet(packet);
+            }
+            return;
+        }
+        if packet_type == HCI_EVENT_PACKET {
             self.iso.on_cis_can_send_now(stack, packet);
             self.iso.on_bis_can_send_now(stack, packet);
         }

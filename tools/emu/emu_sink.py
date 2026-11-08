@@ -5,7 +5,8 @@ Runs two Bumble virtual controllers on one in-process link:
     `bluecaster-core.exe --cli --hci-tcp 127.0.0.1:<port>`
   - controller "SINK" is driven by a Bumble host acting as an A2DP sink that
     offers SBC (SBC XQ capable), AAC, aptX, aptX HD, aptX LL, LDAC, LHDC V5,
-    FastStream, Opus, Opus 05 and aptX Adaptive like a typical headset
+    FastStream, Opus, Opus 05 and aptX Adaptive like a typical headset; with
+    --hfp also an HFP hands-free unit with SCO audio (hfp_audio.py)
 
 The sink's HCI traffic is written to a PacketLogger (.pklg) capture, so
 bluecaster_decode --received can check what actually arrived at the sink.
@@ -317,6 +318,8 @@ class PacketLoggerSnooper(Snooper):
             pl_type = 0x01
         elif h4_type == hci.HCI_ACL_DATA_PACKET:
             pl_type = 0x02 if to_controller else 0x03
+        elif h4_type == hci.HCI_SYNCHRONOUS_DATA_PACKET:
+            pl_type = 0x08 if to_controller else 0x09
         else:
             return
         now = time.time()
@@ -567,7 +570,11 @@ def refuse_dual_channel(sink):
 async def main(args):
     link = LocalLink()
     transport = await open_transport(f'tcp-server:127.0.0.1:{args.port}')
-    bluecaster_controller = EmuController(
+    controller_class = EmuController
+    if args.hfp:
+        from hfp_audio import HfpEmuController  # SCO between the controllers
+        controller_class = HfpEmuController
+    bluecaster_controller = controller_class(
         'BlueCaster',
         host_source=transport.source,
         host_sink=transport.sink,
@@ -578,7 +585,10 @@ async def main(args):
     bluecaster_controller.silent_remote_version = args.silent_remote_version
     if args.dual_mode:
         bluecaster_controller.lmp_features = DUAL_MODE_FEATURES
-    sink_controller = EmuController('SINK', link=link, public_address=SINK_ADDRESS)
+    sink_controller = controller_class('SINK', link=link, public_address=SINK_ADDRESS)
+    if args.hfp:
+        from hfp_audio import VOICE_LMP_FEATURES
+        bluecaster_controller.lmp_features |= VOICE_LMP_FEATURES
     sink_controller.eir_name = not args.no_eir_name
     host = Host(sink_controller, AsyncPipeSink(sink_controller))
     if args.capture:
@@ -589,6 +599,9 @@ async def main(args):
     device.sdp_service_records = {
         0x00010001: make_audio_sink_service_sdp_records(0x00010001)
     }
+    if args.hfp:
+        from hfp_audio import HfSide
+        HfSide(device, args.hfp)
     huawei = None
     if args.huawei:
         huawei = HuaweiEarbuds(device, args.huawei == 'on', args.huawei_drop, args.huawei_silent,
@@ -846,6 +859,9 @@ if __name__ == '__main__':
     parser.add_argument('--ctkd-refuse', action='store_true', help='with --ctkd, refuse the pairing request')
     parser.add_argument('--ctkd-public-identity', action='store_true',
                         help='with --ctkd, give the classic address as identity (default: a random static one)')
+    parser.add_argument('--hfp', nargs='?', const='cvsd', choices=['cvsd', 'msbc', 'lc3swb'],
+                        help='also an HFP hands-free unit with these codecs (cvsd: no codec negotiation), '
+                             'SCO carried between the controllers (hfp_audio.py)')
     parser.add_argument('--ctkd-silent', action='store_true', help='with --ctkd, list SMP over BR/EDR, answer nothing')
     bumble.logging.setup_basic_logging(parser.parse_known_args()[0].log_level)
     asyncio.run(main(parser.parse_args()))

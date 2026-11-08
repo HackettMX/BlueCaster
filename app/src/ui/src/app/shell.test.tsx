@@ -408,6 +408,15 @@ describe("setup device step", () => {
     expect(screen.getByRole("button", { name: "Next" })).not.toBeDisabled();
   });
 
+  it("goes on without an audio device: it can be added later (issue #86)", async () => {
+    const { mock: m } = await toDeviceStep({ scenario: "normal" });
+    const raw = m as any;
+    raw.snap.profiles = [];
+    raw.snap.active_profile = null;
+    raw.emit({ kind: "profiles", value: { profiles: [], active_profile: null } });
+    await toFinish();
+  });
+
   it("keeps the device connected out of the list after Back and Next (issue #86)", async () => {
     const { calls } = await toDeviceStep({ scenario: "normal" });
     const row = (await screen.findByText("Galaxy Buds2 Pro")).closest(".device-row") as HTMLElement;

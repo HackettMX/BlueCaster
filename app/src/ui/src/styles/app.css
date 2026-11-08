@@ -26,6 +26,8 @@
   --good: #34d399;
   --warn: #fbbf24;
   --bad: #f87171;
+  /* Experimental: amber, text and border (issue #86) */
+  --exp: #f59e0b;
 
   --fs-12: 0.75rem;
   --fs-14: 0.875rem;
@@ -73,6 +75,7 @@
   --disabled-text: rgb(255 255 255 / 0.36);
   --good-text: var(--good);
   --warn-text: var(--warn);
+  --exp-text: var(--warn);
   --bad-text: var(--bad);
   --focus: #eceef3;
   --overlay: rgb(0 0 0 / 0.55);
@@ -97,6 +100,7 @@
   --disabled-text: rgb(0 0 0 / 0.36);
   --good-text: #047857;
   --warn-text: #92400e;
+  --exp-text: #b45309;
   --bad-text: #b91c1c;
   --focus: #15171c;
   --overlay: rgb(20 22 28 / 0.35);
@@ -251,6 +255,11 @@ p {
 .st-running {
   --st: var(--warn);
   --st-text: var(--warn-text);
+}
+/* Experimental: amber, the border in full (issue #86) */
+.st-exp {
+  --st: var(--exp);
+  --st-text: var(--exp-text);
 }
 .st-bad,
 .st-error,
@@ -913,6 +922,10 @@ option {
   gap: var(--s3);
   animation: rise var(--t-mid) var(--ease);
 }
+/* Room for a one-line GUID beside a service name (issue #86) */
+.dialog-wide {
+  width: min(38rem, 100%);
+}
 .dialog > h2,
 .dialog-actions {
   flex: none;
@@ -993,13 +1006,16 @@ option {
   color: var(--st-text);
   border-color: color-mix(in srgb, var(--st) 55%, transparent);
 }
+.tag.st-exp {
+  border-color: var(--exp);
+}
 .tags {
   display: flex;
   gap: var(--s1);
   flex-wrap: wrap;
   justify-content: flex-end;
 }
-/* A tag that opens something (developer mode: a device's pairing), above
+/* A tag that opens something (a device's services and keys), above
    the row's full-size radio input */
 .tag-button {
   position: relative;
@@ -1025,11 +1041,18 @@ option {
   overflow-wrap: anywhere;
   user-select: all;
 }
+/* Key, tag and copy button on one line */
+.pairing-key-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  max-width: 100%;
+}
 .pairing-keys {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   gap: var(--s2) var(--s3);
-  align-items: baseline;
+  align-items: center;
   margin: var(--s2) 0;
 }
 .pairing-keys dt {
@@ -1045,10 +1068,14 @@ option {
 .pairing-services td {
   vertical-align: top;
 }
+/* A GUID on one line; the name column wraps instead (issue #86) */
+.pairing-services td:last-child {
+  width: 1%;
+}
 .pairing-services .mono {
   display: block;
   font-size: var(--fs-12);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 
 .notice-region {
@@ -1650,6 +1677,62 @@ option {
 .live-bitpool {
   flex-basis: 100%;
 }
+/* The headset microphone's voice codec; a classic link's in the warning colour */
+.voice-codec {
+  font-size: var(--fs-12);
+  color: var(--text-2);
+}
+.voice-codec.st-warn {
+  color: var(--st-text);
+}
+/* Headset mode at one click (Home's card, the flyout): the microphone and
+   Off / Auto / On; outlined in the accent while On or Auto, muted while
+   Auto waits for an app */
+.headset-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--s1);
+  padding: 0 var(--s2);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--fs-12);
+  line-height: 1.5;
+  cursor: pointer;
+}
+.headset-chip .icon {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+.headset-chip:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.headset-chip:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.headset-chip.on {
+  border-color: var(--accent-fill);
+  color: var(--text);
+}
+.headset-chip.on .icon {
+  color: var(--accent-fill);
+}
+.headset-chip.waiting {
+  border-style: dashed;
+  color: var(--text-2);
+}
+.headset-chip.waiting .icon {
+  color: inherit;
+}
+.headset-chip:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
 .codec-line {
   display: flex;
   flex-wrap: wrap;
@@ -2071,6 +2154,25 @@ option {
 }
 .device-codecs .toggle-row {
   padding: 0;
+}
+/* Headset microphone (developer mode): the switch, its output and notes */
+.headset-mic {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+  min-width: 0;
+}
+/* Its label and Off / Auto / On on one line, as a toggle row */
+.headset-mic-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+.headset-mic .field {
+  align-self: stretch;
+  max-width: 28rem;
 }
 .codec-card-name {
   font-weight: 600;
@@ -3245,6 +3347,10 @@ html.win-flyout body {
 .fly-title .status-line {
   font-size: var(--fs-12);
   max-width: 100%;
+}
+/* The state gives way (ellipsis) to the headset chip beside it */
+.fly-state .status-line {
+  min-width: 0;
 }
 .flyout .device-switcher .select {
   width: 100%;

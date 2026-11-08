@@ -7,7 +7,9 @@
 //! Unicast Game Terminal ("32_1_gr" ... "48_4_gr", GMAP 1.0 Table 3.16:
 //! RTN 1, max transport latency 15 ms (7.5 ms frames) / 20 ms (10 ms),
 //! presentation delay 10 ms). Every built-in preset is unframed with a
-//! presentation delay of 40 ms unless it is a "_gr" one.
+//! presentation delay of 40 ms unless it is a "_gr" one. GMAP's "_gs"
+//! settings ("32_1_gs" ... "48_2_gs") are for the microphone direction of a
+//! gaming headset (presentation delay 60 ms).
 //!
 //! v1's table (name, Hz, frame us, octets, RTN, max latency ms, target
 //! latency):
@@ -93,6 +95,15 @@ impl PresetTable {
             make_gr("48_2_gr", 48000, 10000, 100, 20),
             make_gr("48_3_gr", 48000, 7500, 90, 15),
             make_gr("48_4_gr", 48000, 10000, 120, 20),
+            // GMAP 1.0, UGT -> UGG (the gaming headset's microphone): RTN 1,
+            // max transport latency 15 ms (7.5 ms frames) / 20 ms (10 ms),
+            // presentation delay 60 ms. Written from memory of the GMAP
+            // table and Zephyr's gmap_lc3_preset.h (the spec could not be
+            // fetched): the 60 ms presentation delay is the least sure value.
+            make_gs("32_1_gs", 32000, 7500, 60, 15),
+            make_gs("32_2_gs", 32000, 10000, 80, 20),
+            make_gs("48_1_gs", 48000, 7500, 75, 15),
+            make_gs("48_2_gs", 48000, 10000, 100, 20),
         ];
         PresetTable { presets }
     }
@@ -124,6 +135,11 @@ impl Default for PresetTable {
 /// StreamRequest::preset_order)
 pub const DEFAULT_PRESET_ORDER: [&str; 6] = ["48_6_2", "48_4_2", "48_2_2", "32_2_2", "24_2_2", "16_2_2"];
 
+/// The microphone of a conversational stream, best first: low latency, at
+/// most 32 kHz (plan_stream tries those with the sink preset's frame
+/// duration first)
+pub const DEFAULT_SOURCE_PRESET_ORDER: [&str; 6] = ["32_2_1", "32_1_1", "24_2_1", "24_1_1", "16_2_1", "16_1_1"];
+
 /// A BAP preset: unframed, presentation delay 40 ms
 fn make(name: &str, hz: u32, frame_us: u16, octets: u16, rtn: u8, latency_ms: u16, target_latency: u8) -> StreamPreset {
     StreamPreset {
@@ -142,6 +158,12 @@ fn make(name: &str, hz: u32, frame_us: u16, octets: u16, rtn: u8, latency_ms: u1
 /// A GMAP low-latency setting: unframed, RTN 1, presentation delay 10 ms
 fn make_gr(name: &str, hz: u32, frame_us: u16, octets: u16, latency_ms: u16) -> StreamPreset {
     StreamPreset { presentation_delay_us: 10000, ..make(name, hz, frame_us, octets, 1, latency_ms, TARGET_LATENCY_LOW) }
+}
+
+/// A GMAP game-source setting (the headset's microphone): unframed, RTN 1,
+/// presentation delay 60 ms
+fn make_gs(name: &str, hz: u32, frame_us: u16, octets: u16, latency_ms: u16) -> StreamPreset {
+    StreamPreset { presentation_delay_us: 60000, ..make(name, hz, frame_us, octets, 1, latency_ms, TARGET_LATENCY_LOW) }
 }
 
 #[cfg(test)]
@@ -179,11 +201,30 @@ mod tests {
         ("48_3_gr", 48000, 7500, 90, 1, 0, 1, 15, 10000),
         ("48_4_gr", 48000, 10000, 120, 1, 0, 1, 20, 10000),
     ];
+    /// Added for the microphone (not in v1)
+    const GS: [Row; 4] = [
+        ("32_1_gs", 32000, 7500, 60, 1, 0, 1, 15, 60000),
+        ("32_2_gs", 32000, 10000, 80, 1, 0, 1, 20, 60000),
+        ("48_1_gs", 48000, 7500, 75, 1, 0, 1, 15, 60000),
+        ("48_2_gs", 48000, 10000, 100, 1, 0, 1, 20, 60000),
+    ];
 
     #[test]
     fn table_equals_v1() {
         let t = PresetTable::new();
-        assert_eq!(t.presets().len(), V1.len());
+        assert_eq!(t.presets().len(), V1.len() + GS.len());
+        for (p, &(name, hz, frame_us, octets, tl, framing, rtn, latency, pd)) in
+            t.presets()[V1.len()..].iter().zip(GS.iter())
+        {
+            assert_eq!(
+                (p.name.as_str(), p.sampling_hz, p.frame_us, p.octets, p.target_latency, p.framing, p.rtn),
+                (name, hz, frame_us, octets, tl, framing, rtn)
+            );
+            assert_eq!((p.max_transport_latency_ms, p.presentation_delay_us), (latency, pd));
+        }
+        for name in DEFAULT_SOURCE_PRESET_ORDER {
+            assert!(t.find(name).is_some_and(|p| p.sampling_hz <= 32000), "{name}");
+        }
         for (p, &(name, hz, frame_us, octets, tl, framing, rtn, latency, pd)) in t.presets().iter().zip(V1.iter()) {
             assert_eq!(
                 (p.name.as_str(), p.sampling_hz, p.frame_us, p.octets, p.target_latency),

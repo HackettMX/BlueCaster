@@ -12,6 +12,9 @@ thiserror.workspace = true
 tokio = { version = "1", features = ["net"] }
 # webview.rs: WebView2's ProcessFailed (the version tauri's wry uses)
 webview2-com = "0.39"
+# usb_isoch.rs: the WinUSB handle of an interface claimed through nusb (the
+# vendored copy, root Cargo.toml [patch])
+nusb = "0.2.8"
 
 [dependencies.windows]
 version = "0.62"

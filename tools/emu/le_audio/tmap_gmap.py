@@ -10,8 +10,8 @@ covers all of GMAP's UGG -> UGT configurations (32_1_gr ... 48_4_gr).
 
 --tmap-read-peer: once BlueCaster has connected and encrypted the link, the
 sink reads BlueCaster's TMAS / GMAS (Read By Type) and logs
-"peer TMAP Role 0x0004 (UMS)" / "peer GMAP Role 0x01 (UGG), UGG Features
-0x03" to sink.log for the run_test.py checks.
+"peer TMAP Role 0x0005 (CG+UMS)" / "peer GMAP Role 0x01 (UGG), UGG Features
+0x07" to sink.log for the run_test.py checks.
 
 --gmap-available-contexts 0xNNNN replaces the sink's Available Audio
 Contexts (PACS) after bap.py set them up, e.g. Media without Game.

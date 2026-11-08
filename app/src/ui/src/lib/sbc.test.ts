@@ -39,6 +39,7 @@ describe("SBC frame length and bit rate", () => {
     const xq = sampleProfile({ codec: "sbcxq", sbc_channel_mode: "stereo" });
     expect(sbcSetup(xq, 44100, null)).toMatchObject({ mode: "dual_channel", bitpool: 47, frameBytes: 200, kbps: 551 });
     expect(sbcSetup({ ...xq, sbcxq_bitpool: 53 }, 48000, null)).toMatchObject({ bitpool: 43 });
+    expect(sbcSetup({ ...xq, sbcxq_bitpool: 53, unlisted_options: true }, 48000, null)).toMatchObject({ bitpool: 53 });
     // The minimum (issue #86): the bitpool never below it, nor above the cap
     expect(sbcSetup(sbc({ quality: "mq", sbc_min_bitpool: 30 }), 44100, null)).toMatchObject({ bitpool: 30 });
     expect(sbcSetup(sbc({ sbc_bitpool: 25, sbc_min_bitpool: 30 }), 44100, null)).toMatchObject({ bitpool: 30 });

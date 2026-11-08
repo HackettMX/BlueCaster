@@ -17,6 +17,8 @@ hci-transport.workspace = true
 codec = { workspace = true, features = ["default"] }
 pipeline.workspace = true
 audio-capture.workspace = true
+# voice.rs: headset mode's voice link (codecs, microphone render, uplink)
+voice-link.workspace = true
 win-sys.workspace = true
 # compat.rs: the 2.0.x pipe and mutex names (defined next to the new ones)
 ipc.workspace = true
@@ -35,6 +37,10 @@ if-addrs = "0.15"
 windows = { version = "0.62", features = ["Foundation", "ApplicationModel", "Media_Control"] }
 # firmware.rs: checks the Realtek files fetched from linux-firmware
 sha2 = "0.10"
+
+[dev-dependencies]
+# le_stream.rs tests: a microphone ring without a stack
+rtrb.workspace = true
 
 [lints]
 workspace = true

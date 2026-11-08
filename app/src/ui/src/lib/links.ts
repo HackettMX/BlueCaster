@@ -54,9 +54,11 @@ const CODEC_OPTIONS: Record<string, string> = {
   ldac: "LDAC",
   aptxhd: "aptX HD",
   aptxll: "aptX Low Latency",
+  aptxad: "aptX Adaptive",
   aptx: "aptX",
   lhdcv5: "LHDC V5",
   opus: "Opus",
+  opus05: "Opus 05",
   aac: "AAC",
   sbcxq: "SBC XQ",
   sbc: "SBC",
@@ -119,7 +121,7 @@ export interface ChipReport {
 export function chipReportUrl(r: ChipReport): string {
   const q = new URLSearchParams({
     template: "chip_report.yml",
-    title: `Chip report: ${r.summary.split(",")[0]}`,
+    title: `Chip support: ${r.summary.split(",")[0]}`,
     version: r.version,
     adapter: r.adapter,
     chip: r.summary,

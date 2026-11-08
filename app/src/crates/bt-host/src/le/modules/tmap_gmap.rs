@@ -3,17 +3,18 @@
 //! TMAP (Telephony and Media Audio Profile 1.0) and GMAP (Gaming Audio
 //! Profile 1.0) are role profiles on top of BAP / CAP.
 //!
-//! - TMAS on the PC (0x1855): TMAP Role = Unicast Media Sender only. BlueCaster
-//!   sends media to unicast sink ASEs, which is what UMS is. Not claimed:
-//!   Call Gateway (needs a call control server and conversational,
-//!   bidirectional audio: source ASEs, the headset's microphone), Call
-//!   Terminal / Unicast Media Receiver / Broadcast Media Receiver (the PC
-//!   never renders LE Audio), Broadcast Media Sender (no BIS).
+//! - TMAS on the PC (0x1855): TMAP Role = Call Gateway + Unicast Media
+//!   Sender. BlueCaster sends media to unicast sink ASEs (UMS) and, with the
+//!   headset microphone, runs the conversational configuration with source
+//!   ASEs next to CCP's GTBS (CG). Not claimed: Call Terminal / Unicast
+//!   Media Receiver / Broadcast Media Receiver (the PC never renders LE
+//!   Audio from a broadcast or acts as the headset), Broadcast Media Sender
+//!   (the Auracast source is developer mode only).
 //! - GMAS on the PC (0x1858): GMAP Role = Unicast Game Gateway, UGG
 //!   Features = Multiplex (both channels of a stereo headset as two LC3
 //!   frames in one SDU when the headset allows it) | 96 kbps Source
-//!   (48_3_gr / 48_4_gr). Not Multisink: that is about receiving audio from
-//!   the headsets (`le_audio::defs::PC_*`).
+//!   (48_3_gr / 48_4_gr) | Multisink (the microphones of several UGTs, one
+//!   CIS each) (`le_audio::defs::PC_*`).
 //! - The headset's TMAP Role, GMAP Role and UGT Features are read in
 //!   `on_gatt_ready` and logged ("TMAP: UMR, GMAP: UGT (UGT features 0x3C:
 //!   sink, ...)"). TMAP does not change the stream: the media presets
@@ -26,6 +27,10 @@
 //!   Media context instead"); plan_stream still takes only what the sink
 //!   PAC records allow and falls back to the media presets behind them.
 //!   Otherwise the request stays as it is (media presets, Media context).
+//!   A conversational request (the headset microphone) of a low-latency
+//!   group whose UGTs all have the Source feature puts the "_gs" presets
+//!   first for the microphone ([`GMAP_SOURCE_PRESET_ORDER`]), with the Game
+//!   and Conversational contexts.
 //!
 //! The state per device id is shared by the BTstack-thread module and the
 //! worker hooks under a mutex.
@@ -35,9 +40,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use le_audio::defs::{
-    CONTEXT_GAME, CONTEXT_MEDIA, GMAP_ROLE_UGT, PC_GMAP_ROLE, PC_TMAP_ROLE, PC_UGG_FEATURES, UGT_FEATURE_SINK,
-    UUID_CHR_GMAP_ROLE, UUID_CHR_TMAP_ROLE, UUID_CHR_UGG_FEATURES, UUID_CHR_UGT_FEATURES, UUID_SERVICE_GMAS,
-    UUID_SERVICE_TMAS,
+    CONTEXT_CONVERSATIONAL, CONTEXT_GAME, CONTEXT_MEDIA, GMAP_ROLE_UGT, PC_GMAP_ROLE, PC_TMAP_ROLE, PC_UGG_FEATURES,
+    UGT_FEATURE_SINK, UGT_FEATURE_SOURCE, UUID_CHR_GMAP_ROLE, UUID_CHR_TMAP_ROLE, UUID_CHR_UGG_FEATURES,
+    UUID_CHR_UGT_FEATURES, UUID_SERVICE_GMAS, UUID_SERVICE_TMAS,
 };
 
 use super::super::core::{LeCtx, LeDone};
@@ -50,6 +55,10 @@ use crate::BtHost;
 /// settings (UGG 96 kbps Source) before 80 kbps, 7.5 ms before 10 ms frames
 /// at the same rate. plan_stream skips what the PAC records do not allow.
 pub const GMAP_PRESET_ORDER: [&str; 6] = ["48_3_gr", "48_4_gr", "48_1_gr", "48_2_gr", "32_1_gr", "32_2_gr"];
+
+/// GMAP presets for a UGT's microphone, best first (plan_stream takes those
+/// with the sink preset's frame duration first)
+pub const GMAP_SOURCE_PRESET_ORDER: [&str; 4] = ["32_1_gs", "32_2_gs", "48_1_gs", "48_2_gs"];
 
 /// How long adjust_stream_request waits for role reads still queued
 const ROLE_READ_WAIT: Duration = Duration::from_millis(5000);
@@ -76,6 +85,11 @@ impl TmapGmapInfo {
     /// applies)
     pub fn ugt_sink(&self) -> bool {
         self.has_gmas && self.gmap_role & GMAP_ROLE_UGT != 0 && self.ugt_features & UGT_FEATURE_SINK != 0
+    }
+
+    /// A Unicast Game Terminal with a microphone (the "_gs" presets apply)
+    pub fn ugt_source(&self) -> bool {
+        self.has_gmas && self.gmap_role & GMAP_ROLE_UGT != 0 && self.ugt_features & UGT_FEATURE_SOURCE != 0
     }
 
     /// "TMAP: UMR, GMAP: UGT (UGT features 0x3C: sink, ...)" for the UI /
@@ -153,6 +167,17 @@ fn low_latency_refusal(devices: &[(LeDeviceId, Option<TmapGmapInfo>)]) -> Option
 /// The GMAP presets first, then the request's own ones not among them
 fn gmap_preset_order(current: &[String]) -> Vec<String> {
     let mut order: Vec<String> = GMAP_PRESET_ORDER.iter().map(|s| s.to_string()).collect();
+    for name in current {
+        if !order.contains(name) {
+            order.push(name.clone());
+        }
+    }
+    order
+}
+
+/// The GMAP microphone presets first, then the request's own ones
+fn gmap_source_preset_order(current: &[String]) -> Vec<String> {
+    let mut order: Vec<String> = GMAP_SOURCE_PRESET_ORDER.iter().map(|s| s.to_string()).collect();
     for name in current {
         if !order.contains(name) {
             order.push(name.clone());
@@ -464,6 +489,15 @@ impl LeGroupHooks for TmapGmapHooks {
             tracing::info!("LE Audio: GMAP: {note}: {what}");
         }
         request.contexts = contexts;
+        if request.conversational {
+            if infos.iter().all(|(_, i)| i.is_some_and(|i| i.ugt_source())) {
+                request.source_preset_order = gmap_source_preset_order(&request.source_preset_order);
+                request.source_contexts = CONTEXT_GAME | CONTEXT_CONVERSATIONAL;
+                tracing::info!("LE Audio: GMAP: microphone: {} first", GMAP_SOURCE_PRESET_ORDER.join(", "));
+            } else {
+                tracing::info!("LE Audio: GMAP: microphone: not every device is a UGT with the Source feature");
+            }
+        }
         tracing::info!(
             "LE Audio: GMAP: low latency for {} Unicast Game Terminal(s): {} first, {} context",
             devices.len(),
@@ -626,10 +660,12 @@ mod tests {
     fn pc_server_values() {
         let shared = SharedState::default();
         let m = TmapGmapModule { shared, tmap_role_handle: 10, gmap_role_handle: 13, ugg_features_handle: 15 };
-        // The values the sink checks: TMAP Role 0x0004 (UMS), GMAP Role 0x01
-        // (UGG), UGG Features 0x03
-        assert_eq!(PC_TMAP_ROLE.to_le_bytes(), [0x04, 0x00]);
-        assert_eq!((PC_GMAP_ROLE, PC_UGG_FEATURES), (0x01, 0x03));
+        // The values the sink checks: TMAP Role 0x0005 (CG+UMS), GMAP Role
+        // 0x01 (UGG), UGG Features 0x07
+        assert_eq!(PC_TMAP_ROLE.to_le_bytes(), [0x05, 0x00]);
+        assert_eq!((PC_GMAP_ROLE, PC_UGG_FEATURES), (0x01, 0x07));
+        assert_eq!(describe_tmap_role(PC_TMAP_ROLE), "CG+UMS");
+        assert_eq!(gmap_source_preset_order(&["32_2_1".into(), "32_2_gs".into()])[4], "32_2_1");
         assert_eq!(m.info(LeDeviceId(0)), None);
     }
 }

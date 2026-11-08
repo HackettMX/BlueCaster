@@ -10,15 +10,16 @@ MODULES. A module may define any of:
                                 sink.adv_structures, keep state in sink.state
     async start(sink, args)     after the sink is powered on and advertising
 
-bap.py is the unicast server (PACS, ASCS, CAS) every sink has; csip, vcp,
+bap.py is the unicast server (PACS, ASCS, CAS) every sink has (mic.py its
+source ASE with --mic); csip, vcp,
 mcp, ccp and tmap_gmap are stubs for the profile work packages, each owned by
 one of them. emu_le_audio_sink.py calls the modules; add checks for
 run_test.py in your module's own files, not in bap.py.
 """
 
-from . import bap, bas, ccp, controller, csip, mcp, tmap_gmap, vcp
+from . import bap, bas, ccp, controller, csip, mcp, mic, tmap_gmap, vcp
 
-MODULES = [bap, csip, vcp, mcp, ccp, tmap_gmap, bas]
+MODULES = [bap, mic, csip, vcp, mcp, ccp, tmap_gmap, bas]
 
 
 def add_arguments(parser):

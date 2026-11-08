@@ -10,6 +10,8 @@ publish.workspace = true
 btstack-sys.workspace = true
 tracing.workspace = true
 nusb = "0.2.8"
+# SCO over WinUSB isochronous pipes (usb.rs), the FFI side
+win-sys.workspace = true
 
 [lints]
 workspace = true

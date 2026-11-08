@@ -379,6 +379,9 @@ pub struct PeerParams {
     /// SBC / SBC XQ: blocks, subbands, allocation and channel mode, those
     /// of the SET_CONFIGURATION (`caps::RemoteCaps::sbc_params`)
     pub sbc: sbc::SbcParams,
+    /// SBC XQ: settings not held to the sink's list, its bitpool up to
+    /// SBC's 53 instead of [`sbc::xq_max_bitpool`] (issue #86)
+    pub sbc_unlisted: bool,
     /// Opus / Opus 05: the frame duration configured, 10 or 20 ms (0 = 20)
     pub opus_frame_ms: u8,
     /// Opus / Opus 05: the channels configured on the wire, 1 or 2 (0 = as

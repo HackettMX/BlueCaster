@@ -1,0 +1,20 @@
+[package]
+name = "voice-link"
+description = "Headset microphone audio: HFP voice codecs (CVSD, mSBC, LC3-SWB) over SCO payloads, the uplink from a capture, and the WASAPI render of the microphone"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+audio-capture.workspace = true
+btstack-sys.workspace = true
+lc3-sys.workspace = true
+win-sys.workspace = true
+wasapi = "0.26.0"
+rtrb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

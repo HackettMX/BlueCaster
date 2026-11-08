@@ -25,6 +25,7 @@ repository. The Rust crates are pinned in `Cargo.lock`, the JavaScript packages 
 | fdk-aac | `v2.0.3-158-gd8e6b1a` (commit `d8e6b1a`) | FDK-AAC | Fraunhofer-Gesellschaft | AAC-LC audio encoding (decoding in `bluecaster_decode`, §14) | `bluecaster-core.exe` |
 | BTstack | `v1.8.1-6-g5bc5cbdbe` (commit `5bc5cbdbe`) | LicenseRef-BTstack (BSD-3-Clause-style **with a non-commercial clause**) | BlueKitchen GmbH; Matthias Ringwald | User-mode Bluetooth stack | `bluecaster-core.exe` |
 | Bluedroid SBC encoder, ported to Rust | ported from BTstack `5bc5cbdbe` (`3rd-party/bluedroid/encoder/`) | Apache-2.0 | Broadcom Corporation | SBC audio encoding (`app/src/crates/codec/src/sbc/`) | `bluecaster-core.exe` |
+| Bluedroid SBC encoder and decoder (C, bundled in BTstack) | as in BTstack `5bc5cbdbe` (`3rd-party/bluedroid/`) | Apache-2.0 | Broadcom Corporation; The Android Open Source Project; Open Interface North America, Inc. | mSBC voice codec of the headset microphone, §5 | `bluecaster-core.exe` |
 | rijndael (bundled in BTstack) | as in BTstack `5bc5cbdbe` (`3rd-party/rijndael/`) | Public domain | Philip J. Erdelsky | AES (used by BTstack) | `bluecaster-core.exe` |
 | tinydir (bundled in BTstack) | as in BTstack `5bc5cbdbe` (`3rd-party/tinydir/`) | BSD-2-Clause | tinydir authors | Directory listing in BTstack's Broadcom chipset driver | `bluecaster-core.exe` |
 | liblc3 (lc3-google, bundled in BTstack) | as in BTstack `5bc5cbdbe` (`3rd-party/lc3-google/`) | Apache-2.0 | Google LLC | LC3 encoding for the experimental LE Audio support (decoding in `bluecaster_decode`, §14), §17 | `bluecaster-core.exe` |
@@ -244,7 +245,10 @@ the NOTICE, or from the patent owners) is the user's responsibility.
   LE device database; for the experimental LE Audio support), the Windows run
   loop and TLV store (`platform/windows/btstack_tlv_windows.c`), the Realtek
   and Broadcom chipset drivers, and `3rd-party/rijndael` (§6),
-  `3rd-party/tinydir` (§7) and `3rd-party/micro-ecc` (§18).
+  `3rd-party/tinydir` (§7) and `3rd-party/micro-ecc` (§18); for the headset
+  microphone also the voice codec glue of `src/classic/` (`btstack_sbc_bluedroid.c`,
+  `btstack_sbc_plc.c`, `btstack_cvsd_plc.c`) and the Bluedroid SBC encoder and
+  decoder in `3rd-party/bluedroid` (§5).
   `btstack_config.h` and the C glue `csrc/shim.c` in that crate are BlueCaster's own.
   BTstack's HCI transport is BlueCaster's own Rust crate `hci-transport` (USB through
   `nusb`); BTstack's `hci_transport_h2_winusb.c` is not used
@@ -298,12 +302,16 @@ a commercial BTstack license from BlueKitchen GmbH.
 - **Usage**: SBC encoding in `bluecaster-core.exe`
 
 The Rust port is a derivative work of the Apache-2.0 encoder, not of BTstack;
-the BTstack license does not apply to it. The original C encoder is compiled
-only by the test that compares the two bit for bit (`btstack-sys` feature
-`sbc-reference`, a dev-dependency); it is not in the release programs. The
-Bluedroid SBC **decoder** (Apache-2.0; Copyright (C) 2014 The Android Open Source
-Project and Copyright 2002-2007 Open Interface North America, Inc.) is used only
-by `bluecaster_decode` (§14). No NOTICE file is present in `3rd-party/bluedroid/`.
+the BTstack license does not apply to it. The original C encoder
+(`3rd-party/bluedroid/encoder/srce/`) and the Bluedroid SBC **decoder**
+(`3rd-party/bluedroid/decoder/srce/`; Apache-2.0; Copyright (C) 2014 The
+Android Open Source Project and Copyright 2002-2007 Open Interface North
+America, Inc.) are compiled unmodified into `btstack-sys` as the mSBC voice
+codec of the headset microphone (with BTstack's glue `btstack_sbc_bluedroid.c`
+and its packet loss concealment, §4), so they are in `bluecaster-core.exe`.
+The test that compares the Rust port bit for bit (`btstack-sys` feature
+`sbc-reference`) uses the same C encoder. `bluecaster_decode` (§14) also uses the
+decoder. No NOTICE file is present in `3rd-party/bluedroid/`.
 
 ### Obligations
 
@@ -464,7 +472,9 @@ interoperability feature.
 
 - **Where**: all three programs. The crates and their exact versions are in
   `Cargo.lock`; BlueCaster's own crates (`app/src/crates/*`, `app/src/core`,
-  `app/src/ui/src-tauri`, `app/src/driver`) are `Apache-2.0 OR MIT` (§13)
+  `app/src/ui/src-tauri`, `app/src/driver`) are `Apache-2.0 OR MIT` (§13),
+  except the vendored `app/src/crates/aptx-adaptive` (§19) and
+  `app/src/crates/nusb` (below)
 - **License texts**: `licenses/third-party/rust-crates.txt`, generated for each release by
   [cargo-about](https://github.com/EmbarkStudios/cargo-about)
   (`installer/build-release.ps1` with `about.toml` and `installer/about.hbs`):
@@ -481,7 +491,10 @@ Most crates are Apache-2.0 and / or MIT: among them Tauri 2.12 and its plugins
 tray-icon and muda (the tray), tokio, serde and serde_json, tracing, the
 `windows` crates (Microsoft's Win32 bindings), `nusb` (USB), `wasapi` (audio
 capture), rtrb (lock-free rings), ureq and rustls (the update check), semver,
-ts-rs. Crates under other licenses:
+ts-rs. `nusb` 0.2.8 (Apache-2.0 OR MIT, Kevin Mehall) is built from a vendored copy,
+`app/src/crates/nusb`, with one added accessor (the WinUSB interface handle, for the
+isochronous SCO pipes); `app/src/crates/nusb/SOURCE.txt` says what was changed, and its
+license files are unchanged. Crates under other licenses:
 
 | License | Crates (at the time of writing) | Note |
 |---------|----------------------------------|------|
@@ -974,6 +987,7 @@ SOFTWARE.
 | libopus | BSD-3-Clause | Yes | Permissive; notice shipped as `licenses/third-party/opus-COPYING.txt` (§16) |
 | aptx-adaptive | MIT | Yes | Permissive; notice shipped as `licenses/third-party/aptx-adaptive-LICENSE.txt` (§19) |
 | Bluedroid SBC encoder (Rust port) | Apache-2.0 | Yes | Permissive |
+| Bluedroid SBC encoder and decoder (C, mSBC voice) | Apache-2.0 | Yes | Permissive |
 | libopenaptx | LGPL-2.1+ | Yes (with care) | Must allow library replacement / relinking. Apache-2.0 is compatible with (L)GPL v3, which "or later" permits |
 | fdk-aac | FDK AAC License | Yes | Source of fdk-aac must be offered free of charge; no patent license |
 | BTstack | LicenseRef-BTstack | Source: yes / Binary: **restricts it** | Non-commercial clause 4 applies to the distributed `bluecaster-core.exe` and with it the release; commercial license from BlueKitchen |

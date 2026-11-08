@@ -2,6 +2,7 @@
 import type { Msg } from "./Msg";
 import type { StreamInfo } from "./StreamInfo";
 import type { StreamState } from "./StreamState";
+import type { VoiceStatus } from "./VoiceStatus";
 
 export type StreamStatus = { state: StreamState, message: Msg, 
 /**
@@ -22,4 +23,10 @@ battery: number | null,
  * (another device such as a phone may hold their hands-free profile):
  * the battery shows as unknown
  */
-battery_refused: boolean, };
+battery_refused: boolean, 
+/**
+ * The voice link (headset microphone, developer mode): Some only while
+ * it carries audio, cleared on Idle / Error / Reconnecting like the
+ * battery
+ */
+voice?: VoiceStatus | null, };

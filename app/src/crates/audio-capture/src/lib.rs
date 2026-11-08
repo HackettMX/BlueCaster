@@ -28,8 +28,8 @@ pub use apps::{
     APP_CAPTURE_MIN_BUILD, AudioApp, app_capture_supported, audio_apps, find_process, process_exited, windows_build,
 };
 pub use devices::{
-    DeviceInfo, EndpointVolume, MixFormat, default_render_device, mix_format, mix_rate, render_devices,
-    set_default_render_device,
+    DeviceInfo, EndpointVolume, MixFormat, default_render_device, mic_capture_active, mix_format, mix_rate,
+    render_devices, set_default_render_device,
 };
 pub use format::{DEFAULT_RATE, Format, SampleFormat};
 pub use mixer::{MixerApp, SYSTEM_SOUNDS, mixer_apps, set_mixer_app};

@@ -61,7 +61,8 @@ const CLASSIC: &[&str] = &[
 /// ([`patched_sm`])
 const BLE_EXCLUDE: &[&str] = &["le_device_db_memory.c", "sm.c"];
 
-/// Bluedroid SBC encoder (Apache-2.0), feature "sbc-reference"
+/// Bluedroid SBC encoder (Apache-2.0): mSBC for the headset microphone
+/// ([`add_voice_codecs`]), and the reference of feature "sbc-reference"
 const SBC_ENCODER: &[&str] = &[
     "sbc_analysis.c",
     "sbc_dct.c",
@@ -72,6 +73,40 @@ const SBC_ENCODER: &[&str] = &[
     "sbc_encoder.c",
     "sbc_packing.c",
 ];
+
+/// Headset microphone voice codecs (csrc/voice_codecs.c, src/voice.rs):
+/// BTstack's Bluedroid SBC glue (instance API, mSBC with H2 sync), the SBC
+/// and CVSD packet loss concealment from src/classic, and the Bluedroid SBC
+/// decoder (Apache-2.0) from 3rd-party/bluedroid/decoder/srce
+const VOICE_CLASSIC: &[&str] = &["btstack_sbc_bluedroid.c", "btstack_sbc_plc.c", "btstack_cvsd_plc.c"];
+const SBC_DECODER: &[&str] = &[
+    "alloc.c",
+    "bitalloc.c",
+    "bitalloc-sbc.c",
+    "bitstream-decode.c",
+    "decoder-oina.c",
+    "decoder-private.c",
+    "decoder-sbc.c",
+    "dequant.c",
+    "framing.c",
+    "framing-sbc.c",
+    "oi_codec_version.c",
+    "synthesis-sbc.c",
+    "synthesis-dct8.c",
+    "synthesis-8-generated.c",
+];
+
+/// The voice codec sources and their include paths (the encoder always;
+/// feature "sbc-reference" adds only csrc/sbc_reference.c on top)
+fn add_voice_codecs(build: &mut cc::Build, btstack: &Path, csrc: &Path) {
+    let enc = btstack.join("3rd-party/bluedroid/encoder");
+    let dec = btstack.join("3rd-party/bluedroid/decoder");
+    build.include(enc.join("include")).include(dec.join("include"));
+    build.files(SBC_ENCODER.iter().map(|f| enc.join("srce").join(f)));
+    build.files(SBC_DECODER.iter().map(|f| dec.join("srce").join(f)));
+    build.files(VOICE_CLASSIC.iter().map(|f| btstack.join("src/classic").join(f)));
+    build.file(csrc.join("voice_codecs.c"));
+}
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -150,12 +185,12 @@ fn main() {
     build.file(csrc.join("shim.c"));
 
     if env::var_os("CARGO_FEATURE_SBC_REFERENCE").is_some() {
-        let enc = btstack.join("3rd-party/bluedroid/encoder");
-        build.include(enc.join("include"));
-        build.files(SBC_ENCODER.iter().map(|f| enc.join("srce").join(f)));
+        // The encoder sources come with the voice codecs below
         build.file(csrc.join("sbc_reference.c"));
         build.define("BLUECASTER_SBC_REFERENCE", None);
     }
+
+    add_voice_codecs(&mut build, &btstack, &csrc);
 
     build.compile("btstack");
 
@@ -242,8 +277,39 @@ fn patched_sm(btstack: &Path) -> PathBuf {
         "/* BlueCaster: patched by btstack-sys build.rs (patched_sm) */\n\
          #define ENABLE_CROSS_TRANSPORT_KEY_DERIVATION\n\
          int bluecaster_ctkd_enabled(void);\n\
-         int bluecaster_ctkd_wanted(const unsigned char *addr);\n",
+         int bluecaster_ctkd_wanted(const unsigned char *addr);\n\
+         void bluecaster_ctkd_note(const unsigned char *addr, int what);\n",
     );
+    // Why a link is not asked over, so the Services dialog can say (issue
+    // #86): 1 not Secure Connections, 2 the device opened it, 3 no CID 7
+    replace_once(
+        &mut source,
+        FILE,
+        "if (sm_conn->sm_connection_encrypted != 2) return;",
+        "if (sm_conn->sm_connection_encrypted != 2) { bluecaster_ctkd_note(sm_conn->sm_peer_address, 1); return; }",
+    );
+    replace_once(
+        &mut source,
+        FILE,
+        "log_info(\"CTKD: SM_BR_EDR_RESPONDER_W4_PAIRING_REQUEST\");",
+        "log_info(\"CTKD: SM_BR_EDR_RESPONDER_W4_PAIRING_REQUEST\"); bluecaster_ctkd_note(sm_conn->sm_peer_address, 2);",
+    );
+    replace_once(
+        &mut source,
+        FILE,
+        "defer = false;",
+        "defer = false; bluecaster_ctkd_note(sm_conn->sm_peer_address, 3);",
+    );
+    replace_once(
+        &mut source,
+        FILE,
+        "hci_dedicated_bonding_defer_disconnect(con_handle, false);",
+        "hci_dedicated_bonding_defer_disconnect(con_handle, false); bluecaster_ctkd_note(sm_conn->sm_peer_address, 3);",
+    );
+    // BTstack 1.8.1 never marks an ask over BR/EDR as a pairing, so its end
+    // (refused, timed out, done) sent no SM_EVENT_PAIRING_COMPLETE
+    let ask = "connection->sm_engine_state = SM_BR_EDR_INITIATOR_W4_PAIRING_RESPONSE;";
+    replace_once(&mut source, FILE, ask, &format!("{ask}\n                sm_pairing_started(connection);"));
     // Only while enabled; off, the state stays SM_BR_EDR_W4_ENCRYPTION_COMPLETE,
     // where a Pairing Request from the device is refused
     let handler =

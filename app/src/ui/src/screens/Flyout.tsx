@@ -1,7 +1,7 @@
 // The tray flyout (360×440): everyday control without the main window.
 // As Home's card (issue #86): the ring, and beside it the device chooser
-// in the title's place, battery and state, the codec (chosen right there)
-// and link quality;
+// in the title's place, battery and state (and headset mode in developer
+// mode), the codec (chosen right there) and link quality;
 // then the volume, the big Connect / Disconnect with "Open app" beside it. No close
 // button: the flyout hides on Escape and when it loses the focus. Its
 // window is as tall as the page (issue #86: no empty space).
@@ -34,7 +34,7 @@ import { MixerList } from "../components/Mixer";
 import { t, tm } from "../i18n";
 import { IpcError } from "../ipc/types";
 import { audioEntries, entryOf } from "../lib/profile";
-import { CodecPicker } from "./Home";
+import { CodecPicker, HeadsetChip } from "./Home";
 
 export function Flyout() {
   const app = useApp();
@@ -113,6 +113,7 @@ export function Flyout() {
                 <span class="dot" aria-hidden="true" />
                 <span class="ellipsis">{statusText(stream())}</span>
               </div>
+              <Show when={entry()}>{(e) => <HeadsetChip entry={e()} />}</Show>
             </div>
             <CodecBadge
               aside={<QualityIndicator />}

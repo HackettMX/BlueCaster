@@ -145,6 +145,7 @@ HCI Reset（仍處於 bootloader 的控制器除外），讓下一個工作階�
 | 2. 元件 | `aptx-adaptive` | 以 Rust 撰寫的 aptX Adaptive 編碼器（內含自 AKS-Logic/aptx-adaptive-linux，MIT） |
 | 2. 元件 | `codec` | `Encoder` trait、SBC 編碼器（Bluedroid 編碼器的 Rust 移植版）、C 編碼器的安全包裝函式、Codec Information 解析與轉碼器選擇 |
 | 2. 元件 | `audio-capture` | WASAPI 擷取（`wasapi` crate）：系統回送、虛擬裝置、單一應用程式（處理程序回送）；裝置與應用程式清單、測試音、各應用程式的音量（音量混音程式） |
+| 2. 元件 | `voice-link` | 耳機麥克風的音訊（開發人員模式）：向所選輸出裝置播放單聲道 PCM（WASAPI）、為上行方向將擷取縮混為單聲道，以及基於 SCO 酬載的語音轉碼器 CVSD / mSBC / LC3-SWB |
 | 3. 引擎 | `bt-host` | 在專用執行緒上執行 BTstack，由命令與具型別的事件驅動：GAP、A2DP Source、AVRCP、SDP、供轉送使用的 RFCOMM 通道（`rfcomm.*`）、連結金鑰、裝置的 SDP 服務、AFH、韌體載入與晶片載入程式（`bringup`）、晶片探測與晶片指令碼、HCI 擷取（`.pklg`）、LE Audio（`le/`） |
 | 2. 元件 | `le-audio` | LE Audio（實驗性）：不依賴 BTstack 或 Windows 的邏輯（assigned numbers、LTV、PACS / ASCS PDU、預設組合、CSIP / VCP / MCP / CCP 模型） |
 | 3. 引擎 | `pipeline` | PCM 環形緩衝區、格式轉換、降混、編碼、媒體酬載、送出節奏控制、ABR |

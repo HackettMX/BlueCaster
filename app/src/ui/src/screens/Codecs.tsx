@@ -44,7 +44,7 @@ import { unwrap } from "solid-js/store";
 import { useApp } from "../app/context";
 import { saveSettings } from "../app/settings";
 import { CodecCard, CodecSettings, type CodecChoice } from "../components/CodecCards";
-import { Banner, Button, Check, Dialog, Toggle } from "../components/controls";
+import { Banner, Button, Check, Dialog, Field, Segmented, Select, Toggle, type Option } from "../components/controls";
 import { Icon } from "../components/Icon";
 import { stateLabel } from "../components/stream";
 import { t } from "../i18n";
@@ -68,6 +68,9 @@ import {
 } from "../lib/codecs";
 import {
   audioEntries,
+  HEADSET_MODES,
+  headsetMode,
+  type HeadsetMode,
   captureDevice,
   captureInForce,
   codecsOnRequest,
@@ -165,6 +168,18 @@ async function saveEntry(
   const saved = normalizeProfile(next);
   const ok = await app.run(() => app.core.request("profile.save", { profile: saved, original_name: cur?.name ?? null }));
   return ok ? saved.name : null;
+}
+
+/** Saves a device's headset mode or microphone output (developer mode):
+ *  the Codecs screen, Home's and the flyout's chip. The core opens or
+ *  closes the microphone link (Auto: as apps record from the output).
+ *  True once saved. */
+export async function saveHeadsetMic(
+  app: ReturnType<typeof useApp>,
+  entry: AudioEntry,
+  patch: Partial<Pick<Profile, "headset_mic" | "mic_device_id" | "mic_device_name">>,
+): Promise<boolean> {
+  return (await saveEntry(app, entry, (base) => ({ ...base, ...patch }))) !== null;
 }
 
 /** Saves the device's profile with `codec` chosen (`values`: from its "..."
@@ -267,14 +282,15 @@ export function Codecs() {
   // A card, or its "...", clicked under Auto-select (issue #86 round 8):
   // what follows once it is turned off (null: the dialog is closed)
   const [locked, setLocked] = createSignal<(() => void) | null>(null);
-  // The PC's output formats, read while Auto matches them (developer mode),
-  // again when the window comes back (changed in Windows meanwhile)
-  const matchSource = () => snap().settings.developer_mode && snap().settings.dev_overrides.match_source;
+  // The PC's output devices with their formats, read in developer mode
+  // (Auto matching them, the headset microphone's output), again when the
+  // window comes back (changed in Windows meanwhile)
+  const developer = () => snap().settings.developer_mode;
   const [audioDevices, setAudioDevices] = createSignal<AudioDevice[]>([]);
   const loadDevices = () => {
-    if (matchSource()) void core.request("audio.devices").then(setAudioDevices, () => {});
+    if (developer()) void core.request("audio.devices").then(setAudioDevices, () => {});
   };
-  createEffect(on(matchSource, loadDevices));
+  createEffect(on(developer, loadDevices));
   window.addEventListener("focus", loadDevices);
   onCleanup(() => window.removeEventListener("focus", loadDevices));
 
@@ -761,6 +777,85 @@ function DeviceCodecs(props: {
           }}
         />
       </Show>
+      <Show when={snap().settings.developer_mode}>
+        <HeadsetMic entry={e()} audioDevices={props.audioDevices} />
+      </Show>
     </section>
+  );
+}
+
+/** Headset mode of a device (developer mode): its microphone rendered to
+ *  an output device of the PC, a virtual cable whose recording side apps
+ *  use as a microphone (the virtual devices listed first). Off, Auto (only
+ *  while an app records from it) or On. A classic device plays in call
+ *  quality while the microphone is open; LE Audio keeps its own. */
+function HeadsetMic(props: { entry: AudioEntry; audioDevices: readonly AudioDevice[] }) {
+  const app = useApp();
+  const snap = () => app.core.state.snap!;
+  const shown = (): Profile => props.entry.profile ?? entryBase(props.entry, snap().profiles);
+  const mode = () => headsetMode(shown());
+  const [busy, setBusy] = createSignal(false);
+  const save = async (patch: Partial<Profile>) => {
+    setBusy(true);
+    await saveHeadsetMic(app, props.entry, patch);
+    setBusy(false);
+  };
+  const outputs = (): Option<string>[] => {
+    const p = shown();
+    const list = [...props.audioDevices].sort((a, b) => Number(b.is_virtual) - Number(a.is_virtual));
+    const options: Option<string>[] = list.map((d) => ({
+      value: d.id,
+      label: d.name,
+      group: d.is_virtual ? t("capture.virtual") : t("capture.output"),
+    }));
+    // One chosen before and not there now: by its name
+    if (p.mic_device_id && !list.some((d) => d.id === p.mic_device_id)) {
+      options.unshift({ value: p.mic_device_id, label: p.mic_device_name || p.mic_device_id });
+    }
+    if (!p.mic_device_id) options.unshift({ value: "", label: t("ui.codec.none"), disabled: true });
+    return options;
+  };
+  const chooseOutput = (id: string) => {
+    const d = props.audioDevices.find((x) => x.id === id);
+    if (!d || id === shown().mic_device_id) return;
+    void save({ mic_device_id: d.id, mic_device_name: d.name });
+  };
+  return (
+    <div class="headset-mic">
+      <div class="headset-mic-mode">
+        <span class="row-label" title={t("ui.headset_mic_hint")}>
+          {t("ui.headset_mic")}
+        </span>
+        <Segmented<HeadsetMode>
+          label={t("ui.headset_mic")}
+          value={mode()}
+          options={HEADSET_MODES.map((m) => ({ value: m, label: t(`ui.headset_mic_${m}`), disabled: busy() }))}
+          onChange={(m) => void save({ headset_mic: m })}
+        />
+      </div>
+      <Show when={mode() === "auto"}>
+        <span class="hint">{t("ui.headset_mic_auto_hint")}</span>
+      </Show>
+      <Show when={mode() !== "off"}>
+        <Field label={t("ui.mic_output")} hint={t("ui.mic_output_hint")} stacked>
+          {(id, describedBy) => (
+            <Select
+              id={id}
+              describedBy={describedBy}
+              value={shown().mic_device_id}
+              options={outputs()}
+              disabled={busy()}
+              onChange={chooseOutput}
+            />
+          )}
+        </Field>
+        <Show when={!shown().mic_device_id}>
+          <p class="field-warn">{t("ui.headset_mic_no_output")}</p>
+        </Show>
+        <Show when={!props.entry.le_audio}>
+          <p class="field-warn">{t("ui.headset_mic_quality")}</p>
+        </Show>
+      </Show>
+    </div>
   );
 }

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use bt_host::HeadsetMic;
 use bt_host::media::clamp_media_payload_limit;
 use codec::{CodecKind, Quality};
 
@@ -28,6 +29,35 @@ fn loopback() -> String {
 }
 fn yes() -> bool {
     true
+}
+fn headset_off() -> String {
+    "off".into()
+}
+fn is_headset_off(mode: &str) -> bool {
+    HeadsetMic::parse(mode) == HeadsetMic::Off
+}
+/// `headset_mic` as saved: "off" | "on" | "auto", or the bool of the first
+/// development builds (true: "on"); anything else is "off"
+fn headset_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        Flag(bool),
+        Mode(String),
+        Other(serde::de::IgnoredAny),
+    }
+    let mode = match Saved::deserialize(d)? {
+        Saved::Flag(on) => {
+            if on {
+                HeadsetMic::On
+            } else {
+                HeadsetMic::Off
+            }
+        }
+        Saved::Mode(m) => HeadsetMic::parse(&m),
+        Saved::Other(_) => HeadsetMic::Off,
+    };
+    Ok(mode.as_str().into())
 }
 fn is_true(b: &bool) -> bool {
     *b
@@ -131,6 +161,22 @@ pub struct Profile {
     /// configuration either way.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub le_low_latency: bool,
+    /// Headset mode (developer mode only, [`Settings::headset_mic_in_force`]):
+    /// "off" | "on" | "auto" ([`HeadsetMic`]; written only when not off).
+    /// The headphones' microphone is rendered to `mic_device_id`; classic
+    /// devices play over the voice link meanwhile (Auto: while an app
+    /// records from its capture side), LE Audio keeps its preset
+    ///
+    /// [`Settings::headset_mic_in_force`]: crate::settings::Settings::headset_mic_in_force
+    #[serde(default = "headset_off", deserialize_with = "headset_mode", skip_serializing_if = "is_headset_off")]
+    pub headset_mic: String,
+    /// The render endpoint id that receives the microphone (a virtual
+    /// cable's input). Empty: none chosen, headset mode stays off
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mic_device_id: String,
+    /// Its friendly name, for display while the device is missing
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mic_device_name: String,
     /// The settings of the other codecs, by codec key, as they were last
     /// chosen: choosing one of them again brings them back (the codec in
     /// use has its own in the fields above)
@@ -181,6 +227,9 @@ impl Default for Profile {
             sbc_channel_mode: String::new(),
             le_audio: false,
             le_low_latency: true,
+            headset_mic: headset_off(),
+            mic_device_id: String::new(),
+            mic_device_name: String::new(),
             codec_settings: BTreeMap::new(),
             codec_order: Vec::new(),
             other: BTreeMap::new(),
@@ -396,6 +445,42 @@ impl Profile {
         same == *new && self.bitpools() != new.bitpools()
     }
 
+    /// `new` is this profile with another headset mode or microphone output
+    /// and nothing else changed
+    pub fn only_headset_mic_differs(&self, new: &Profile) -> bool {
+        let same = Profile {
+            headset_mic: new.headset_mic.clone(),
+            mic_device_id: new.mic_device_id.clone(),
+            mic_device_name: new.mic_device_name.clone(),
+            ..self.clone()
+        };
+        same == *new
+            && (&self.headset_mic, &self.mic_device_id, &self.mic_device_name)
+                != (&new.headset_mic, &new.mic_device_id, &new.mic_device_name)
+    }
+
+    /// The saved headset mode
+    pub fn headset_mic_mode(&self) -> HeadsetMic {
+        HeadsetMic::parse(&self.headset_mic)
+    }
+
+    /// Why headset mode must not run with this profile's microphone output:
+    /// it would feed the microphone back into the stream. The output is the
+    /// virtual or output device the profile captures, or the Windows
+    /// default output (`default_output_id`) while it captures System
+    /// Loopback. Returns the message key, None when there is no loop (or no
+    /// output chosen, which the UI notes on its own).
+    pub fn mic_device_conflicts(&self, default_output_id: &str) -> Option<&'static str> {
+        mic_output_conflicts(&self.source(), &self.mic_device_id, default_output_id)
+    }
+
+    /// `new` is this profile with only "Show only options it supports"
+    /// turned
+    pub fn only_unlisted_differs(&self, new: &Profile) -> bool {
+        self.unlisted_options != new.unlisted_options
+            && Profile { unlisted_options: new.unlisted_options, ..self.clone() } == *new
+    }
+
     /// What to stream for this profile. An LE Audio (experimental) profile
     /// gives an LE request (`le` Some: the le_stream session, which refuses
     /// with error.le_audio_disabled while the setting is off); its codec,
@@ -462,8 +547,27 @@ impl Profile {
             le: self
                 .le_audio
                 .then(|| bt_host::LeRequest { low_latency: self.le_low_latency, ..bt_host::LeRequest::default() }),
+            // Developer mode only: whoever starts the stream decides
+            // (Settings::headset_mic_in_force)
+            headset_mic: HeadsetMic::Off,
+            mic_output: None,
         })
     }
+}
+
+/// [`Profile::mic_device_conflicts`] for a stream capturing `source` with
+/// the microphone on render endpoint `mic` (the session checks the source
+/// it captures now, which may stand in for the profile's)
+pub fn mic_output_conflicts(source: &SourceRequest, mic: &str, default_output_id: &str) -> Option<&'static str> {
+    if mic.is_empty() {
+        return None;
+    }
+    let looped = match source {
+        SourceRequest::VirtualDevice { id, .. } | SourceRequest::OutputDevice { id, .. } => id == mic,
+        SourceRequest::SystemLoopback => !default_output_id.is_empty() && default_output_id == mic,
+        _ => false,
+    };
+    looped.then_some("error.headset_mic_loop")
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -888,6 +992,70 @@ mod tests {
         assert_eq!(bad.to_request(1023), Err(ProfileError::Address("nope".into())));
     }
 
+    #[test]
+    fn headset_mic_round_trips_and_is_written_only_when_set() {
+        let p = Profile::default();
+        let out = serde_json::to_value(&p).unwrap();
+        for key in ["headset_mic", "mic_device_id", "mic_device_name"] {
+            assert!(out.get(key).is_none(), "{key}");
+        }
+        let on = Profile {
+            headset_mic: "on".into(),
+            mic_device_id: "{cable}".into(),
+            mic_device_name: "CABLE Input".into(),
+            ..p.clone()
+        };
+        let out = serde_json::to_value(&on).unwrap();
+        assert_eq!(out["headset_mic"], "on");
+        assert_eq!(out["mic_device_id"], "{cable}");
+        assert_eq!(serde_json::from_value::<Profile>(out).unwrap(), on);
+        assert!(p.only_headset_mic_differs(&on));
+        assert!(!p.only_headset_mic_differs(&p));
+        assert!(!p.only_headset_mic_differs(&Profile { codec: "sbc".into(), ..on.clone() }));
+        assert!(p.only_headset_mic_differs(&Profile { headset_mic: "on".into(), ..p.clone() }));
+        assert!(on.only_headset_mic_differs(&Profile { headset_mic: "auto".into(), ..on.clone() }));
+        // The modes, the first development builds' bool, anything else off
+        let mut j = serde_json::to_value(&on).unwrap();
+        for (saved, mode) in [
+            (serde_json::json!("on"), HeadsetMic::On),
+            (serde_json::json!("auto"), HeadsetMic::Auto),
+            (serde_json::json!("off"), HeadsetMic::Off),
+            (serde_json::json!(true), HeadsetMic::On),
+            (serde_json::json!(false), HeadsetMic::Off),
+            (serde_json::json!("ON"), HeadsetMic::Off),
+            (serde_json::json!(1), HeadsetMic::Off),
+        ] {
+            j["headset_mic"] = saved.clone();
+            let back: Profile = serde_json::from_value(j.clone()).unwrap();
+            assert_eq!(back.headset_mic_mode(), mode, "{saved}");
+            assert_eq!(back.headset_mic, mode.as_str(), "{saved}");
+        }
+        let auto = Profile { headset_mic: "auto".into(), ..on.clone() };
+        assert_eq!(serde_json::to_value(&auto).unwrap()["headset_mic"], "auto");
+    }
+
+    #[test]
+    fn mic_device_feeding_the_capture_is_refused() {
+        let loop_key = Some("error.headset_mic_loop");
+        let p = Profile { headset_mic: "on".into(), mic_device_id: "{cable}".into(), ..Profile::default() };
+        // System Loopback: only when the cable is the default output
+        assert_eq!(p.mic_device_conflicts("{speakers}"), None);
+        assert_eq!(p.mic_device_conflicts(""), None);
+        assert_eq!(p.mic_device_conflicts("{cable}"), loop_key);
+        // The captured virtual or output device
+        let virt = Profile { capture_mode: "virtual".into(), audio_device_id: "{cable}".into(), ..p.clone() };
+        assert_eq!(virt.mic_device_conflicts("{speakers}"), loop_key);
+        let other = Profile { audio_device_id: "{cable 2}".into(), ..virt.clone() };
+        assert_eq!(other.mic_device_conflicts("{cable}"), None);
+        let output = Profile { capture_mode: "output".into(), ..virt.clone() };
+        assert_eq!(output.mic_device_conflicts(""), loop_key);
+        // An application, and no output chosen
+        let app = Profile { capture_mode: "app".into(), app_exe: "game.exe".into(), ..p.clone() };
+        assert_eq!(app.mic_device_conflicts("{cable}"), None);
+        let none = Profile { mic_device_id: String::new(), ..p.clone() };
+        assert_eq!(none.mic_device_conflicts(""), None);
+    }
+
     fn of(name: &str, address: &str, codec: &str) -> Profile {
         Profile { name: name.into(), device_address: address.into(), codec: codec.into(), ..Profile::default() }
     }
@@ -937,6 +1105,11 @@ mod tests {
         assert!(p.only_kept_settings_differ(&kept));
         assert!(!p.only_kept_settings_differ(&p));
         assert!(!p.only_kept_settings_differ(&Profile { sbc_bitpool: 30, ..kept }));
+        // "Show only options it supports" turned, nothing else (issue #86)
+        let unlisted = Profile { unlisted_options: !p.unlisted_options, ..p.clone() };
+        assert!(p.only_unlisted_differs(&unlisted));
+        assert!(!p.only_unlisted_differs(&p));
+        assert!(!p.only_unlisted_differs(&Profile { sbc_bitpool: 30, ..unlisted }));
     }
 
     #[test]

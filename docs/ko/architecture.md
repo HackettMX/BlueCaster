@@ -150,6 +150,7 @@ Cargo 워크스페이스 하나(저장소 루트의 `Cargo.toml`)가 다섯 계�
 | 2. 부품 | `aptx-adaptive` | Rust로 작성된 aptX Adaptive 인코더 (AKS-Logic/aptx-adaptive-linux에서 가져옴, MIT) |
 | 2. 부품 | `codec` | `Encoder` 트레이트, SBC 인코더(Bluedroid 인코더의 Rust 포팅), C 인코더의 안전한 래퍼, Codec Information 구문 분석과 코덱 선택 |
 | 2. 부품 | `audio-capture` | WASAPI 캡처(`wasapi` 크레이트): 시스템 루프백, 가상 장치, 한 응용 프로그램(프로세스 루프백), 장치 및 앱 목록, 테스트 톤, 앱별 볼륨(볼륨 믹서) |
+| 2. 부품 | `voice-link` | 헤드셋 마이크의 오디오(개발자 모드): 선택한 출력 장치로의 모노 PCM 재생(WASAPI), 상향 방향을 위한 캡처의 모노 다운믹스, SCO 페이로드 위의 음성 코덱 CVSD / mSBC / LC3-SWB |
 | 3. 엔진 | `bt-host` | BTstack을 자체 스레드에서 실행하며, 명령과 타입이 지정된 이벤트로 구동: GAP, A2DP Source, AVRCP, SDP, 패스스루용 RFCOMM 채널(`rfcomm.*`), 링크 키, 장치의 SDP 서비스, AFH, 펌웨어 로딩과 칩 로더(`bringup`), 칩 프로브와 칩 스크립트, HCI 캡처(`.pklg`), LE 오디오(`le/`) |
 | 2. 부품 | `le-audio` | LE 오디오(실험적): BTstack이나 Windows에 의존하지 않는 로직(할당 번호, LTV, PACS / ASCS PDU, 프리셋, CSIP / VCP / MCP / CCP 모델) |
 | 3. 엔진 | `pipeline` | PCM 링 버퍼, 형식 변환, 다운믹스, 인코딩, 미디어 페이로드, 전송 속도 조절, ABR |

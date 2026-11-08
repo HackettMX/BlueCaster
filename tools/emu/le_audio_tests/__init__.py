@@ -12,13 +12,14 @@ run_test.parse_le_report) and 'sink_addresses'. A check should only look at
 what its own profile does and return [] for cases it does not concern
 (case.tags says which profiles a case exercises).
 
-core.py holds the BAP unicast cases (all layouts of emu_le_audio_sink.py).
+core.py holds the BAP unicast cases (all layouts of emu_le_audio_sink.py),
+mic.py the headset microphone (source ASE) cases.
 """
 
-from . import bas, ccp, core, csip, mcp, privacy, tmap_gmap, vcp
+from . import bas, ccp, core, csip, mcp, mic, privacy, tmap_gmap, vcp
 from .case import MONO_TONES, STEREO_TONES, Case  # noqa: F401  (for the modules)
 
-MODULES = [core, csip, vcp, mcp, ccp, tmap_gmap, bas, privacy]
+MODULES = [core, csip, vcp, mcp, ccp, tmap_gmap, bas, privacy, mic]
 
 
 def cases():

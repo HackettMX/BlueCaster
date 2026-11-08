@@ -352,9 +352,44 @@ export function CodecBadge(props: { compact?: boolean; aside?: JSX.Element; pick
                 )}
               </Show>
             </span>
+            <VoiceCodec />
             {props.aside}
           </div>
         </div>
+      )}
+    </Show>
+  );
+}
+
+/** The voice codec's translated name (StreamStatus.voice codec key) */
+export function voiceCodecName(codec: string): string {
+  switch (codec) {
+    case "cvsd":
+    case "msbc":
+    case "lc3_swb":
+      return t(`codec.${codec}`);
+    case "lc3":
+      return "LC3";
+    default:
+      return codec;
+  }
+}
+
+/** The headset microphone's voice link beside the codec ("Voice: mSBC"):
+ *  in the warning colour on a classic link, whose playback is call quality */
+export function VoiceCodec() {
+  const { core } = useApp();
+  const voice = () => core.state.snap?.stream.voice ?? null;
+  return (
+    <Show when={voice()}>
+      {(v) => (
+        <span
+          class="voice-codec"
+          classList={{ "st-warn": v().link === "hfp" }}
+          title={v().link === "hfp" ? t("ui.headset_mic_quality") : undefined}
+        >
+          {t("status.voice_codec", voiceCodecName(v().codec))}
+        </span>
       )}
     </Show>
   );

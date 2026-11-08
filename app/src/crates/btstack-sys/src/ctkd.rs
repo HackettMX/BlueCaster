@@ -27,6 +27,54 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 thread_local! {
     /// Classic devices asked during this run (each once)
     static ASKED: RefCell<Vec<[u8; 6]>> = const { RefCell::new(Vec::new()) };
+    /// What came of it for each classic device during this run
+    static OUTCOMES: RefCell<Vec<([u8; 6], CtkdOutcome)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Why BlueCaster has no LE keys of a classic device (issue #86: "not
+/// available" alone did not say)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CtkdOutcome {
+    /// SM is not set up (LE Audio off), so nothing is asked
+    NoLe,
+    /// Not asked during this run yet (no connection since)
+    NotAsked,
+    /// Asked, no answer yet
+    Asking,
+    /// The link is not encrypted with Secure Connections
+    NotSecure,
+    /// The device opened the connection; only one BlueCaster opens asks
+    DeviceLed,
+    /// The device does not take SMP over BR/EDR (no CID 7)
+    NoSupport,
+    /// The device refused
+    Refused,
+    /// The device did not answer within SM's 30 s
+    NoAnswer,
+    /// The device answered without keys
+    NoneGiven,
+}
+
+/// What C tells about a device (bluecaster_rs_ctkd_note)
+const NOTE_NOT_SECURE: c_int = 1;
+const NOTE_DEVICE_LED: c_int = 2;
+const NOTE_NO_SUPPORT: c_int = 3;
+
+fn set_outcome(addr: [u8; 6], outcome: CtkdOutcome, weak: bool) {
+    OUTCOMES.with(|o| {
+        let mut o = o.borrow_mut();
+        match o.iter_mut().find(|(a, _)| *a == addr) {
+            // A skipped connection never hides what an earlier ask gave
+            Some((_, v))
+                if weak && !matches!(v, CtkdOutcome::NotAsked | CtkdOutcome::NotSecure | CtkdOutcome::DeviceLed) => {}
+            Some((_, v)) => *v = outcome,
+            None => o.push((addr, outcome)),
+        }
+    });
+}
+
+fn outcome_of(addr: &[u8; 6]) -> CtkdOutcome {
+    OUTCOMES.with(|o| o.borrow().iter().find(|(a, _)| a == addr).map_or(CtkdOutcome::NotAsked, |(_, v)| *v))
 }
 
 /// Asks classic devices for their LE keys (from any thread; effective while
@@ -43,6 +91,7 @@ pub fn ctkd_enabled() -> bool {
 
 pub(crate) fn reset() {
     ASKED.with(|a| a.borrow_mut().clear());
+    OUTCOMES.with(|o| o.borrow_mut().clear());
 }
 
 /// The LE keys BlueCaster has of a classic device
@@ -112,24 +161,59 @@ impl Stack {
             key_size: encryption.filter(|_| ltk.is_some()).map_or(0, |e| e.key_size),
         })
     }
+
+    /// The LE keys of the classic device `addr`, else why there are none
+    pub fn le_keys_or_why(&self, addr: &[u8; 6]) -> Result<LeKeys, CtkdOutcome> {
+        if !self.le_initialized() {
+            return Err(CtkdOutcome::NoLe);
+        }
+        self.le_keys_of_classic(addr).ok_or_else(|| outcome_of(addr))
+    }
 }
 
-/// SM events: an LE bond created over a classic link is noted with the
-/// classic device's address
+/// SM events over a classic link: an LE bond created is noted with the
+/// classic device's address, and what came of asking
 pub(crate) fn on_sm_event(stack: &Stack, p: &[u8]) {
-    if p.first() != Some(&SM_EVENT_IDENTITY_CREATED) || p.len() < 20 {
+    let Some(&event) = p.first() else { return };
+    if !matches!(event, SM_EVENT_IDENTITY_CREATED | SM_EVENT_PAIRING_STARTED | SM_EVENT_PAIRING_COMPLETE) || p.len() < 4
+    {
         return;
     }
     let handle = u16::from_le_bytes([p[2], p[3]]);
     if stack.connection_type(handle) != ConnectionType::Acl {
         return;
     }
-    let index = usize::from(u16::from_le_bytes([p[18], p[19]]));
     let mut classic = [0u8; 6];
     // SAFETY: on the BTstack thread; classic has the 6 bytes written.
     if unsafe { ffi::bluecaster_connection_address(handle, classic.as_mut_ptr()) } == 0 {
         return;
     }
+    match event {
+        SM_EVENT_PAIRING_STARTED => set_outcome(classic, CtkdOutcome::Asking, false),
+        SM_EVENT_PAIRING_COMPLETE if p.len() >= 13 => on_complete(stack, classic, p[11], p[12]),
+        SM_EVENT_IDENTITY_CREATED if p.len() >= 20 => on_identity(stack, classic, p),
+        _ => {}
+    }
+}
+
+fn on_complete(stack: &Stack, classic: [u8; 6], status: u8, reason: u8) {
+    let outcome = match status {
+        ERROR_CODE_SUCCESS if stack.le_keys_of_classic(&classic).is_some() => return,
+        ERROR_CODE_SUCCESS => CtkdOutcome::NoneGiven,
+        ERROR_CODE_CONNECTION_TIMEOUT => CtkdOutcome::NoAnswer,
+        // The link went down meanwhile: asked again at its next connection
+        ERROR_CODE_REMOTE_USER_TERMINATED_CONNECTION | ERROR_CODE_CONNECTION_TERMINATED_BY_LOCAL_HOST => {
+            ASKED.with(|a| a.borrow_mut().retain(|x| *x != classic));
+            CtkdOutcome::NotAsked
+        }
+        _ => CtkdOutcome::Refused,
+    };
+    set_outcome(classic, outcome, false);
+    tracing::info!(target: "le", "CTKD: no LE keys from {} ({outcome:?}, status {status:#04x}, reason {reason:#04x})", addr_str(&classic));
+}
+
+fn on_identity(stack: &Stack, classic: [u8; 6], p: &[u8]) {
+    let index = usize::from(u16::from_le_bytes([p[18], p[19]]));
     let Some(entry) = stack.le_device_db_info(index) else { return };
     // One bond per classic device: an older one of another identity goes
     for i in (0..stack.le_device_db_max_count()).filter(|&i| i != index) {
@@ -171,6 +255,28 @@ extern "C" fn bluecaster_rs_ctkd_wanted(addr: *const u8) -> c_int {
         ASKED.with(|s| s.borrow_mut().push(a));
         tracing::info!(target: "le", "CTKD: asking {} for its LE keys", addr_str(&a));
         1
+    })
+}
+
+/// SM, on a classic link it does not ask over: why (NOTE_*)
+#[unsafe(no_mangle)]
+extern "C" fn bluecaster_rs_ctkd_note(addr: *const u8, what: c_int) {
+    guard((), || {
+        if addr.is_null() {
+            return;
+        }
+        let mut a = [0u8; 6];
+        // SAFETY: SM passes its bd_addr_t (6 bytes).
+        unsafe { std::ptr::copy_nonoverlapping(addr, a.as_mut_ptr(), 6) };
+        match what {
+            NOTE_NOT_SECURE => set_outcome(a, CtkdOutcome::NotSecure, true),
+            NOTE_DEVICE_LED => set_outcome(a, CtkdOutcome::DeviceLed, true),
+            NOTE_NO_SUPPORT => {
+                set_outcome(a, CtkdOutcome::NoSupport, false);
+                tracing::info!(target: "le", "CTKD: {} does not take SMP over BR/EDR", addr_str(&a));
+            }
+            _ => {}
+        }
     })
 }
 

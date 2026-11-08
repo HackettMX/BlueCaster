@@ -233,6 +233,34 @@ pub fn disconnection_complete(packet: &[u8]) -> Option<(u8, u16, u8)> {
     Some((*packet.get(2)?, u16_at(packet, 3)?, *packet.get(5)?))
 }
 
+/// The answer to Read Buffer Size (Command Complete): the controller's ACL
+/// and SCO data buffers. BTstack sizes SCO packets by `sco_packet_length`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferSize {
+    pub status: u8,
+    pub acl_packet_length: u16,
+    pub sco_packet_length: u8,
+    pub acl_packets: u16,
+    pub sco_packets: u16,
+}
+
+pub fn read_buffer_size(packet: &[u8]) -> Option<BufferSize> {
+    if command_complete_opcode(packet)? != HCI_OPCODE_READ_BUFFER_SIZE {
+        return None;
+    }
+    let status = *packet.get(5)?;
+    if status != 0 {
+        return Some(BufferSize { status, acl_packet_length: 0, sco_packet_length: 0, acl_packets: 0, sco_packets: 0 });
+    }
+    Some(BufferSize {
+        status,
+        acl_packet_length: u16_at(packet, 6)?,
+        sco_packet_length: *packet.get(8)?,
+        acl_packets: u16_at(packet, 9)?,
+        sco_packets: u16_at(packet, 11)?,
+    })
+}
+
 /// The answer to LE Read Buffer Size v2 (Command Complete)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeBufferSizeV2 {
@@ -612,6 +640,24 @@ mod tests {
         let p = [0xE7, 0, GAP_SUBEVENT_BONDING_DELETED, 0, 6, 5, 4, 3, 2, 1, 3, 0x40, 0x00];
         let b = bonding_deleted(&p).unwrap();
         assert_eq!((b.addr, b.index, b.handle), ([1, 2, 3, 4, 5, 6], 3, 0x40));
+    }
+
+    #[test]
+    fn buffer_size() {
+        // The emulator's controller: ACL 1021 x 8, SCO 60 x 8
+        let p = [0x0E, 11, 1, 0x05, 0x10, 0, 0xFD, 0x03, 60, 8, 0, 8, 0];
+        let b = read_buffer_size(&p).unwrap();
+        assert_eq!(
+            b,
+            BufferSize { status: 0, acl_packet_length: 1021, sco_packet_length: 60, acl_packets: 8, sco_packets: 8 }
+        );
+        // A controller without SCO buffers
+        let p = [0x0E, 11, 1, 0x05, 0x10, 0, 0xFD, 0x03, 0, 8, 0, 0, 0];
+        assert_eq!(read_buffer_size(&p).map(|b| (b.sco_packet_length, b.sco_packets)), Some((0, 0)));
+        // Refused, truncated, another command
+        assert_eq!(read_buffer_size(&[0x0E, 4, 1, 0x05, 0x10, 1]).map(|b| b.status), Some(1));
+        assert!(read_buffer_size(&p[..12]).is_none());
+        assert!(read_buffer_size(&[0x0E, 4, 1, 0x60, 0x20, 0]).is_none());
     }
 
     #[test]

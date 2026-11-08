@@ -1,7 +1,19 @@
 // Adapter: the USB Bluetooth adapters with their driver and firmware,
 // WinUSB assign / restore, the chip for the firmware, and AFH.
 
-import { createEffect, createMemo, createSignal, createUniqueId, For, type JSX, onCleanup, onMount, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  createUniqueId,
+  For,
+  type JSX,
+  Match,
+  onCleanup,
+  onMount,
+  Show,
+  Switch,
+} from "solid-js";
 import { useApp } from "../app/context";
 import { saveSettings } from "../app/settings";
 import { Banner, Button, Field, Section, Segmented, Select } from "../components/controls";
@@ -12,10 +24,13 @@ import type { AdapterInfo, DriverKind, FirmwareFile, ProbeResult } from "../ipc/
 import {
   adapterFirmwareTag,
   buildChipOptions,
+  CHIP_NOT_REALTEK,
   type ChipStatus,
   chipStatus,
   chipTargetIndex,
   isAutoChip,
+  loaderOutcome,
+  vendorFirmware,
 } from "../lib/chips";
 import { baseName, chipReportUrl, LINKS, vendorFirmwareUrl } from "../lib/links";
 
@@ -232,7 +247,13 @@ export function Adapter() {
         <For each={sorted()}>
           {(a, i) => {
             const drv = () => driverText(a.driver);
-            const fw = () => adapterFirmwareTag(a, snap().settings);
+            const fw = () => adapterFirmwareTag(a, snap().settings, adapter().loader);
+            // Another vendor's adapter: where its firmware comes from, in
+            // place of the Realtek chip choice (issue #86) while that is
+            // Auto or Not Realtek
+            const vendorBox = () =>
+              vendorFirmware(a) !== null &&
+              (isAutoChip(snap().settings) || snap().settings.bt_chip_pid === CHIP_NOT_REALTEK);
             const driverHead = createUniqueId();
             const firmwareHead = createUniqueId();
             return (
@@ -245,7 +266,7 @@ export function Adapter() {
                       {adapterName(a)}
                       <Show when={adapterExperimental(a)}>
                         {" "}
-                        <span class="tag st-warn" title={t("ui.adapter.experimental_hint")}>
+                        <span class="tag st-exp" title={t("ui.adapter.experimental_hint")}>
                           {t("ui.adapter.experimental")}
                         </span>
                       </Show>
@@ -305,7 +326,8 @@ export function Adapter() {
                     aria-labelledby={firmwareHead}
                   >
                     <h3 id={firmwareHead}>
-                      {t("ui.adapter.firmware")}: <span class={`tag st-${fw().status}`}>{t(fw().key)}</span>
+                      {t("ui.adapter.firmware")}:{" "}
+                      <span class={`tag st-${fw().status}`}>{t(fw().key, ...(fw().args ?? []))}</span>
                       {/* The running stack found it on its ROM code (issue #81) */}
                       <Show when={adapter().rom_firmware && a.realtek_chip && a.driver === "winusb"}>
                         {" "}
@@ -315,8 +337,15 @@ export function Adapter() {
                       </Show>
                     </h3>
                     {/* The chip setting is one for all adapters: with the one it applies to */}
-                    <Show when={i() === chipCard()}>
-                      <ChipSection files={files()} onChanged={loadFiles} adapter={a} />
+                    <Show
+                      when={vendorBox()}
+                      fallback={
+                        <Show when={i() === chipCard()}>
+                          <ChipSection files={files()} onChanged={loadFiles} adapter={a} />
+                        </Show>
+                      }
+                    >
+                      <VendorFirmwareBox adapter={a} />
                     </Show>
                     <Show when={!adapterSupported(a)}>
                       <Button icon="arrow_download" disabled>
@@ -428,6 +457,55 @@ function ChipSection(props: { files: FirmwareFile[]; onChanged: () => Promise<vo
     >
       {body()}
     </Show>
+  );
+}
+
+/** Another vendor's adapter (issue #86): what to do about its firmware, and
+ *  only where there is something to do. Its vendor's driver or none needed:
+ *  nothing, unless loading failed; Intel's files (and Broadcom's optional
+ *  ones) in the firmware folder: where to get them; Marvell: Wi-Fi on */
+function VendorFirmwareBox(props: { adapter: AdapterInfo }) {
+  const app = useApp();
+  const a = () => props.adapter;
+  const source = () => vendorFirmware(a());
+  const outcome = () => loaderOutcome(a(), app.core.state.snap!.adapter.loader);
+  const url = () => vendorFirmwareUrl(a().vendor);
+  const actions = (guide: boolean) => (
+    <div class="inline wrap">
+      <Show when={url()}>
+        {(u) => (
+          <Button icon="open" onClick={() => app.core.transport.openUrl(u())}>
+            {t("firmware.open_download_page")}
+          </Button>
+        )}
+      </Show>
+      <Button icon="folder_open" kind="subtle" onClick={() => void openFirmwareFolder(app)}>
+        {t("firmware.open_folder")}
+      </Button>
+      <Show when={guide}>
+        <Button icon="open" kind="subtle" onClick={() => app.core.transport.openUrl(LINKS.setupGuide)}>
+          {t("ui.setup.guide")}
+        </Button>
+      </Show>
+    </div>
+  );
+  return (
+    <Switch>
+      <Match when={outcome() === "failed"}>
+        <p class="hint">
+          {source() === "driver" ? t("firmware.from_vendor_driver", a().vendor) : t("firmware.intel_files")}
+        </p>
+        {actions(source() === "folder")}
+      </Match>
+      <Match when={source() === "folder" && outcome() !== "ok"}>
+        <p class="hint">{t("firmware.intel_files")}</p>
+        {actions(true)}
+      </Match>
+      <Match when={source() === "optional"}>{actions(false)}</Match>
+      <Match when={source() === "wifi"}>
+        <p class="hint">{t("ui.adapter.firmware_keep_wifi")}</p>
+      </Match>
+    </Switch>
   );
 }
 

@@ -431,6 +431,11 @@ export function Dialog(props: {
   cancel?: string;
   danger?: boolean;
   busy?: boolean;
+  /** Room for a table whose rows should not wrap */
+  wide?: boolean;
+  /** A second way to go on, before the confirm button and the one
+   *  recommended: the confirm button then is a plain one */
+  extra?: { label: string; icon?: IconName; onClick: () => void };
   onConfirm?: () => void;
   onCancel: () => void;
 }) {
@@ -472,7 +477,14 @@ export function Dialog(props: {
     <Show when={props.open}>
       <Portal>
         <div class="backdrop" onClick={(e) => e.target === e.currentTarget && cancel()}>
-          <div class="dialog card" role="dialog" aria-modal="true" aria-labelledby={id} ref={box} onKeyDown={onKey}>
+          <div
+            class={props.wide ? "dialog dialog-wide card" : "dialog card"}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={id}
+            ref={box}
+            onKeyDown={onKey}
+          >
             <div class="dialog-head">
               <div class="dialog-heading">
                 <h2 id={id}>{props.title}</h2>
@@ -490,7 +502,20 @@ export function Dialog(props: {
                 <Button kind="subtle" disabled={props.busy} onClick={cancel} data-autofocus>
                   {props.cancel}
                 </Button>
-                <Button kind={props.danger ? "danger" : "strong"} busy={props.busy} onClick={() => props.onConfirm?.()}>
+                <Show when={props.extra}>
+                  {(x) => (
+                    <Button kind="strong" icon={x().icon} busy={props.busy} onClick={() => x().onClick()}>
+                      {x().label}
+                    </Button>
+                  )}
+                </Show>
+                {/* With the extra button, busy is the extra's work */}
+                <Button
+                  kind={props.danger ? "danger" : props.extra ? "default" : "strong"}
+                  busy={props.busy && !props.extra}
+                  disabled={props.busy && !!props.extra}
+                  onClick={() => props.onConfirm?.()}
+                >
                   {props.confirm}
                 </Button>
               </div>

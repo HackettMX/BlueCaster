@@ -3,9 +3,9 @@
 //! PDUs le_audio_bap.cpp builds inline).
 
 use crate::defs::{
-    ASE_OP_CONFIG_CODEC, ASE_OP_CONFIG_QOS, AseState, CAP_CHANNEL_COUNTS, CAP_FRAME_DURATIONS, CAP_MAX_FRAMES_PER_SDU,
-    CAP_OCTETS_PER_FRAME, CAP_SAMPLING_FREQUENCIES, CODING_FORMAT_LC3, META_CCID_LIST, META_PREFERRED_CONTEXTS,
-    META_STREAMING_CONTEXTS,
+    ASE_OP_CONFIG_CODEC, ASE_OP_CONFIG_QOS, ASE_OP_RECEIVER_START_READY, ASE_OP_RECEIVER_STOP_READY, AseState,
+    CAP_CHANNEL_COUNTS, CAP_FRAME_DURATIONS, CAP_MAX_FRAMES_PER_SDU, CAP_OCTETS_PER_FRAME, CAP_SAMPLING_FREQUENCIES,
+    CODING_FORMAT_LC3, META_CCID_LIST, META_PREFERRED_CONTEXTS, META_STREAMING_CONTEXTS,
 };
 use crate::ltv;
 
@@ -333,6 +333,18 @@ pub fn cp_ase_ids(opcode: u8, ase_ids: &[u8]) -> Vec<u8> {
     v
 }
 
+/// Receiver Start Ready (0x04): the client (the receiver of a source ASE's
+/// audio) is ready to receive, after the CIS is up and the ASE is Enabling
+pub fn cp_receiver_start_ready(ase_ids: &[u8]) -> Vec<u8> {
+    cp_ase_ids(ASE_OP_RECEIVER_START_READY, ase_ids)
+}
+
+/// Receiver Stop Ready (0x06): the client stopped receiving from source
+/// ASEs in Disabling (they then go to QoS Configured)
+pub fn cp_receiver_stop_ready(ase_ids: &[u8]) -> Vec<u8> {
+    cp_ase_ids(ASE_OP_RECEIVER_STOP_READY, ase_ids)
+}
+
 /// The Metadata of Enable: Streaming Audio Contexts (0x02) and, when
 /// `ccids` is not empty, the CCID List (0x05) without duplicates
 pub fn enable_metadata(contexts: u16, ccids: &[u8]) -> Vec<u8> {
@@ -540,6 +552,8 @@ mod tests {
         );
         assert_eq!(cp_ase_ids(ASE_OP_RELEASE, &[1, 2]), [0x08, 2, 1, 2]);
         assert_eq!(cp_ase_ids(ASE_OP_DISABLE, &[]), [0x05, 0]);
+        assert_eq!(cp_receiver_start_ready(&[3]), [0x04, 1, 3]);
+        assert_eq!(cp_receiver_stop_ready(&[3, 4]), [0x06, 2, 3, 4]);
     }
 
     #[test]

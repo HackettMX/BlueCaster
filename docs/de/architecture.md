@@ -155,6 +155,7 @@ enthalten; alle anderen Crates haben `#![forbid(unsafe_code)]`.
 | 2. Bausteine | `aptx-adaptive` | Der aptX-Adaptive-Encoder in Rust (übernommen aus AKS-Logic/aptx-adaptive-linux, MIT) |
 | 2. Bausteine | `codec` | Der Trait `Encoder`, der SBC-Encoder (Rust-Portierung des Encoders aus Bluedroid), sichere Wrapper der C-Encoder, Auswertung der Codec Information und die Codec-Wahl |
 | 2. Bausteine | `audio-capture` | WASAPI-Aufnahme (Crate `wasapi`): System-Loopback, virtuelles Gerät, eine Anwendung (Prozess-Loopback); Geräte- und App-Listen, Testton, Lautstärke pro App (Lautstärkemixer) |
+| 2. Bausteine | `voice-link` | Der Ton des Headset-Mikrofons (Entwicklermodus): Mono-PCM an das gewählte Ausgabegerät (WASAPI), die heruntergemischte Aufnahme für die Gegenrichtung und die Sprachcodecs CVSD / mSBC / LC3-SWB über SCO-Nutzdaten |
 | 3. Engine | `bt-host` | Führt BTstack auf einem eigenen Thread aus, gesteuert durch Befehle und typisierte Ereignisse: GAP, A2DP Source, AVRCP, SDP, RFCOMM-Kanäle für das Passthrough (`rfcomm.*`), Link Keys, die SDP-Dienste eines Geräts, AFH, Laden der Firmware und Chip-Loader (`bringup`), die Chip-Abfrage und Chip-Skripte, HCI-Aufzeichnung (`.pklg`), LE Audio (`le/`) |
 | 2. Bausteine | `le-audio` | LE Audio (experimentell): die Logik ohne BTstack oder Windows (Assigned Numbers, LTV, PDUs von PACS / ASCS, Presets, die Modelle für CSIP / VCP / MCP / CCP) |
 | 3. Engine | `pipeline` | PCM-Ringpuffer, Formatumwandlung, Downmix, Kodierung, Mediennutzdaten, Taktung, ABR |

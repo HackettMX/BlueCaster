@@ -66,7 +66,7 @@ function AdapterLine(props: { adapter: AdapterInfo }) {
       <Show
         when={!ok() || !adapterExperimental(props.adapter)}
         fallback={
-          <span class="tag st-warn" title={t("ui.adapter.experimental_hint")}>
+          <span class="tag st-exp" title={t("ui.adapter.experimental_hint")}>
             {t("ui.adapter.experimental")}
           </span>
         }
@@ -114,7 +114,8 @@ export function Setup() {
       case 1:
         return adapter()?.driver === "winusb";
       default:
-        return classicEntries(snap()).some((e) => e.profile);
+        // Audio devices can be added later (issue #86)
+        return true;
     }
   };
 

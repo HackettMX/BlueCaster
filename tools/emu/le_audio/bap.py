@@ -5,7 +5,8 @@ octets, the channel counts and audio locations of the sink (sink.py), 1
 codec frame per channel and SDU (Supported_Max_Codec_Frames_Per_SDU counts
 per channel: a 2-channel ASE still takes 1). The
 ASCS state machine is Bumble's; with a Sink ASE it accepts the CIS and goes
-to Streaming by itself (Receiver Start Ready of the server). Advertising:
+to Streaming by itself (Receiver Start Ready of the server). --mic adds a
+source ASE (mic.py): Streaming after the client's Receiver Start Ready. Advertising:
 ASCS and CAS service data (general announcement, media available).
 
 Release: Releasing, then Idle once the data path is gone (patch_release()
@@ -38,6 +39,8 @@ from bumble.profiles.bap import (
 )
 from bumble.profiles.pacs import PacRecord, PublishedAudioCapabilitiesService
 from bumble import hci
+
+from . import mic
 
 log = logging.getLogger('emu_le_audio')
 
@@ -122,15 +125,22 @@ def configure_sink(sink, args):
         ),
     )
     later = getattr(args, 'available_contexts_after', None) is not None
-    pacs = PublishedAudioCapabilitiesService(
+    # --mic (mic.py): a Source PAC, source contexts and a source ASE
+    source_pacs, source_ases = mic.source_setup(sink, args)
+    pacs_args = dict(
         supported_source_context=ContextType.PROHIBITED,
-        supported_sink_context=CONTEXTS,
         available_source_context=ContextType.PROHIBITED,
+    )
+    pacs_args.update(source_pacs)
+    pacs = PublishedAudioCapabilitiesService(
+        supported_sink_context=CONTEXTS,
         available_sink_context=ContextType.PROHIBITED if later else CONTEXTS,
         sink_pac=[record],
         sink_audio_locations=AudioLocation(sink.locations),
+        **pacs_args,
     )
-    ascs = AudioStreamControlService(device, sink_ase_id=list(range(1, sink.sink_ases + 1)))
+    ascs = AudioStreamControlService(device, sink_ase_id=list(range(1, sink.sink_ases + 1)),
+                                     source_ase_id=source_ases)
     cas = gatt.Service(gatt.GATT_COMMON_AUDIO_SERVICE, [])
     device.add_service(pacs)
     device.add_service(ascs)
@@ -159,7 +169,8 @@ async def start(sink, args):
 
         async def make_available():
             await asyncio.sleep(delay)
-            pacs.available_audio_contexts.value = struct.pack('<HH', CONTEXTS, 0)
+            source = mic.SOURCE_CONTEXTS if 'mic' in sink.state else 0
+            pacs.available_audio_contexts.value = struct.pack('<HH', CONTEXTS, source)
             log.info('%s: available sink contexts now 0x%04x', sink.name, CONTEXTS)
             await device.notify_subscribers(pacs.available_audio_contexts)
 

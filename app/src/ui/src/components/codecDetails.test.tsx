@@ -4,6 +4,7 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { setLanguage } from "../i18n";
 import type { CodecDetails, StreamInfo } from "../ipc/types";
 import { bitpoolBar, chips, frameMs, liveBitpool, packetFill } from "../lib/codecdetails";
+import { bitpoolRange } from "./CodecCards";
 import { CodecDetailsCard } from "./CodecDetails";
 
 const SBC: CodecDetails = {
@@ -210,5 +211,13 @@ describe("codec details", () => {
     expect(c).not.toHaveTextContent("ABR");
     expect(c.querySelector(".bitpool.live")).toBeNull();
     expect(c.querySelector(".bitpool-range.abr")).toBeNull();
+  });
+});
+
+describe("SBC XQ bitpool range", () => {
+  it("goes up to SBC's 53 when not held to the device's list (issue #86)", () => {
+    expect(bitpoolRange("sbcxq", null, 48000)).toEqual({ min: 2, max: 43 });
+    expect(bitpoolRange("sbcxq", null, 48000, true)).toEqual({ min: 2, max: 53 });
+    expect(bitpoolRange("sbc", null, 48000, true)).toEqual({ min: 2, max: 53 });
   });
 });

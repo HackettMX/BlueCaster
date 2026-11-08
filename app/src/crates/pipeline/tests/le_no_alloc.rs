@@ -13,6 +13,7 @@ use le_audio::plan::{ChannelPlan, ChannelSource, CisPlan, StreamPlan};
 use le_audio::presets::StreamPreset;
 use le_audio::sdu_queue::SduQueue;
 use pipeline::le::{LeEncoder, silence_set};
+use pipeline::le_rx::{MicConfig, MicDecoder, MicStats, PcmOut};
 use pipeline::{InputFormat, SampleType};
 
 struct Counting;
@@ -75,6 +76,7 @@ fn plan() -> StreamPlan {
         acl: 0x40,
         cis_handle: 0x60 + u16::from(id),
         channels,
+        source_ase: None,
     };
     StreamPlan {
         preset: StreamPreset {
@@ -98,6 +100,8 @@ fn plan() -> StreamPlan {
             cis(1, vec![ch(LOCATION_FRONT_RIGHT, ChannelSource::Right), ch(LOCATION_FRONT_LEFT, ChannelSource::Left)]),
             cis(2, vec![ch(0, ChannelSource::Mono)]),
         ],
+        source: None,
+        source_note: String::new(),
     }
 }
 
@@ -160,4 +164,60 @@ fn le_rounds_do_not_allocate() {
     assert!(stats.sets_pushed >= 399, "{stats:?}");
     assert_eq!((stats.underruns, stats.overflows, sent_silence), (0, 0, 0), "{stats:?}");
     assert_eq!(sent_bytes, 394 * 300);
+}
+
+/// Counts samples, keeps the last one (no allocation)
+struct Sum(u64, i16);
+
+impl PcmOut for Sum {
+    fn push(&mut self, mono_i16: &[i16]) {
+        self.0 += mono_i16.len() as u64;
+        self.1 = mono_i16[mono_i16.len() - 1];
+    }
+}
+
+#[test]
+fn microphone_rounds_do_not_allocate() {
+    // Two microphones (earbuds), 32 kHz 10 ms 80 octets; a lost SDU now and
+    // then (concealed) and one out of order
+    let params = codec::lc3::Lc3Params { sample_rate: 32000, frame_us: 10000, octets: 80 };
+    let mut enc = codec::lc3::Lc3ChannelEncoder::new(params).unwrap();
+    let frames: Vec<Vec<u8>> = (0..400)
+        .map(|f| {
+            let pcm: Vec<i16> = (0..320).map(|n| (((f * 320 + n) as f32 * 0.196).sin() * 9000.0) as i16).collect();
+            let mut out = vec![0u8; 80];
+            enc.encode(&pcm, &mut out).unwrap();
+            out
+        })
+        .collect();
+    let stats = Arc::new(MicStats::default());
+    let config = MicConfig { sample_rate: 32000, frame_us: 10000, streams: vec![(1, 80), (1, 80)] };
+    let mut dec = MicDecoder::new(&config, 2, stats.clone()).unwrap();
+    let mut out = Sum(0, 0);
+    let sdu = |stream: u8, seq: u16, data: &[u8]| {
+        let mut s = bt_host::RxSdu { stream, sequence: seq, status: 0, len: data.len() as u16, ..Default::default() };
+        s.data[..data.len()].copy_from_slice(data);
+        s
+    };
+    let round = |i: usize, dec: &mut MicDecoder, out: &mut Sum| {
+        let seq = i as u16;
+        if i % 50 != 7 {
+            dec.push(&sdu(0, seq, &frames[i]));
+        }
+        dec.push(&sdu(1, seq.wrapping_add(1000), &frames[i]));
+        dec.process(out);
+    };
+    for i in 0..20 {
+        round(i, &mut dec, &mut out);
+    }
+    let allocations = allocations_in(|| {
+        for i in 20..400 {
+            round(i, &mut dec, &mut out);
+        }
+    });
+    let c = stats.snapshot();
+    assert_eq!(allocations, 0, "allocations in 380 microphone rounds ({c:?})");
+    assert_eq!(c.frames_out, 398);
+    assert_eq!(out.0, 398 * 320);
+    assert_eq!(c.concealed, 8);
 }

@@ -1,6 +1,6 @@
 # BlueCaster (formerly A2DP-Windows-Bridge)
 
-Advanced Bluetooth Audio Transmitter for Windows, with the codecs Windows lacks: LDAC, aptX HD, aptX Low Latency, LHDC V5 and more, through a USB Bluetooth adapter it takes over in WinUSB mode — no kernel driver or test signing required.
+Advanced Bluetooth Audio Transmitter for Windows. It adds the codecs Windows lacks, such as LDAC, LHDC V5, aptX Adaptive and aptX HD, by running its own Bluetooth stack on a USB Bluetooth adapter through WinUSB. No kernel driver or test signing is needed.
 
 ![BlueCaster streaming LDAC 990 kbps / 96 kHz to Sony WH-1000XM4 (Home screen)](docs/images/app_sample.png)
 
@@ -12,7 +12,7 @@ Advanced Bluetooth Audio Transmitter for Windows, with the codecs Windows lacks:
 |-------|---------|-------------|-----------|:----------------:|:------:|
 | LHDC V5 | 400–1000 kbps, ABR 160–400 | 44.1–192 kHz | 16/24 bit | ❌ | ✅ |
 | LDAC | 330/660/990 kbps | 44.1–96 kHz | 16/24/32 bit | ❌ | ✅ |
-| aptX Adaptive | 265/427 kbps (96 kHz: 646) | 48/96 kHz | 24 bit | ❌ | ✅ ¹ |
+| aptX Adaptive | 265/427 kbps (96 kHz: 646) | 48/96 kHz | 24 bit | ❌ | ✅ |
 | Opus (Android) | 256 kbps | 48 kHz | 16 bit | ❌ | 🧪 |
 | aptX HD | 576 kbps | 44.1/48 kHz | 24 bit | ❌ | 🧪 |
 | aptX | 352/384 kbps | 44.1/48 kHz | 16 bit | ✅ | ✅ |
@@ -20,74 +20,59 @@ Advanced Bluetooth Audio Transmitter for Windows, with the codecs Windows lacks:
 | AAC | up to 256 kbps | 44.1/48 kHz | 16 bit | Windows 11 | ✅ |
 | SBC XQ | up to 552 kbps | 44.1/48 kHz | 16 bit | ❌ | ✅ |
 | SBC | up to ~345 kbps | 44.1/48 kHz | 16 bit | ✅ | ✅ |
-| FastStream | 198/216 kbps | 44.1/48 kHz | 16 bit | ❌ | 🧪 ² |
-| Opus 05 (PipeWire) | 256 kbps | 48 kHz | 16 bit | ❌ | 🧪 ² ³ |
-| LC3 (LE Audio) | 32–124 kbps per channel | 16–48 kHz | 16 bit | Windows 11 ⁴ | 🧪 ⁵ |
+| FastStream | 198/216 kbps | 44.1/48 kHz | 16 bit | ❌ | 🧪 |
+| Opus 05 (PipeWire) | 256 kbps | 48 kHz | 16 bit | ❌ | 🧪 |
+| LC3 (LE Audio) | 32–124 kbps per channel | 16–48 kHz | 16 bit | Windows 11 | 🧪 |
 
-✅ supported · 🧪 experimental: passes the encoder tests and the end-to-end test against a virtual Bluetooth sink, but not yet confirmed with real headphones that use it ([reports welcome](https://github.com/SeiyaFunaokaJP/BlueCaster/issues/11)) · ❌ not supported. The app offers every codec, the experimental ones too.
-
-¹ Encoded with the MIT-licensed encoder of [AKS-Logic/aptx-adaptive-linux](https://github.com/AKS-Logic/aptx-adaptive-linux), whose tables its authors reconstructed from shipped binaries; confirmed on an EarFun Air Pro 4+ at 48 kHz, and 96 kHz on real headphones ([#86](https://github.com/SeiyaFunaokaJP/BlueCaster/issues/86)). ² Auto never picks it; choose it on **Codecs**. ³ Only PipeWire (Linux) receivers implement it. ⁴ Only on PCs whose Bluetooth hardware and driver support LE Audio. ⁵ LE Audio (BAP unicast over isochronous channels), not A2DP: chosen per device (its LE Audio entry on **Codecs**), and needs an adapter with Bluetooth 5.2 isochronous channels; gaming headsets that support GMAP get its low-latency configuration (7.5/10 ms frames, 64–96 kbps per channel, ~30 ms). Tested only against the Bluetooth emulator ([details](https://seiyafunaokajp.github.io/BlueCaster/usage#le-audio)).
-
-Auto picks LHDC V5 > LDAC > aptX Adaptive > Opus > aptX HD > aptX > aptX LL > AAC > SBC XQ > SBC. Per-codec details, the Ubuntu / PipeWire comparison and the verified hardware are on the [documentation home](https://seiyafunaokajp.github.io/BlueCaster/). Third-party apps that work with BlueCaster (not supported by this project): [Works With](https://seiyafunaokajp.github.io/BlueCaster/works-with).
+✅ supported · 🧪 experimental: works against a virtual Bluetooth sink, not yet confirmed with real headphones ([reports welcome](https://github.com/SeiyaFunaokaJP/BlueCaster/issues/11)) · ❌ not supported
 
 ## Requirements
 
 - **Windows 10 (22H2) or 11**, x64 or ARM64 (ARM64 and Windows 10 not yet tried on real hardware)
-- **A USB Bluetooth adapter for BlueCaster**: a separate USB dongle is recommended. The PC's built-in adapter works too when it is a USB device (many laptops' Realtek adapters), but Windows then has no Bluetooth of its own while BlueCaster has it. See [Recommended Adapters](https://seiyafunaokajp.github.io/BlueCaster/setup#adapters) and the [verified hardware](https://seiyafunaokajp.github.io/BlueCaster/hardware)
+- **A USB Bluetooth adapter for BlueCaster**. A separate dongle is recommended: a built-in adapter works too if it is a USB device (as in many laptops), but Windows then has no Bluetooth of its own while BlueCaster uses it. See [Recommended Adapters](https://seiyafunaokajp.github.io/BlueCaster/setup#adapters) and the [verified hardware](https://seiyafunaokajp.github.io/BlueCaster/hardware).
 
 ### Why does BlueCaster take over a whole adapter?
 
-Windows 10 / 11 load only kernel drivers signed through Microsoft, which needs an EV code signing certificate (several hundred US dollars a year, normally for companies only). BlueCaster therefore takes a whole USB adapter away from Windows with the Microsoft-signed WinUSB driver and runs the Bluetooth stack itself, in user mode. If you just want something simple, commercial software with a signed driver works with the built-in Bluetooth.
+Windows loads only kernel drivers signed through Microsoft, which requires an EV code signing certificate (several hundred US dollars a year, usually only for companies). BlueCaster instead puts the adapter on Microsoft's own signed WinUSB driver and runs the Bluetooth stack in user mode. If you want something simpler, commercial software with a signed driver works with the built-in Bluetooth.
 
 ## Setup
 
-1. **Install**: run `BlueCaster-<version>-win64-setup.exe` (`-arm64-setup.exe` on ARM64; per user, no administrator rights), or extract the portable zip and run `bluecaster.exe`. Installing over v1 or A2DP Windows Bridge 2.0.x removes it and keeps its settings, pairings and firmware.
-2. **Plug in the adapter** (or use the built-in one, see the warning below).
-3. **Follow the first-run setup**: choose the adapter, press **Set up this adapter** (it assigns WinUSB, Windows asks for administrator permission, and downloads the firmware files Realtek adapters need), then press **Connect** next to your audio device: BlueCaster picks the best settings for it and connects.
-4. **Connect** from **Home**, or from the tray icon.
+1. **Install**: run `BlueCaster-<version>-win64-setup.exe` (`-arm64-setup.exe` on ARM64; no administrator rights needed), or extract the portable zip and run `bluecaster.exe`. Installing over v1 or A2DP Windows Bridge 2.0.x replaces it and keeps its settings, pairings and firmware.
+2. **Plug in the adapter.**
+3. **Follow the first-run setup**: choose the adapter and press **Set up this adapter**. It assigns WinUSB (Windows asks for administrator permission) and downloads the firmware Realtek adapters need. Then press **Connect** next to your headphones.
+4. After that, connect from **Home** or the tray icon.
 
-> **Warning:** While WinUSB is assigned, Windows' own Bluetooth no longer sees the adapter. A built-in adapter can be used too, but **the PC then has no Windows Bluetooth at all** until the driver is restored, so a separate USB adapter is recommended. **Adapters > Restore original driver** gives the adapter back to Windows at any time, and the uninstaller offers it too.
+> **Warning:** While WinUSB is assigned, Windows' own Bluetooth cannot use the adapter. With the built-in adapter, the PC has no Windows Bluetooth at all until you restore the driver. **Adapters > Restore original driver** gives the adapter back to Windows at any time, and the uninstaller offers it too.
 
-**Realtek adapters** need firmware files such as `rtl8761bu_fw.bin` and `rtl8761bu_config.bin` from [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/tree/rtl_bt) (proprietary, not included). The **Adapters** screen shows which files are needed; **Download Firmware** fetches them from kernel.org into the firmware folder after you confirm, or open the download page and the firmware folder to do it by hand. See the [Setup guide](https://seiyafunaokajp.github.io/BlueCaster/setup).
-
-## Usage
-
-The resident core streams and owns the tray icon; the window only shows its state, so closing it does not stop the audio. **Left-click** the tray icon for the flyout, **right-click** it for the menu (**Open BlueCaster**, your devices, **Disconnect**, **Exit**).
-
-The core also runs from the command line (quit BlueCaster first: only one program can use the adapter):
-
-```bash
-bluecaster-core.exe --cli -d AA:BB:CC:DD:EE:FF                    # Auto codec
-bluecaster-core.exe --cli -d AA:BB:CC:DD:EE:FF -c ldac -q hq -a   # LDAC 990 kbps with ABR
-bluecaster-core.exe --cli --scan                                  # Find nearby devices
-bluecaster-core.exe --cli -h                                      # All options
-```
-
-The sample rate is 48 kHz unless you choose another in a codec's settings on **Codecs** (96 kHz for LDAC, for example). Everything else — codecs, capture modes, volume sync, link quality and AFH, diagnostics, start with Windows, troubleshooting — is in the [Usage guide](https://seiyafunaokajp.github.io/BlueCaster/usage). Sound that drops out, or a connection that fails: [Dropouts and Connection Problems](https://seiyafunaokajp.github.io/BlueCaster/wireless).
+See the [Setup guide](https://seiyafunaokajp.github.io/BlueCaster/setup) and the [Usage guide](https://seiyafunaokajp.github.io/BlueCaster/usage). For dropouts or failed connections: [Dropouts and Connection Problems](https://seiyafunaokajp.github.io/BlueCaster/wireless).
 
 ## Features
 
-- **Codecs**: LHDC V5, LDAC, aptX Adaptive, experimental Opus, the rest of the aptX family, AAC and SBC XQ / SBC, with automatic choice and ABR (LHDC V5, LDAC, aptX Adaptive; adaptive bitpool for SBC / SBC XQ)
+- **Codec choice**: picks the best codec the headphones support, or the one you choose; ABR on LHDC V5, LDAC and aptX Adaptive
+- **LE Audio (experimental)**: LC3 to LE Audio headphones and earbuds with a Bluetooth 5.2 adapter; tested only against the Bluetooth emulator ([details](https://seiyafunaokajp.github.io/BlueCaster/usage#le-audio))
 - **Capture**: all system audio, a virtual audio device (e.g. VB-CABLE), or one application
-- **Resident core with tray**: streams with the window closed; reconnects after link loss and after sleep
-- **WinUSB in the app**: assigns and restores the adapter's driver, no Zadig needed; headphones Windows paired through the adapter connect without pairing again
-- **Headphone controls**: volume sync and play / pause / next / previous (AVRCP)
+- **Runs in the tray**: keeps streaming with the window closed, reconnects after a lost link and after sleep
+- **Driver setup in the app**: assigns and restores WinUSB without Zadig; headphones paired in Windows through the adapter connect without pairing again
+- **Headphone controls**: volume sync and play / pause / next / previous
 - **Diagnostics**: link quality, AFH (avoids your Wi-Fi channels), connection flow, log, HCI capture
-- **Updates**: daily check, in-app update of the installed version
+- **Command line**: `bluecaster-core.exe --cli` ([CLI Mode](https://seiyafunaokajp.github.io/BlueCaster/usage#cli-mode))
+- **Updates**: daily check, updates itself
 - **8 languages**: English, Japanese, Chinese (Simplified / Traditional), Korean, German, French, Spanish
-- **LE Audio (experimental)**: LC3 to LE Audio headphones and earbuds, tested only against the Bluetooth emulator ([details](https://seiyafunaokajp.github.io/BlueCaster/usage#le-audio))
+- **Headset microphone (experimental, developer mode)**: the headphones' microphone as a Windows microphone through a virtual audio cable such as VB-CABLE; classic devices play at call quality meanwhile, LE Audio keeps its quality ([details](https://seiyafunaokajp.github.io/BlueCaster/usage#codecs))
+- **Works with** third-party apps such as earbud control apps: [Works With](https://seiyafunaokajp.github.io/BlueCaster/works-with) (not supported by this project)
 
 ## Building
 
 Requirements: **Rust** 1.90+, **Visual Studio 2022+** with the C++ desktop workload, **Node.js 22** with **pnpm** (`corepack enable`), **Git**, **PowerShell 7**.
 
-```bash
+```powershell
 git clone --recursive https://github.com/SeiyaFunaokaJP/BlueCaster.git
 cd BlueCaster
-pwsh ./build.ps1
+pwsh ./build.ps1                      # bluecaster.exe, bluecaster-core.exe, bluecaster-driver.exe in target/release/
+pwsh ./build.ps1 -Release -Arch x64   # installer and portable zip (-Arch arm64 for ARM64)
 ```
 
-`build.ps1` builds the window's page and the three programs into `target/release/` (`bluecaster-core.exe`, `bluecaster.exe`, `bluecaster-driver.exe`); double-clicking `build.bat` runs the same. Switches: `-Debug` (debug build), `-Test` (formatting, lints, tests), `-Decoder` (the `bluecaster_decode` tool), `-Emu` (end-to-end test against a virtual sink; `-Codecs` picks codecs), `-Release -Arch x64|arm64` (installer, portable zip). See [Building](https://seiyafunaokajp.github.io/BlueCaster/building) for the steps one by one, the tests and the release packages, and [Architecture](https://seiyafunaokajp.github.io/BlueCaster/architecture) for how the programs fit together.
+Double-clicking `build.bat` runs the first command. The other switches (debug build, tests, emulator test) are listed at the top of [build.ps1](build.ps1). See [Building](https://seiyafunaokajp.github.io/BlueCaster/building) for the steps one by one and [Architecture](https://seiyafunaokajp.github.io/BlueCaster/architecture) for how the programs fit together.
 
 ## License
 

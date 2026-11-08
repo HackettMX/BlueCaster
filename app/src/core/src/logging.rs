@@ -81,6 +81,7 @@ pub const OWN_TARGETS: &[&str] = &[
     "pipeline",
     "win_sys",
     "ipc",
+    "voice_link",
     // Explicit targets: the USB transport, BTstack's own log, LE Audio
     "hci",
     "btstack",

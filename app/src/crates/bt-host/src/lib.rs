@@ -23,11 +23,13 @@ pub mod media;
 pub mod mediatek;
 pub mod probe;
 pub mod qualcomm;
+pub mod realtek_btnic;
 pub mod rfcomm;
 pub mod script;
 pub mod sdp_services;
 mod shared;
 pub mod stats;
+pub mod voice;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
@@ -40,9 +42,13 @@ use codec::caps::{Configuration, RemoteCaps};
 use hci_transport::{TcpH4, UsbSelector, UsbTransport};
 
 use app::{HostApp, Job, Setup};
-pub use btstack_sys::{LeKeys, expect_transport_loss, set_ctkd};
+pub use btstack_sys::{CtkdOutcome, LeKeys, expect_transport_loss, set_ctkd};
 pub use capture::HciCapture;
 pub use events::{addr_str, parse_addr};
+pub use le::iso_recv::{
+    ISO_STATUS_LOST, ISO_STATUS_POSSIBLY_INVALID, ISO_STATUS_VALID, LeRxHandle, LeRxStats, LeRxStream, MAX_RX_SDU,
+    RxSdu,
+};
 pub use le::{
     LeAddr, LeBroadcast, LeConfig, LeDeviceId, LeDeviceInfo, LeRequest, LeScanResult, LeSduSink, LeStreamRequest,
     LeStreamStarted, LeStreamStats, LeStreamStatus,
@@ -58,6 +64,7 @@ pub use stats::{
     EncodeTiming, EncodeTotals, LinkDetails, LinkMode, LinkRadio, LinkStats, LiveCodec, MaxGauge, RemoteFeatures,
     RemoteVersion, StreamTiming,
 };
+pub use voice::{HeadsetMic, HostError, VoiceEvent, VoiceRx, VoiceTx};
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// No HCI event at all this long after power on: the controller does not
@@ -159,6 +166,10 @@ pub struct HostConfig {
     pub mediatek_loader: bool,
     /// Run the Qualcomm rampatch and NVM download first (experimental)
     pub qualcomm_loader: bool,
+    /// Run the download of a Realtek chip whose firmware comes from
+    /// Realtek's Windows driver first (crate::realtek_btnic, experimental):
+    /// its VID:PID
+    pub realtek_driver_chip: Option<(u16, u16)>,
     /// VID:PID of present Broadcom adapters (PatchRAM file names)
     pub broadcom_ids: Vec<(u16, u16)>,
     /// Upper limit of the media payload (clamped)
@@ -171,6 +182,11 @@ pub struct HostConfig {
     /// service level connection, where the headphones report it (and the LE
     /// Battery Service). Off: no HFP at all.
     pub battery: bool,
+    /// Headset microphone (developer mode): the HFP audio gateway offers
+    /// codec negotiation (LC3-SWB, mSBC, CVSD) and eSCO S4, and
+    /// [`BtHost::voice_start`] opens the audio connection. Off: the
+    /// battery-only audio gateway.
+    pub voice: bool,
     /// Told where a chip loader (Intel's download) is while the adapter
     /// starts, for the Adapters screen
     pub on_loader: Option<bringup::LoaderHook>,
@@ -210,12 +226,14 @@ impl HostConfig {
             intel_loader: false,
             mediatek_loader: false,
             qualcomm_loader: false,
+            realtek_driver_chip: None,
             broadcom_ids: Vec::new(),
             media_payload_limit: media::MEDIA_PAYLOAD_LIMIT_DEFAULT,
             capture: HciCapture::new(),
             afh: None,
             le_audio: None,
             battery: false,
+            voice: false,
             on_loader: None,
             local_name: APP_LOCAL_NAME.into(),
         }
@@ -295,6 +313,8 @@ pub enum HostEvent {
     MediaKey(MediaKey),
     /// The HCI transport stopped working for good
     TransportFailed,
+    /// The HFP audio connection ([`BtHost::voice_start`])
+    Voice(VoiceEvent),
 }
 
 /// Settings and readings shared with the BTstack thread without locks
@@ -388,11 +408,15 @@ pub struct BtHost {
     capture: HciCapture,
     /// LE Audio is configured (HostConfig::le_audio was Some)
     le_on: bool,
+    /// HFP audio is offered (HostConfig::voice)
+    voice_on: bool,
     /// What the LE worker API reads without a round trip
     le: Arc<le::core::LeShared>,
 }
 
-fn backend(transport: &TransportConfig) -> Box<dyn HciBackend> {
+/// The transport; `voice` (HostConfig::voice): USB carries SCO over
+/// interface 1 (an H2 transport), otherwise it has no SCO path at all
+fn backend(transport: &TransportConfig, voice: bool) -> Box<dyn HciBackend> {
     match transport {
         TransportConfig::Tcp(addr) => Box::new(TcpH4::new(addr.clone())),
         TransportConfig::Usb(sel) => {
@@ -401,7 +425,7 @@ fn backend(transport: &TransportConfig) -> Box<dyn HciBackend> {
             // that do not identify as Bluetooth class
             sel.known.extend(btstack_sys::realtek_usb_ids());
             sel.known.extend([(0x0A12, 0x0001), (0x8087, 0x0029), (0x8087, 0x0032)]);
-            Box::new(UsbTransport::new(sel))
+            Box::new(UsbTransport::new(sel).with_sco(voice))
         }
     }
 }
@@ -505,15 +529,17 @@ impl BtHost {
         let tcp = matches!(config.transport, TransportConfig::Tcp(_));
         let capture = config.capture.clone();
         let le_on = config.le_audio.is_some();
+        let voice_on = config.voice;
         let le_shared = Arc::new(le::core::LeShared::default());
         tracing::debug!(
-            "host start: transport {:?}, realtek pid 0x{:04X} files {:?}, intel loader {}, mediatek loader {}, qualcomm loader {}, broadcom {:04X?}, payload limit {}, le audio {}, battery {}",
+            "host start: transport {:?}, realtek pid 0x{:04X} files {:?}, intel loader {}, mediatek loader {}, qualcomm loader {}, realtek driver chip {:04X?}, broadcom {:04X?}, payload limit {}, le audio {}, battery {}",
             config.transport,
             config.realtek_pid,
             config.realtek_files,
             config.intel_loader,
             config.mediatek_loader,
             config.qualcomm_loader,
+            config.realtek_driver_chip,
             config.broadcom_ids,
             config.media_payload_limit,
             le_on,
@@ -536,12 +562,14 @@ impl BtHost {
                         intel_loader,
                         mediatek_loader,
                         qualcomm_loader,
+                        realtek_driver_chip,
                         broadcom_ids,
                         media_payload_limit: _,
                         capture,
                         afh,
                         le_audio,
                         battery,
+                        voice,
                         on_loader,
                         local_name,
                     } = config;
@@ -551,6 +579,11 @@ impl BtHost {
                         // BTstack (before hci_init / the transport)
                         if le_audio.is_some() {
                             stack.set_le_hidden(false);
+                        }
+                        // HFP audio: HCI init's SCO commands (flow control,
+                        // erroneous data reporting) only for a stack with voice
+                        if voice {
+                            stack.set_sco_hidden(false);
                         }
                         let le = le_audio.map(|cfg| {
                             let poster = le::core::LePoster::new(le_jobs, remote);
@@ -578,6 +611,7 @@ impl BtHost {
                             realtek_files,
                             broadcom_ids,
                             battery,
+                            voice,
                             on_loader,
                             probe,
                             local_name,
@@ -594,7 +628,7 @@ impl BtHost {
                             afh,
                             le,
                         );
-                        let backend = backend(&transport);
+                        let backend = backend(&transport, voice);
                         if let Some(make) = tool {
                             // A tool, no HCI init (also over TCP: the
                             // emulator's controller)
@@ -616,6 +650,13 @@ impl BtHost {
                             // with USB requests) before it is used
                             stack.install_transport(backend);
                             app.start_qualcomm_loader(stack);
+                        } else if let Some((vid, pid)) = realtek_driver_chip.filter(|_| !tcp)
+                            && let Some((chip, file)) = realtek_btnic::chip(vid, pid)
+                        {
+                            // Its ROM needs the firmware of Realtek's Windows
+                            // driver, sent in the driver's own sequence
+                            stack.install_transport(backend);
+                            app.start_realtek_driver_loader(stack, chip, file);
                         } else {
                             app.setup_hci_and_power_on(stack, Some(backend));
                         }
@@ -649,6 +690,7 @@ impl BtHost {
             last: Mutex::new(None),
             capture,
             le_on,
+            voice_on,
             le: le_shared,
         };
         Ok(host)
@@ -1552,6 +1594,55 @@ impl BtHost {
         self.shared.update(|s| s.streaming = false);
     }
 
+    /// Opens the HFP audio connection on the current service level
+    /// connection (needs [`HostConfig::voice`]). `tx` supplies payload bytes
+    /// on the BTstack thread, `rx` receives payloads there, from
+    /// [`VoiceEvent::Established`] until [`VoiceEvent::Released`] or
+    /// [`BtHost::voice_stop`]. The result of the connection comes as
+    /// [`HostEvent::Voice`].
+    pub fn voice_start(&self, tx: Box<dyn VoiceTx>, rx: Box<dyn VoiceRx>) -> Result<(), HostError> {
+        self.call(JOB_TIMEOUT, move |app, s| {
+            let enabled = app.setup.voice;
+            let acl = app.hfp_acl;
+            app.voice.start(s, enabled, acl, tx, rx)
+        })
+        .unwrap_or(Err(HostError::NoAnswer))
+    }
+
+    /// The stack offers HFP audio ([`HostConfig::voice`])
+    pub fn voice_enabled(&self) -> bool {
+        self.voice_on
+    }
+
+    /// What [`BtHost::voice_start`] would answer now, without opening
+    /// anything: Ok when the audio connection can be asked for; Refused
+    /// when the controller cannot carry SCO over the transport
+    pub fn voice_check(&self) -> Result<(), HostError> {
+        self.call(JOB_TIMEOUT, |app, s| app.voice.check(app.setup.voice, app.hfp_acl, s.transport_is_h2()))
+            .unwrap_or(Err(HostError::NoAnswer))
+    }
+
+    /// Takes over an audio connection the headphones opened themselves
+    /// ([`VoiceEvent::Established`] with [`BtHost::voice_start`] answering
+    /// Busy): `tx` and `rx` carry it from now on. NotConnected when none is
+    /// open, Busy when it already has its `tx` / `rx`, Refused when SCO
+    /// cannot flow on it.
+    pub fn voice_attach(&self, tx: Box<dyn VoiceTx>, rx: Box<dyn VoiceRx>) -> Result<(), HostError> {
+        self.call(JOB_TIMEOUT, move |app, s| app.voice.attach(s, tx, rx)).unwrap_or(Err(HostError::NoAnswer))
+    }
+
+    /// Closes the HFP audio connection (if any); `tx` and `rx` are dropped
+    /// on the BTstack thread. [`VoiceEvent::Released`] follows (at once
+    /// when BTstack refuses the release).
+    pub fn voice_stop(&self) -> Result<(), HostError> {
+        self.call(JOB_TIMEOUT, |app, s| {
+            if let Some(e) = app.voice.stop(s) {
+                let _ = app.events.send(e);
+            }
+        })
+        .ok_or(HostError::NoAnswer)
+    }
+
     pub fn disconnect(&self) {
         self.stop_stream();
         tracing::info!("disconnecting A2DP");
@@ -1573,10 +1664,10 @@ impl BtHost {
     }
 
     /// The LE keys of the classic device `addr` (derived from its link key,
-    /// see [`set_ctkd`]); None without LE Audio, without keys, or when the
-    /// stack did not answer
-    pub fn le_keys(&self, addr: [u8; 6]) -> Option<LeKeys> {
-        self.call(Duration::from_secs(2), move |_, s| s.le_keys_of_classic(&addr)).flatten()
+    /// see [`set_ctkd`]), else why there are none; None when the stack did
+    /// not answer
+    pub fn le_keys(&self, addr: [u8; 6]) -> Option<Result<LeKeys, CtkdOutcome>> {
+        self.call(Duration::from_secs(2), move |_, s| s.le_keys_or_why(&addr))
     }
 
     /// The service records `addr` lists in SDP, asked over the link the

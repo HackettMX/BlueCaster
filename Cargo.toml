@@ -17,16 +17,18 @@ members = [
     "app/src/crates/pipeline",
     "app/src/crates/core",
     "app/src/crates/ipc",
+    "app/src/crates/voice-link",
     "app/src/core",
     "app/src/driver",
     "app/src/ui/src-tauri",
 ]
 # Vendored aptX Adaptive encoder: a path dependency of codec, kept out of the
-# workspace (its unit tests read upstream's reference vectors, not vendored)
-exclude = ["app/src/crates/aptx-adaptive"]
+# workspace (its unit tests read upstream's reference vectors, not vendored).
+# Vendored nusb: patched in below, built as from crates.io.
+exclude = ["app/src/crates/aptx-adaptive", "app/src/crates/nusb"]
 
 [workspace.package]
-version = "3.0.0-beta.2"
+version = "3.0.0-beta.3.alpha.1"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0 OR MIT"
@@ -48,6 +50,7 @@ ipc = { path = "app/src/crates/ipc" }
 le-audio = { path = "app/src/crates/le-audio" }
 lc3-sys = { path = "app/src/crates/lc3-sys" }
 aptx-adaptive = { path = "app/src/crates/aptx-adaptive" }
+voice-link = { path = "app/src/crates/voice-link" }
 
 cc = "1.2"
 tracing = "0.1"
@@ -65,6 +68,11 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
+
+# nusb 0.2.8 with one accessor for the WinUSB interface handle (SCO over
+# isochronous pipes): app/src/crates/nusb/SOURCE.txt
+[patch.crates-io]
+nusb = { path = "app/src/crates/nusb" }
 
 [profile.release]
 debug = "line-tables-only"

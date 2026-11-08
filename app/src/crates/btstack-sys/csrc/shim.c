@@ -69,6 +69,7 @@ int bluecaster_rs_transport_open(void);
 int bluecaster_rs_transport_close(void);
 int bluecaster_rs_transport_can_send(uint8_t packet_type);
 int bluecaster_rs_transport_send(uint8_t packet_type, const uint8_t *packet, int size);
+void bluecaster_rs_transport_set_sco_config(uint16_t voice_setting, uint8_t connections);
 void bluecaster_rs_log_packet(uint8_t packet_type, uint8_t in, const uint8_t *packet, uint16_t len);
 void bluecaster_rs_log_message(int level, const char *message);
 int bluecaster_rs_lk_get(const uint8_t *addr, uint8_t *key, int *type);
@@ -85,6 +86,8 @@ int bluecaster_rs_ctkd_enabled(void);
 int bluecaster_rs_ctkd_wanted(const uint8_t *addr);
 int bluecaster_ctkd_enabled(void) { return bluecaster_rs_ctkd_enabled(); }
 int bluecaster_ctkd_wanted(const unsigned char *addr) { return bluecaster_rs_ctkd_wanted(addr); }
+void bluecaster_rs_ctkd_note(const uint8_t *addr, int what);
+void bluecaster_ctkd_note(const unsigned char *addr, int what) { bluecaster_rs_ctkd_note(addr, what); }
 
 static void cig_slot_release(uint8_t cig_id);
 
@@ -171,6 +174,10 @@ static int transport_send_packet(uint8_t packet_type, uint8_t *packet, int size)
     return bluecaster_rs_transport_send(packet_type, packet, size);
 }
 
+static void transport_set_sco_config(uint16_t voice_setting, int num_connections) {
+    bluecaster_rs_transport_set_sco_config(voice_setting, num_connections < 0 ? 0 : (uint8_t)num_connections);
+}
+
 /* Synchronous (send_packet returns when the packet is out, e.g. TCP): no
  * can_send_packet_now, HCI frees its buffer at once */
 static const hci_transport_t transport_sync = {
@@ -181,9 +188,22 @@ static const hci_transport_t transport_async = {
     "bluecaster-async", &transport_init, &transport_open, &transport_close,
     &transport_register_packet_handler, &transport_can_send_packet_now, &transport_send_packet,
     NULL, NULL, NULL};
+/* Asynchronous with SCO over USB isochronous: hci.c checks for the name
+ * prefix "H2" (hci_have_usb_transport) and then sizes SCO payloads to 3 ms,
+ * takes HCI_EVENT_SCO_CAN_SEND_NOW from the transport as its single send
+ * token, and calls set_sco_config when SCO connections come and go. */
+static const hci_transport_t transport_h2 = {
+    "H2_BLUECASTER", &transport_init, &transport_open, &transport_close,
+    &transport_register_packet_handler, &transport_can_send_packet_now, &transport_send_packet,
+    NULL, NULL, &transport_set_sco_config};
 
-const hci_transport_t *bluecaster_transport_instance(int async) {
-    return async ? &transport_async : &transport_sync;
+/* kind: 0 synchronous, 1 asynchronous, 2 asynchronous H2 (USB with SCO) */
+const hci_transport_t *bluecaster_transport_instance(int kind) {
+    switch (kind) {
+        case 2: return &transport_h2;
+        case 1: return &transport_async;
+        default: return &transport_sync;
+    }
 }
 
 /* Returns 0 if the packet does not fit or no handler is registered */
@@ -212,9 +232,15 @@ void bluecaster_hci_command_status_inject(uint16_t opcode, uint8_t status) {
     if (transport_packet_handler) transport_packet_handler(HCI_EVENT_PACKET, event, sizeof(event));
 }
 
-void bluecaster_hci_init(int async) {
+static void handler_sco(uint8_t t, uint16_t c, uint8_t *p, uint16_t s);
+
+/* kind as bluecaster_transport_instance */
+void bluecaster_hci_init(int kind) {
     transport_packet_handler = NULL;
-    hci_init(bluecaster_transport_instance(async), NULL);
+    hci_init(bluecaster_transport_instance(kind), NULL);
+    /* hci.c calls the SCO handler without a NULL check when it emits
+     * HCI_EVENT_SCO_CAN_SEND_NOW: registered before anything can ask */
+    hci_register_sco_packet_handler(&handler_sco);
 }
 
 /* ======================================================================== */
@@ -306,6 +332,7 @@ enum {
     SOURCE_RFCOMM = 11,
     SOURCE_SDP_CLIENT = 12,
     SOURCE_SDP_SERVICES = 13,
+    SOURCE_SCO = 14,
 };
 
 static void handler_hci(uint8_t t, uint16_t c, uint8_t *p, uint16_t s) { bluecaster_rs_on_packet(SOURCE_HCI, t, c, p, s); }
@@ -322,6 +349,8 @@ static void handler_iso(uint8_t t, uint16_t c, uint8_t *p, uint16_t s) { bluecas
 static void handler_rfcomm(uint8_t t, uint16_t c, uint8_t *p, uint16_t s) { bluecaster_rs_on_packet(SOURCE_RFCOMM, t, c, p, s); }
 static void handler_sdp_client(uint8_t t, uint16_t c, uint8_t *p, uint16_t s) { bluecaster_rs_on_packet(SOURCE_SDP_CLIENT, t, c, p, s); }
 static void handler_sdp_services(uint8_t t, uint16_t c, uint8_t *p, uint16_t s) { bluecaster_rs_on_packet(SOURCE_SDP_SERVICES, t, c, p, s); }
+/* SCO data (HCI_SCO_DATA_PACKET) and HCI_EVENT_SCO_CAN_SEND_NOW */
+static void handler_sco(uint8_t t, uint16_t c, uint8_t *p, uint16_t s) { bluecaster_rs_on_packet(SOURCE_SCO, t, c, p, s); }
 
 static btstack_packet_callback_registration_t hci_event_registration;
 
@@ -349,13 +378,16 @@ void bluecaster_avrcp_init(void) {
 }
 
 /* ======================================================================== */
-/* HFP audio gateway: service level connection only (headphone battery)     */
+/* HFP audio gateway: the service level connection (headphone battery), and */
+/* with voice the audio connection (headset microphone, developer mode)     */
 /* ======================================================================== */
 
 #define BLUECASTER_HFP_RFCOMM_CHANNEL 4
 
 static uint8_t sdp_hfp_ag_service[200];
-static uint8_t hfp_codecs[] = { HFP_CODEC_CVSD };
+static uint8_t hfp_codecs_cvsd[] = { HFP_CODEC_CVSD };
+/* In the AG's preference order */
+static uint8_t hfp_codecs_voice[] = { HFP_CODEC_LC3_SWB, HFP_CODEC_MSBC, HFP_CODEC_CVSD };
 static hfp_ag_indicator_t hfp_ag_indicators[] = {
     /* index, name, min, max, status, mandatory, enabled, status changed */
     {1, "service",   0, 1, 1, 0, 0, 0},
@@ -371,11 +403,20 @@ static hfp_ag_indicator_t hfp_ag_indicators[] = {
 static hfp_generic_status_indicator_t hfp_hf_indicators[] = { {1, 1}, {2, 1} };
 static const char *hfp_call_hold_services[] = {"1", "2"};
 
-void bluecaster_hfp_ag_init(void) {
+/* voice: codec negotiation with LC3-SWB, mSBC and CVSD, eSCO S4 (the
+ * headset microphone); otherwise CVSD only, for the battery level */
+void bluecaster_hfp_ag_init(int voice) {
     uint16_t features = (1 << HFP_AGSF_HF_INDICATORS) | (1 << HFP_AGSF_EXTENDED_ERROR_RESULT_CODES);
+    uint8_t *codecs = hfp_codecs_cvsd;
+    uint8_t codecs_nr = sizeof(hfp_codecs_cvsd);
+    if (voice) {
+        features |= (1 << HFP_AGSF_CODEC_NEGOTIATION) | (1 << HFP_AGSF_ESCO_S4);
+        codecs = hfp_codecs_voice;
+        codecs_nr = sizeof(hfp_codecs_voice);
+    }
     hfp_ag_init(BLUECASTER_HFP_RFCOMM_CHANNEL);
     hfp_ag_init_supported_features(features);
-    hfp_ag_init_codecs(sizeof(hfp_codecs), hfp_codecs);
+    hfp_ag_init_codecs(codecs_nr, codecs);
     hfp_ag_init_ag_indicators(sizeof(hfp_ag_indicators) / sizeof(hfp_ag_indicators[0]), hfp_ag_indicators);
     hfp_ag_init_hf_indicators(sizeof(hfp_hf_indicators) / sizeof(hfp_hf_indicators[0]), hfp_hf_indicators);
     hfp_ag_init_call_hold_services(2, hfp_call_hold_services);
@@ -385,9 +426,17 @@ void bluecaster_hfp_ag_init(void) {
      * nothing when the AG gives another name or no features. */
     hfp_ag_init_apple_identification("iPhone", 0x06);
     memset(sdp_hfp_ag_service, 0, sizeof(sdp_hfp_ag_service));
+    /* hfp_ag_create_sdp_record_with_codecs sets the SDP wide band speech
+     * (bit 5) and LC3-SWB (bit 8) bits only when the features it gets have
+     * bit 7 set: HFP_HFSF_CODEC_NEGOTIATION, the HF's bit number, not the
+     * AG's HFP_AGSF_CODEC_NEGOTIATION (bit 9). Bit 7 of the AG features
+     * (enhanced call control) never reaches the record (only bits 0-4 are
+     * copied), so it is added for the record only. */
+    uint16_t sdp_features = features;
+    if (voice) sdp_features |= (1 << HFP_HFSF_CODEC_NEGOTIATION);
     hfp_ag_create_sdp_record_with_codecs(sdp_hfp_ag_service, sdp_create_service_record_handle(),
-                                         BLUECASTER_HFP_RFCOMM_CHANNEL, "BlueCaster", 0, features, sizeof(hfp_codecs),
-                                         hfp_codecs);
+                                         BLUECASTER_HFP_RFCOMM_CHANNEL, "BlueCaster", 0, sdp_features, codecs_nr,
+                                         codecs);
     sdp_register_service(sdp_hfp_ag_service);
     hfp_ag_register_packet_handler(&handler_hfp);
 }
@@ -400,6 +449,42 @@ uint8_t bluecaster_hfp_ag_connect(const uint8_t *addr) {
 
 uint8_t bluecaster_hfp_ag_release(uint16_t acl_handle) {
     return hfp_ag_release_service_level_connection(acl_handle);
+}
+
+/* Audio connection on the service level connection of `acl_handle` (codec
+ * negotiation first when both sides support it). The result comes as
+ * HFP_SUBEVENT_AUDIO_CONNECTION_ESTABLISHED / _RELEASED (SOURCE_HFP). */
+uint8_t bluecaster_hfp_ag_audio_connect(uint16_t acl_handle) {
+    return hfp_ag_establish_audio_connection(acl_handle);
+}
+
+uint8_t bluecaster_hfp_ag_audio_release(uint16_t acl_handle) {
+    return hfp_ag_release_audio_connection(acl_handle);
+}
+
+/* ---- SCO data ---- */
+
+/* One SCO packet (header: handle, length; then the payload) in HCI's
+ * outgoing buffer. 0 = sent; BTSTACK_ACL_BUFFERS_FULL when HCI cannot send
+ * now (send only after HCI_EVENT_SCO_CAN_SEND_NOW). */
+uint8_t bluecaster_sco_send(uint16_t sco_handle, const uint8_t *payload, uint16_t len) {
+    if (len > 255) return ERROR_CODE_INVALID_HCI_COMMAND_PARAMETERS;
+    if (hci_is_packet_buffer_reserved()) return BTSTACK_ACL_BUFFERS_FULL;
+    hci_reserve_packet_buffer();
+    uint8_t *p = hci_get_outgoing_packet_buffer();
+    little_endian_store_16(p, 0, sco_handle);
+    p[2] = (uint8_t)len;
+    memcpy(&p[3], payload, len);
+    return hci_send_sco_packet_buffer(3 + len);
+}
+
+void bluecaster_sco_request_can_send_now(uint16_t sco_handle) {
+    hci_request_sco_can_send_now_event_for_con_handle(sco_handle);
+}
+
+/* The SCO packet length (header included) HCI wants for this connection */
+uint16_t bluecaster_sco_packet_length(uint16_t sco_handle) {
+    return hci_get_sco_packet_length_for_connection(sco_handle);
 }
 
 void bluecaster_hfp_ag_deinit(void) {

@@ -15,7 +15,7 @@ unsafe extern "C" {
     pub fn bluecaster_timers_clear();
 
     // ---- shim.c: transport, dump, link keys, handlers ----
-    pub fn bluecaster_hci_init(is_async: c_int);
+    pub fn bluecaster_hci_init(kind: c_int);
     pub fn bluecaster_transport_deliver(packet_type: u8, packet: *const u8, size: u16) -> c_int;
     pub fn bluecaster_transport_packet_sent();
     pub fn bluecaster_hci_command_status_inject(opcode: u16, status: u8);
@@ -24,9 +24,14 @@ unsafe extern "C" {
     pub fn bluecaster_add_hci_event_handler();
     pub fn bluecaster_a2dp_source_init();
     pub fn bluecaster_avrcp_init();
-    pub fn bluecaster_hfp_ag_init();
+    pub fn bluecaster_hfp_ag_init(voice: c_int);
     pub fn bluecaster_hfp_ag_connect(addr: *const u8) -> u8;
     pub fn bluecaster_hfp_ag_release(acl_handle: u16) -> u8;
+    pub fn bluecaster_hfp_ag_audio_connect(acl_handle: u16) -> u8;
+    pub fn bluecaster_hfp_ag_audio_release(acl_handle: u16) -> u8;
+    pub fn bluecaster_sco_send(sco_handle: u16, payload: *const u8, len: u16) -> u8;
+    pub fn bluecaster_sco_request_can_send_now(sco_handle: u16);
+    pub fn bluecaster_sco_packet_length(sco_handle: u16) -> u16;
     pub fn bluecaster_hfp_ag_deinit();
     pub fn bluecaster_rfcomm_init();
     pub fn bluecaster_rfcomm_deinit();

@@ -30,13 +30,26 @@ import {
 import { t } from "../i18n";
 import { IpcError, type AdapterInfo, type Snapshot, type StreamState } from "../ipc/types";
 import { CARD_ORDER, cardOrder, codecSpec } from "../lib/codecs";
-import { audioEntries, codecsOnRequest, entryBase, entryByKey, entryOf, knownCodecs, type AudioEntry } from "../lib/profile";
-import { chooseCodec, codecShown, pickedCodec, settle, settling, streamingCodec } from "./Codecs";
+import {
+  audioEntries,
+  codecsOnRequest,
+  entryBase,
+  entryByKey,
+  entryOf,
+  headsetMode,
+  knownCodecs,
+  nextHeadsetMode,
+  type AudioEntry,
+  type HeadsetMode,
+} from "../lib/profile";
+import { chooseCodec, codecShown, pickedCodec, saveHeadsetMic, settle, settling, streamingCodec } from "./Codecs";
 
 /** Adapters whose firmware files are missing from the settings folder or
- *  invalid (v1's "Firmware not found!" / "Firmware file is invalid!" bar) */
+ *  invalid (v1's "Firmware not found!" / "Firmware file is invalid!" bar).
+ *  Only those on WinUSB: one Windows runs, or that is disabled, needs none
+ *  yet (issue #86) */
 export function adaptersMissingFirmware(snap: Snapshot): AdapterInfo[] {
-  return snap.adapter.adapters.filter((a) => a.firmware_present === false);
+  return snap.adapter.adapters.filter((a) => a.firmware_present === false && a.driver === "winusb");
 }
 
 /** The bar over Home while an adapter lacks its firmware files, or the
@@ -304,6 +317,7 @@ function DeviceCard(props: { entry: AudioEntry; onError: (e: unknown) => void })
                 {live() ? statusText({ state: state(), message: stream().message }) : t("status.ready")}
               </span>
             </div>
+            <HeadsetChip entry={props.entry} />
           </div>
           <Show when={live()}>
             <CodecBadge picker={<CodecPicker entry={props.entry} />} />
@@ -340,6 +354,47 @@ function DeviceCard(props: { entry: AudioEntry; onError: (e: unknown) => void })
         <span>{label()}</span>
       </button>
     </div>
+  );
+}
+
+/** Headset mode at one click (developer mode, Home's card and the flyout):
+ *  the microphone and Off / Auto / On, a click goes to the next one. Only
+ *  for a device whose microphone output is chosen; it is set up on Codecs.
+ *  Auto with no microphone link open is muted; the link's codec shows
+ *  beside the codec (VoiceCodec). */
+export function HeadsetChip(props: { entry: AudioEntry }) {
+  const app = useApp();
+  const snap = () => app.core.state.snap!;
+  const profile = () => props.entry.profile;
+  const shown = () => snap().settings.developer_mode && !!profile()?.mic_device_id;
+  const mode = () => headsetMode(profile()!);
+  const linked = () => {
+    const s = snap().stream;
+    return !!s.voice && s.state !== "idle" && s.profile === profile()?.name;
+  };
+  const [busy, setBusy] = createSignal(false);
+  const label = (m: HeadsetMode) => t(`ui.headset_mic_${m}`);
+  const describe = () => t("ui.headset_mic_cycle", label(mode()), label(nextHeadsetMode(mode())));
+  const cycle = async () => {
+    setBusy(true);
+    await saveHeadsetMic(app, props.entry, { headset_mic: nextHeadsetMode(mode()) });
+    setBusy(false);
+  };
+  return (
+    <Show when={shown()}>
+      <button
+        type="button"
+        class="headset-chip"
+        classList={{ on: mode() !== "off", waiting: mode() === "auto" && !linked(), linked: linked() }}
+        aria-label={describe()}
+        title={describe()}
+        disabled={busy()}
+        onClick={() => void cycle()}
+      >
+        <Icon name="mic" />
+        <span>{label(mode())}</span>
+      </button>
+    </Show>
   );
 }
 

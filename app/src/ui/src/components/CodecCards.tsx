@@ -200,8 +200,14 @@ export function codecChoice(p: CodecChoice): CodecChoice {
  *  codec's (SBC XQ's lower at 48 kHz), within the device's when known
  *  (issue #86: a device of max bitpool 39 is not offered 53; the core keeps
  *  the encoder within it the same way) */
-export function bitpoolRange(codec: string, caps: SbcCaps | null, rate: number): { min: number; max: number } {
-  const local = codec === "sbcxq" ? xqMaxBitpool(rate) : BITPOOL_MAX;
+export function bitpoolRange(
+  codec: string,
+  caps: SbcCaps | null,
+  rate: number,
+  unlisted = false,
+): { min: number; max: number } {
+  // SBC XQ not held to the device's list: up to SBC's 53 (issue #86)
+  const local = codec === "sbcxq" && !unlisted ? xqMaxBitpool(rate) : BITPOOL_MAX;
   if (!caps || caps.max_bitpool < BITPOOL_MIN) return { min: BITPOOL_MIN, max: local };
   const max = Math.max(Math.min(local, caps.max_bitpool), BITPOOL_MIN);
   return { min: Math.min(Math.max(caps.min_bitpool, BITPOOL_MIN), max), max };
@@ -393,7 +399,7 @@ export function CodecSettings(props: {
   // SBC and SBC XQ keep their own bitpool
   const bpKey = () => (v.codec === "sbcxq" ? "sbcxq_bitpool" : "sbc_bitpool");
   const bp = () => v[bpKey()];
-  const bpRange = () => bitpoolRange(v.codec, sbcCaps(), sbcRate(v, sbcCaps()));
+  const bpRange = () => bitpoolRange(v.codec, sbcCaps(), sbcRate(v, sbcCaps()), v.unlisted_options);
   const bpMin = () => bpRange().min;
   const bpMax = () => bpRange().max;
   // ... and their own minimum (issue #86: the slider's two handles)

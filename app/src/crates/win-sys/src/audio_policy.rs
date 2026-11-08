@@ -10,22 +10,26 @@
 //!   the Application capture app picker (IAudioSessionControl2).
 //! - [`output_sessions`], [`set_output_sessions`]: the sessions on the default
 //!   output device, with their volume and mute (the app volume mixer).
+//! - [`capture_sessions_active`]: whether an app records from the capture
+//!   side of a render endpoint (headset mode's Auto: a virtual cable's
+//!   "CABLE Output" for its "CABLE Input").
 //! - [`ComApartment`]: per-thread COM initialisation (MTA).
 
 use core::ffi::c_void;
 use core::marker::PhantomData;
 
-use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_ContainerId;
+use windows::Win32::Devices::FunctionDiscovery::{PKEY_Device_ContainerId, PKEY_DeviceInterface_FriendlyName};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_OK};
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::PKEY_AudioEndpoint_FormFactor;
 use windows::Win32::Media::Audio::{
-    AudioSessionStateExpired, DEVICE_STATE_ACTIVE, ERole, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
-    IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, WAVEFORMATEX, eConsole, eMultimedia, eRender,
+    AudioSessionStateActive, AudioSessionStateExpired, DEVICE_STATE_ACTIVE, ERole, IAudioSessionControl2,
+    IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, WAVEFORMATEX,
+    eCapture, eConsole, eMultimedia, eRender,
 };
 use windows::Win32::System::Com::StructuredStorage::{
-    PROPVARIANT, PropVariantClear, PropVariantToGUID, PropVariantToUInt32,
+    PROPVARIANT, PropVariantClear, PropVariantToGUID, PropVariantToStringAlloc, PropVariantToUInt32,
 };
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, STGM_READ,
@@ -462,6 +466,149 @@ pub fn session_process_ids() -> windows::core::Result<Vec<u32>> {
     Ok(pids)
 }
 
+// ---------------------------------------------------------------------------
+// Recording from a render endpoint's capture side
+// ---------------------------------------------------------------------------
+
+/// What pairs a render endpoint with capture endpoints
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Pairing {
+    /// PKEY_Device_ContainerId; None for the null / all-zero container
+    /// (internal and software devices share it, so it pairs nothing)
+    container: Option<u128>,
+    /// PKEY_DeviceInterface_FriendlyName: the adapter's name ("VB-Audio
+    /// Virtual Cable" for both "CABLE Input" and "CABLE Output")
+    adapter: Option<String>,
+}
+
+/// The null container {00000000-0000-0000-ffff-ffffffffffff}
+const NULL_CONTAINER: u128 = 0x0000_0000_0000_0000_ffff_ffff_ffff_ffff;
+
+/// The capture endpoints (indices into `captures`) paired with `render`:
+/// those in the render endpoint's container; when none is, those of the
+/// same adapter
+fn paired(render: &Pairing, captures: &[Pairing]) -> Vec<usize> {
+    let which = |f: &dyn Fn(&Pairing) -> bool| -> Vec<usize> {
+        captures.iter().enumerate().filter(|(_, c)| f(c)).map(|(i, _)| i).collect()
+    };
+    let same_container = match render.container {
+        Some(id) => which(&|c| c.container == Some(id)),
+        None => Vec::new(),
+    };
+    if !same_container.is_empty() {
+        return same_container;
+    }
+    match render.adapter.as_deref() {
+        Some(name) => which(&|c| c.adapter.as_deref() == Some(name)),
+        None => Vec::new(),
+    }
+}
+
+fn pairing(device: &IMMDevice) -> Pairing {
+    // SAFETY: plain call on a live device.
+    let Ok(store) = (unsafe { device.OpenPropertyStore(STGM_READ) }) else {
+        return Pairing::default();
+    };
+    let read = |key: &PROPERTYKEY| -> Option<PROPVARIANT> {
+        // SAFETY: `key` is a valid PROPERTYKEY; the value is ours to clear.
+        unsafe { store.GetValue(key) }.ok()
+    };
+    let mut out = Pairing::default();
+    if let Some(mut v) = read(&PKEY_Device_ContainerId) {
+        // SAFETY: an initialised PROPVARIANT (VT_CLSID; VT_EMPTY fails).
+        out.container =
+            unsafe { PropVariantToGUID(&v) }.ok().map(|g| g.to_u128()).filter(|&id| id != 0 && id != NULL_CONTAINER);
+        // SAFETY: clears the value GetValue gave us, once.
+        let _ = unsafe { PropVariantClear(&mut v) };
+    }
+    if let Some(mut v) = read(&PKEY_DeviceInterface_FriendlyName) {
+        // SAFETY: an initialised PROPVARIANT (VT_LPWSTR; VT_EMPTY fails).
+        if let Ok(pwstr) = unsafe { PropVariantToStringAlloc(&v) } {
+            // SAFETY: a valid NUL-terminated string from COM.
+            out.adapter = unsafe { pwstr.to_string() }.ok().filter(|s| !s.trim().is_empty());
+            // SAFETY: allocated by COM for us, freed once.
+            unsafe { CoTaskMemFree(Some(pwstr.0 as *const c_void)) };
+        }
+        // SAFETY: clears the value GetValue gave us, once.
+        let _ = unsafe { PropVariantClear(&mut v) };
+    }
+    out
+}
+
+/// Whether a session on `device` records (AudioSessionStateActive), this
+/// process's own left out
+fn recording(device: &IMMDevice) -> windows::core::Result<bool> {
+    let own = std::process::id();
+    // SAFETY: activating a documented endpoint service on a live device.
+    let manager = unsafe { device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)? };
+    // SAFETY: plain call on a live session manager.
+    let sessions = unsafe { manager.GetSessionEnumerator()? };
+    // SAFETY: plain call on a live session enumerator.
+    let n = unsafe { sessions.GetCount()? };
+    for s in 0..n {
+        // SAFETY: `s` is within the enumerator's count.
+        let Ok(control) = (unsafe { sessions.GetSession(s) }) else {
+            continue;
+        };
+        // SAFETY: plain call on a live session control.
+        if !unsafe { control.GetState() }.is_ok_and(|state| state == AudioSessionStateActive) {
+            continue;
+        }
+        // A session of several processes answers with one of them
+        let pid = control
+            .cast::<IAudioSessionControl2>()
+            .ok()
+            // SAFETY: plain call on a live session control.
+            .and_then(|c| unsafe { c.GetProcessId() }.ok());
+        if pid != Some(own) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether an application records from the capture endpoints paired with
+/// the render endpoint `render_device_id` (a virtual cable's "CABLE Output"
+/// for its "CABLE Input"): an audio session on one of them in the Active
+/// state, this process's own left out.
+///
+/// Paired: the active capture endpoints in the render endpoint's container
+/// (PKEY_Device_ContainerId; the null container of internal and software
+/// devices pairs nothing), else those of the same adapter
+/// (PKEY_DeviceInterface_FriendlyName). `Ok(None)`: no capture endpoint is
+/// paired with it. An error: the render endpoint or the capture endpoints
+/// cannot be read. COM must be initialised on the calling thread.
+pub fn capture_sessions_active(render_device_id: &str) -> windows::core::Result<Option<bool>> {
+    let enumerator = enumerator()?;
+    let render = pairing(&render_device(&enumerator, Some(render_device_id))?);
+    // SAFETY: plain call on a live enumerator.
+    let devices = unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)? };
+    // SAFETY: plain call on a live collection.
+    let count = unsafe { devices.GetCount()? };
+    let mut captures = Vec::new();
+    for i in 0..count {
+        // SAFETY: `i` is within the collection's count.
+        if let Ok(device) = unsafe { devices.Item(i) } {
+            captures.push((pairing(&device), device));
+        }
+    }
+    let keys: Vec<Pairing> = captures.iter().map(|(p, _)| p.clone()).collect();
+    let paired = paired(&render, &keys);
+    if paired.is_empty() {
+        tracing::trace!("audio_policy: no capture endpoint paired with {render_device_id} ({render:?})");
+        return Ok(None);
+    }
+    for i in paired {
+        // A capture endpoint whose sessions cannot be read counts as idle
+        match recording(&captures[i].1) {
+            Ok(true) => return Ok(Some(true)),
+            Ok(false) => {}
+            Err(e) => tracing::trace!("audio_policy: sessions of capture endpoint {i}: {e}"),
+        }
+    }
+    Ok(Some(false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +638,50 @@ mod tests {
         // Every endpoint has a container ID (real or the null one)
         let hints = endpoint_hints(v.device_id()).unwrap();
         assert!(hints.container_id.is_some(), "{hints:?}");
+    }
+
+    #[test]
+    fn capture_endpoints_pair_by_container_then_adapter() {
+        let ep =
+            |container: Option<u128>, adapter: Option<&str>| Pairing { container, adapter: adapter.map(Into::into) };
+        let headset = ep(Some(7), Some("USB Audio"));
+        let caps = [ep(None, Some("Realtek(R) Audio")), headset.clone(), ep(None, Some("VB-Audio Virtual Cable"))];
+        // The same container: the headset's microphone
+        assert_eq!(paired(&headset, &caps), vec![1]);
+        // No container of its own: the cable's capture side by its adapter
+        assert_eq!(paired(&ep(None, Some("VB-Audio Virtual Cable")), &caps), vec![2]);
+        // A container no capture endpoint has: the adapter decides
+        assert_eq!(paired(&ep(Some(9), Some("Realtek(R) Audio")), &caps), vec![0]);
+        // Nothing in common
+        assert!(paired(&ep(Some(9), Some("HDMI")), &caps).is_empty());
+        assert!(paired(&ep(None, None), &caps).is_empty());
+    }
+
+    /// Prints, for every output device, what pairs it and whether an app
+    /// records from its capture side (VB-CABLE: record "CABLE Output" to
+    /// see Some(true) for "CABLE Input")
+    #[test]
+    #[ignore]
+    fn print_capture_sessions() {
+        let _com = ComApartment::init_mta().unwrap();
+        let enumerator = enumerator().unwrap();
+        // SAFETY: plain calls on a live enumerator and collection.
+        let devices = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).unwrap() };
+        // SAFETY: as above.
+        for i in 0..unsafe { devices.GetCount().unwrap() } {
+            // SAFETY: `i` is within the collection's count.
+            let device = unsafe { devices.Item(i).unwrap() };
+            let id = endpoint_id(&device).unwrap();
+            println!("{id} {:?}: {:?}", pairing(&device), capture_sessions_active(&id));
+        }
+        // SAFETY: as above.
+        let captures = unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE).unwrap() };
+        // SAFETY: as above.
+        for i in 0..unsafe { captures.GetCount().unwrap() } {
+            // SAFETY: `i` is within the collection's count.
+            let device = unsafe { captures.Item(i).unwrap() };
+            println!("capture {} {:?}: {:?}", endpoint_id(&device).unwrap(), pairing(&device), recording(&device));
+        }
     }
 
     #[test]

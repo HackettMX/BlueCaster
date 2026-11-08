@@ -197,6 +197,7 @@ pub fn plan(config: &BroadcastConfig) -> StreamPlan {
         acl: 0xFFFF,
         cis_handle: 0xFFFF,
         channels: vec![ChannelPlan { allocation, source }],
+        source_ase: None,
     };
     let cis = if config.stereo {
         vec![bis(1, LOCATION_FRONT_LEFT, ChannelSource::Left), bis(2, LOCATION_FRONT_RIGHT, ChannelSource::Right)]
@@ -211,6 +212,8 @@ pub fn plan(config: &BroadcastConfig) -> StreamPlan {
         contexts: CONTEXT_MEDIA,
         presentation_delay_us: config.preset.presentation_delay_us,
         cis,
+        source: None,
+        source_note: String::new(),
     }
 }
 

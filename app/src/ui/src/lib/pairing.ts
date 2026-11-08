@@ -78,8 +78,3 @@ export function serviceLabel(s: { uuids: string[]; name: string | null }): strin
     null
   );
 }
-
-/** Hex digits with their bytes in the other order ("0a1b2c" -> "2c1b0a") */
-export function reverseBytes(hex: string): string {
-  return (hex.match(/../g) ?? []).reverse().join("");
-}

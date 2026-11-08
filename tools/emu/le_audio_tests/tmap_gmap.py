@@ -4,7 +4,7 @@ Every emulated sink has a TMAS with TMAP Role UMR (le_audio/tmap_gmap.py);
 GMAS only with --gmap-role. The cases:
 
   tmap-role              BlueCaster logs the sink's "TMAP: UMR"; the sink reads
-                         BlueCaster's TMAS (UMS) and GMAS (UGG, UGG Features 0x03)
+                         BlueCaster's TMAS (CG+UMS) and GMAS (UGG, UGG Features 0x07)
   gmap-low-latency       UGT with the Sink feature + --le-low-latency: GMAP
                          48_3_gr (48 kHz, 7.5 ms, 90 octets) with GMAP's QoS
                          (SDU interval 7500 us, RTN 1, 15 ms, 10 ms
@@ -66,10 +66,10 @@ def check(case, ctx):
         failures.append('BlueCaster did not log the sink\'s TMAP Role ("TMAP: UMR")')
 
     if case.name == 'tmap-role':
-        if 'peer TMAP Role 0x0004 (UMS)' not in sink_log:
-            failures.append('the sink did not read TMAP Role UMS from BlueCaster\'s TMAS')
-        if 'peer GMAP Role 0x01 (UGG), UGG Features 0x03' not in sink_log:
-            failures.append('the sink did not read GMAP Role UGG / UGG Features 0x03 from BlueCaster\'s GMAS')
+        if 'peer TMAP Role 0x0005 (CG+UMS)' not in sink_log:
+            failures.append('the sink did not read TMAP Role CG+UMS from BlueCaster\'s TMAS')
+        if 'peer GMAP Role 0x01 (UGG), UGG Features 0x07' not in sink_log:
+            failures.append('the sink did not read GMAP Role UGG / UGG Features 0x07 from BlueCaster\'s GMAS')
         if 'GMAP: low latency off' not in log:
             failures.append('no "GMAP: low latency off" in the log')
 

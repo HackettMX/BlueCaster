@@ -369,8 +369,12 @@ pub fn chip_supported(vendor: ChipVendor, vid: u16, pid: u16) -> bool {
 }
 
 /// Tag shown after one adapter's name: its vendor's, except "experimental"
-/// for a chip in [`LOADER_CHIPS`]
+/// for a chip in [`LOADER_CHIPS`] and a Realtek chip whose firmware comes
+/// from Realtek's Windows driver (crate::realtek_btnic)
 pub fn chip_support_tag(vendor: ChipVendor, vid: u16, pid: u16) -> Option<&'static str> {
+    if vendor == ChipVendor::Realtek && crate::realtek_btnic::chip(vid, pid).is_some() {
+        return Some("experimental");
+    }
     tag_in(LOADER_CHIPS, vendor, vid, pid)
 }
 
@@ -556,6 +560,11 @@ pub fn company_name(company_id: u16) -> Option<&'static str> {
 pub fn display_name(vid: u16, pid: u16, realtek_pid: Option<u16>, vendor: ChipVendor) -> String {
     if let Some(chip) = realtek_pid.and_then(realtek_chip_name) {
         return format!("{chip} (0x{vid:04X}:0x{pid:04X})");
+    }
+    if vendor == ChipVendor::Realtek
+        && let Some((chip, _)) = crate::realtek_btnic::chip(vid, pid)
+    {
+        return format!("{chip} (0x{vid:04X}:0x{pid:04X}) [experimental]");
     }
     if vendor != ChipVendor::Unknown && vendor != ChipVendor::Realtek {
         let tag = chip_support_tag(vendor, vid, pid).map(|t| format!(" [{t}]")).unwrap_or_default();

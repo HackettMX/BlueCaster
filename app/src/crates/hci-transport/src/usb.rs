@@ -2,7 +2,8 @@
 //!
 //! Interface 0 carries HCI: commands on the default control pipe (class
 //! request to the device), events on the interrupt IN pipe, ACL data on the
-//! bulk pipes. SCO (interface 1) is not used by an A2DP source. HCI ISO data
+//! bulk pipes. SCO data (the headset microphone) uses the isochronous pipes
+//! of interface 1, see "SCO" below. HCI ISO data
 //! (LE Audio) shares the bulk pipes with ACL, as in v1 and Linux btusb: out
 //! through the ACL slot; in, the ACL reader delivers it as ACL and BTstack
 //! tells the two apart by the connection handle (a CIS handle).
@@ -49,20 +50,61 @@
 //! completion, so every ACL fragment took two thread hand-overs and the
 //! pipe sat idle in between. The controller's ACL / ISO buffer count, which
 //! BTstack keeps to, bounds how many packets are queued.
+//!
+//! # SCO
+//!
+//! A port of BTstack's platform/windows/hci_transport_h2_winusb.c (USB SCO
+//! mode, [`HciBackend::is_h2`]), with the WinUSB isochronous calls in
+//! win-sys (`usb_isoch`). Interface 1 is claimed at open when the adapter
+//! has it; BTstack's set_sco_config selects its alternate setting for the
+//! SCO links (8-bit voice: 1, 2, 3 for one to three links; 16-bit: 2, 4,
+//! 5) and starts the "usb-sco" thread, or stops it and selects alternate
+//! setting 0 when the last link is gone. The thread:
+//! - keeps [`SCO_IN_TRANSFERS`] reads of 3 ms each in flight
+//!   (WinUsb_ReadIsochPipeAsap, continuing the stream); the IN data is a
+//!   byte stream of SCO packets (handle, length, payload) cut into
+//!   isochronous packets, reassembled into whole SCO packets for BTstack
+//! - writes each SCO packet BTstack sends (header included, 3 ms of audio:
+//!   one isochronous packet per frame at full speed) as one
+//!   WinUsb_WriteIsochPipeAsap, up to [`SCO_OUT_SLOTS`] in flight
+//!
+//! BTstack's send token in this mode is HCI_EVENT_SCO_CAN_SEND_NOW from the
+//! transport: `send` copies the packet, reports it sent and hands out the
+//! token again while fewer than [`SCO_OUT_SLOTS`] packets are queued or in
+//! flight; otherwise the thread does when a write completes.
+//!
+//! Only a backend made [`UsbTransport::with_sco`] (the stack offers voice)
+//! is H2 and claims interface 1 (is_h2 is read before open); otherwise SCO
+//! is left to BTstack's plain path, which nothing uses. Without a usable
+//! interface 1, `can_send` refuses SCO, SCO packets sent anyway are dropped
+//! (and reported sent, so BTstack's buffer is free again) and
+//! [`HciBackend::sco_ready`] is false, so bt-host gives the link up.
+//!
+//! Full speed (the usual Bluetooth adapter) has one isochronous packet per
+//! 1 ms frame: a read is 3 packets, a write of one SCO packet is as many
+//! packets as its length takes at the pipe's packet size (3 for the
+//! alternate setting BTstack's payload sizes are made for). High speed has
+//! one packet per service interval (bInterval) and WinUSB wants whole 1 ms
+//! frames of packets per read ([`win_sys::usb_isoch::packets_for`]); writes
+//! are left as on full speed (not verified on a high-speed adapter).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
-use btstack_sys::consts::{HCI_ACL_DATA_PACKET, HCI_COMMAND_DATA_PACKET, HCI_EVENT_PACKET, HCI_ISO_DATA_PACKET};
+use btstack_sys::consts::{
+    HCI_ACL_DATA_PACKET, HCI_COMMAND_DATA_PACKET, HCI_EVENT_PACKET, HCI_EVENT_SCO_CAN_SEND_NOW, HCI_ISO_DATA_PACKET,
+    HCI_SCO_DATA_PACKET,
+};
 use btstack_sys::{ControlData, ControlKind, ControlRecipient, ControlRequest, HciBackend, Upstream, UsbDescriptors};
 use nusb::descriptors::TransferType;
 use nusb::transfer::{Buffer, Bulk, ControlIn, ControlOut, ControlType, In, Interrupt, Out, Recipient, TransferError};
-use nusb::{Device, DeviceInfo, Endpoint, Interface, MaybeFuture};
+use nusb::{Device, DeviceInfo, Endpoint, Interface, MaybeFuture, Speed};
+use win_sys::usb_isoch::{self, Event, IsochIn, IsochOut, Win32Error};
 
 use crate::reassembly::Reassembler;
 
@@ -87,15 +129,129 @@ const ACL_TRANSFER_SIZE: usize = 4096;
 /// Bulk OUT transfers kept in flight
 const ACL_OUT_TRANSFERS: usize = 8;
 
+/// SCO: the interface with the isochronous pipes
+const SCO_INTERFACE: u8 = 1;
+/// SCO IN transfers kept in flight (BTstack's ISOC_BUFFERS), 3 ms each
+const SCO_IN_TRANSFERS: usize = 8;
+/// Milliseconds of stream per SCO transfer: BTstack's USB SCO mode sends 3 ms
+/// of audio per SCO packet
+const SCO_TRANSFER_MS: u32 = 3;
+/// SCO packets queued or in flight at most (BTstack's SCO_RING_BUFFER_COUNT:
+/// 60 ms)
+const SCO_OUT_SLOTS: usize = 20;
+/// Set-interface retries on a busy device, and the pause between them
+const SCO_ALT_TRIES: u32 = 10;
+const SCO_ALT_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
+/// The longest SCO packet: header and a 255-byte payload
+const SCO_OUT_SLOT_LEN: usize = 3 + 255;
+/// Consecutive failed SCO reads after which the thread logs a warning
+const SCO_IN_WARN_ERRORS: u32 = 50;
+
 /// The writer slot of an outgoing packet: 0 commands (control pipe), 1 ACL
-/// and ISO data (bulk OUT pipe). BTstack sends one command at a time; ACL
-/// and ISO packets as the controller's buffers allow.
+/// and ISO data (bulk OUT pipe), 2 SCO data (isochronous OUT pipe of
+/// interface 1). BTstack sends one command at a time; ACL and ISO packets
+/// as the controller's buffers allow, SCO packets as the SCO send token
+/// allows (module docs).
 fn out_slot(packet_type: u8) -> Option<usize> {
     match packet_type {
         HCI_COMMAND_DATA_PACKET => Some(0),
         HCI_ACL_DATA_PACKET | HCI_ISO_DATA_PACKET => Some(1),
+        HCI_SCO_DATA_PACKET => Some(2),
         _ => None,
     }
+}
+
+// ---- SCO: pure parts ----
+
+/// Interface 1's alternate setting for `connections` SCO links (Bluetooth
+/// Core, USB transport: 1 to 3 links of 8 kHz voice, 8 or 16 bit; BTstack's
+/// alt_setting_8_bit / alt_setting_16_bit, so the 3 ms payloads BTstack
+/// sends fit). Voice setting bit 0x0020: 16-bit samples. None: no links
+/// (alternate setting 0); more than three take the three-link setting.
+fn sco_alt_setting(voice_setting: u16, connections: u8) -> Option<u8> {
+    let i = (connections.checked_sub(1)? as usize).min(2);
+    Some(if voice_setting & 0x0020 != 0 { [2, 4, 5][i] } else { [1, 2, 3][i] })
+}
+
+/// The isochronous packet size of alternate settings 1 to 6 as the USB
+/// transport defines them (BTstack's iso_packet_size_for_alt_setting), for
+/// a pipe whose size cannot be read
+fn sco_packet_size(alt: u8) -> usize {
+    [0, 9, 17, 25, 33, 49, 63].get(alt as usize).copied().unwrap_or(63)
+}
+
+/// Feeds the isochronous packets of one IN transfer into the SCO stream:
+/// whole SCO packets go to `deliver`. A failed packet drops the partial SCO
+/// packet (what follows cannot continue it). Returns the failed packets.
+fn sco_in_transfer<'a>(
+    sco: &mut Reassembler,
+    packets: impl IntoIterator<Item = Result<&'a [u8], i32>>,
+    mut deliver: impl FnMut(&[u8]),
+) -> usize {
+    let mut failed = 0;
+    for p in packets {
+        match p {
+            Ok(data) if !data.is_empty() => sco.push(data, &mut deliver),
+            Ok(_) => {}
+            Err(_) => {
+                failed += 1;
+                sco.reset();
+            }
+        }
+    }
+    failed
+}
+
+/// Isochronous packets a write of `len` bytes takes at `packet_len` bytes
+/// per packet (WinUSB cuts writes at MaximumBytesPerInterval)
+fn sco_out_packets(len: usize, packet_len: usize) -> usize {
+    len.div_ceil(packet_len.max(1))
+}
+
+/// SCO packets BTstack handed over that are not written yet (queued or in
+/// flight), at most `cap`: BTstack gets its send token back while there is
+/// room
+struct ScoCredits {
+    outstanding: AtomicUsize,
+    cap: usize,
+}
+
+impl ScoCredits {
+    const fn new(cap: usize) -> ScoCredits {
+        ScoCredits { outstanding: AtomicUsize::new(0), cap }
+    }
+
+    fn room(&self) -> bool {
+        self.outstanding.load(Ordering::Acquire) < self.cap
+    }
+
+    /// A packet accepted; whether there is room for another
+    fn take(&self) -> bool {
+        self.outstanding.fetch_add(1, Ordering::AcqRel) + 1 < self.cap
+    }
+
+    /// A packet written (or dropped); whether there is room now
+    fn give(&self) -> bool {
+        let mut n = self.outstanding.load(Ordering::Acquire);
+        loop {
+            let next = n.saturating_sub(1);
+            match self.outstanding.compare_exchange_weak(n, next, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return next < self.cap,
+                Err(now) => n = now,
+            }
+        }
+    }
+
+    fn clear(&self) {
+        self.outstanding.store(0, Ordering::Release);
+    }
+}
+
+/// Win32 errors after which the WinUSB handle no longer reaches the adapter
+/// (as [`device_gone`]): ERROR_INVALID_HANDLE, ERROR_FILE_NOT_FOUND,
+/// ERROR_BAD_COMMAND, ERROR_NO_SUCH_DEVICE, ERROR_DEVICE_NOT_CONNECTED
+fn sco_device_gone(e: Win32Error) -> bool {
+    matches!(e, 6 | 2 | 22 | 433 | 1167)
 }
 
 /// VID and PID of the adapter opened last (what a stack runs on)
@@ -363,16 +519,506 @@ struct Opened {
     /// HCI Reset on close
     bootloader: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    /// Interface 1 (SCO), when the adapter has it and it could be claimed
+    sco: Option<Sco>,
+}
+
+/// What `send` and the SCO thread share
+struct ScoShared {
+    /// SCO packets from BTstack, not yet handed to WinUSB
+    queue: Mutex<VecDeque<Vec<u8>>>,
+    /// Buffers of written packets, reused
+    free: Mutex<Vec<Vec<u8>>>,
+    credits: ScoCredits,
+    /// The pipes run (an alternate setting with SCO bandwidth is selected
+    /// and the thread is up)
+    running: AtomicBool,
+    stop: AtomicBool,
+    /// Wakes the thread: a packet queued, or stop
+    wake: Event,
+}
+
+/// SCO over interface 1's isochronous pipes (module docs)
+struct Sco {
+    interface: Interface,
+    high_speed: bool,
+    shared: Arc<ScoShared>,
+    /// The alternate setting in use, None: 0 (no SCO bandwidth)
+    alt: Option<u8>,
+    thread: Option<JoinHandle<()>>,
+    /// Packets dropped because the pipes did not run (logged at stop)
+    dropped: u64,
+}
+
+/// An isochronous endpoint of an alternate setting
+#[derive(Debug, Clone, Copy)]
+struct IsoEndpoint {
+    address: u8,
+    /// Bytes per service interval: one isochronous packet
+    packet_len: usize,
+    /// bInterval as in the descriptor
+    interval: u8,
+}
+
+impl Sco {
+    /// Claims interface 1 if the adapter has isochronous endpoints there;
+    /// None (logged) otherwise
+    fn claim(device: &Device) -> Option<Sco> {
+        let has_iso = device.active_configuration().ok().is_some_and(|c| {
+            c.interface_alt_settings().any(|a| {
+                a.interface_number() == SCO_INTERFACE
+                    && a.endpoints().any(|e| e.transfer_type() == TransferType::Isochronous)
+            })
+        });
+        if !has_iso {
+            tracing::info!(target: "hci", "USB: no isochronous interface {SCO_INTERFACE}: no SCO audio on this adapter");
+            return None;
+        }
+        let interface = match device.claim_interface(SCO_INTERFACE).wait() {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!(target: "hci", "USB: cannot claim interface {SCO_INTERFACE} (SCO audio): {e}");
+                return None;
+            }
+        };
+        // A session that ended without stopping may have left SCO bandwidth
+        if let Err(e) = interface.set_alt_setting(0).wait() {
+            tracing::debug!("USB: interface {SCO_INTERFACE} alt 0: {e}");
+        }
+        let speed = device.speed();
+        let high_speed = matches!(speed, Some(Speed::High | Speed::Super | Speed::SuperPlus));
+        tracing::debug!(
+            "USB: interface {SCO_INTERFACE} claimed for SCO (speed {speed:?}, {} speed timing)",
+            if high_speed { "high" } else { "full" }
+        );
+        let shared = Arc::new(ScoShared {
+            queue: Mutex::new(VecDeque::with_capacity(SCO_OUT_SLOTS)),
+            free: Mutex::new(Vec::with_capacity(SCO_OUT_SLOTS)),
+            credits: ScoCredits::new(SCO_OUT_SLOTS),
+            running: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            wake: match Event::new(false) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(target: "hci", "USB: no event for the SCO thread (error {e}): no SCO audio");
+                    return None;
+                }
+            },
+        });
+        Some(Sco { interface, high_speed, shared, alt: None, thread: None, dropped: 0 })
+    }
+
+    fn running(&self) -> bool {
+        self.shared.running.load(Ordering::Acquire)
+    }
+
+    /// The isochronous IN and OUT endpoints of alternate setting `alt`:
+    /// WinUSB's pipe information, else the descriptors
+    fn endpoints(&self, alt: u8) -> Result<(IsoEndpoint, IsoEndpoint), String> {
+        let mut from_descriptors = (None, None);
+        if let Some(a) = self.interface.descriptors().find(|a| a.alternate_setting() == alt) {
+            for e in a.endpoints().filter(|e| e.transfer_type() == TransferType::Isochronous) {
+                let ep = IsoEndpoint {
+                    address: e.address(),
+                    packet_len: e.max_packet_size() * e.packets_per_microframe() as usize,
+                    interval: e.interval(),
+                };
+                let side = if e.address() & 0x80 != 0 { &mut from_descriptors.0 } else { &mut from_descriptors.1 };
+                side.get_or_insert(ep);
+            }
+        }
+        let (Some(mut ep_in), Some(mut ep_out)) = from_descriptors else {
+            return Err(format!("interface {SCO_INTERFACE} alt {alt} lacks isochronous IN / OUT endpoints"));
+        };
+        match usb_isoch::pipes(&self.interface, alt) {
+            Ok(pipes) => {
+                for p in pipes.iter().filter(|p| p.isochronous) {
+                    tracing::debug!(
+                        "USB: interface {SCO_INTERFACE} alt {alt}: pipe 0x{:02x}, max packet {}, interval {}, {} bytes per interval",
+                        p.id,
+                        p.max_packet_size,
+                        p.interval,
+                        p.max_bytes_per_interval
+                    );
+                    for ep in [&mut ep_in, &mut ep_out] {
+                        if ep.address == p.id && p.max_bytes_per_interval > 0 {
+                            ep.packet_len = p.max_bytes_per_interval as usize;
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::debug!("USB: pipe information of interface {SCO_INTERFACE} alt {alt}: error {e}"),
+        }
+        for ep in [&mut ep_in, &mut ep_out] {
+            if ep.packet_len == 0 {
+                ep.packet_len = sco_packet_size(alt);
+            }
+        }
+        Ok((ep_in, ep_out))
+    }
+
+    /// Selects alternate setting `alt`. WinUSB answers ERROR_BUSY (170)
+    /// now and then when an HCI command (a control transfer on the same
+    /// device) is in flight: tried again a few times
+    fn select_alt(&self, alt: u8) -> Result<(), String> {
+        let mut tries = 0;
+        loop {
+            match self.interface.set_alt_setting(alt).wait() {
+                Ok(()) => return Ok(()),
+                Err(e) if tries < SCO_ALT_TRIES => {
+                    tries += 1;
+                    tracing::debug!("USB: alt {alt} of interface {SCO_INTERFACE}: {e} (try {tries})");
+                    std::thread::sleep(SCO_ALT_RETRY);
+                }
+                Err(e) => return Err(format!("cannot select alt {alt}: {e}")),
+            }
+        }
+    }
+
+    /// Selects alternate setting `alt` and starts the pipes and the thread
+    fn start(&mut self, alt: u8, upstream: &Upstream) -> Result<(), String> {
+        self.select_alt(alt)?;
+        self.alt = Some(alt);
+        let (ep_in, ep_out) = self.endpoints(alt)?;
+        let packets = usb_isoch::packets_for(self.high_speed, ep_in.interval, SCO_TRANSFER_MS);
+        // Buffers are registered after the alternate setting is selected
+        // (WinUSB registers them for the pipes of the current one)
+        let input = IsochIn::new(&self.interface, ep_in.address, SCO_IN_TRANSFERS, packets, ep_in.packet_len)
+            .map_err(|e| format!("cannot register the SCO IN buffer on 0x{:02x}: error {e}", ep_in.address))?;
+        let output = IsochOut::new(&self.interface, ep_out.address, SCO_OUT_SLOTS, SCO_OUT_SLOT_LEN)
+            .map_err(|e| format!("cannot register the SCO OUT buffer on 0x{:02x}: error {e}", ep_out.address))?;
+        let s = &self.shared;
+        s.queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        s.credits.clear();
+        s.stop.store(false, Ordering::Release);
+        s.running.store(true, Ordering::Release);
+        tracing::info!(
+            target: "hci",
+            "USB: SCO on interface {SCO_INTERFACE} alt {alt}: in 0x{:02x} ({SCO_IN_TRANSFERS} x {packets} packets of {} B), \
+             out 0x{:02x} (packets of {} B, up to {SCO_OUT_SLOTS} SCO packets queued)",
+            ep_in.address,
+            ep_in.packet_len,
+            ep_out.address,
+            ep_out.packet_len
+        );
+        let (shared, upstream) = (s.clone(), upstream.clone());
+        let out_packet_len = ep_out.packet_len;
+        let thread = std::thread::Builder::new()
+            .name("usb-sco".into())
+            .spawn(move || {
+                // Audio has a deadline, as the ACL writer's media data
+                let _priority = crate::acl_out_priority();
+                sco_loop(input, output, out_packet_len, &shared, &upstream);
+            })
+            .map_err(|e| {
+                s.running.store(false, Ordering::Release);
+                format!("cannot start the SCO thread: {e}")
+            })?;
+        self.thread = Some(thread);
+        Ok(())
+    }
+
+    /// Stops the thread (it cancels its transfers and unregisters the
+    /// buffers) and selects alternate setting 0
+    fn stop(&mut self) {
+        let s = &self.shared;
+        s.running.store(false, Ordering::Release);
+        s.stop.store(true, Ordering::Release);
+        s.wake.set();
+        if let Some(t) = self.thread.take()
+            && t.join().is_err()
+        {
+            tracing::debug!("USB: the SCO thread panicked");
+        }
+        s.queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        s.credits.clear();
+        if self.dropped > 0 {
+            tracing::debug!("USB: {} SCO packet(s) dropped while the pipes did not run", self.dropped);
+            self.dropped = 0;
+        }
+        if self.alt.take().is_some() {
+            match self.select_alt(0) {
+                Ok(()) => tracing::info!(target: "hci", "USB: SCO stopped (interface {SCO_INTERFACE} alt 0)"),
+                Err(e) => tracing::warn!(target: "hci", "USB: SCO stopped, but alt 0 failed: {e}"),
+            }
+        }
+    }
+
+    /// BTstack's set_sco_config: the alternate setting for the links, and
+    /// the pipes started, restarted or stopped for it
+    fn configure(&mut self, voice_setting: u16, connections: u8, upstream: &Upstream) {
+        let alt = sco_alt_setting(voice_setting, connections);
+        if alt == self.alt && (alt.is_none() || self.running()) {
+            return;
+        }
+        self.stop();
+        let Some(alt) = alt else { return };
+        if let Err(e) = self.start(alt, upstream) {
+            tracing::warn!(target: "hci", "USB: SCO audio cannot start: {e}");
+            self.stop();
+        }
+    }
+
+    /// `send` of a SCO packet (module docs)
+    fn send(&mut self, packet: &[u8], upstream: &Upstream) {
+        if !self.running() || packet.len() < 3 || packet.len() > SCO_OUT_SLOT_LEN {
+            self.dropped += 1;
+            tracing::trace!("USB: SCO packet of {} bytes dropped (pipes running {})", packet.len(), self.running());
+            upstream.packet_sent();
+            return;
+        }
+        let s = &self.shared;
+        let mut buf = s.free.lock().unwrap_or_else(|e| e.into_inner()).pop().unwrap_or_default();
+        buf.clear();
+        buf.extend_from_slice(packet);
+        // Counted before the thread can see it (it gives the credit back)
+        let room = s.credits.take();
+        s.queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(buf);
+        s.wake.set();
+        // Copied: BTstack may reuse its buffer
+        upstream.packet_sent();
+        if room {
+            sco_can_send_now(upstream);
+        }
+    }
+}
+
+/// BTstack's SCO send token (USB SCO mode)
+fn sco_can_send_now(upstream: &Upstream) {
+    upstream.deliver(HCI_EVENT_PACKET, &[HCI_EVENT_SCO_CAN_SEND_NOW, 0]);
+}
+
+/// The SCO IN stream: the reads in the order they were submitted (that is
+/// the order they complete in), the slots whose resubmit failed, and which
+/// reads follow a gap in the stream
+struct ScoReader {
+    input: IsochIn,
+    order: VecDeque<usize>,
+    idle: Vec<usize>,
+    /// Submitted as soon as possible rather than right after the read
+    /// before: data between the two was not read
+    gap_before: Vec<bool>,
+}
+
+impl ScoReader {
+    fn new(input: IsochIn) -> ScoReader {
+        let n = input.transfers();
+        ScoReader { input, order: VecDeque::with_capacity(n), idle: (0..n).collect(), gap_before: vec![false; n] }
+    }
+
+    /// Submits the idle reads: right after the last one in flight, or, with
+    /// none in flight (the start, or the stream broke), as soon as possible.
+    /// Error: device gone.
+    fn submit_idle(&mut self) -> Result<(), Win32Error> {
+        while let Some(&slot) = self.idle.first() {
+            let follow = !self.order.is_empty();
+            let mut result = self.input.submit(slot, follow);
+            let mut gap = false;
+            if result.is_err() && follow {
+                // The stream cannot be continued (a read came back late):
+                // start it again behind the reads in flight
+                result = self.input.submit(slot, false);
+                gap = true;
+            }
+            match result {
+                Ok(()) => {
+                    self.idle.remove(0);
+                    self.order.push_back(slot);
+                    self.gap_before[slot] = gap;
+                }
+                Err(e) => {
+                    tracing::trace!("USB: SCO read {slot} could not be submitted: error {e}");
+                    return if sco_device_gone(e) { Err(e) } else { Ok(()) };
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The read to wait for
+    fn oldest(&self) -> Option<usize> {
+        self.order.front().copied()
+    }
+
+    /// The oldest read, if it has completed: its slot (idle again), its
+    /// result and whether the stream had a gap before it
+    fn complete(&mut self) -> Option<(usize, Result<(), Win32Error>, bool)> {
+        let slot = self.oldest()?;
+        let result = self.input.complete(slot)?;
+        self.order.pop_front();
+        self.idle.push(slot);
+        Some((slot, result, std::mem::take(&mut self.gap_before[slot])))
+    }
+}
+
+/// SCO counters since the last debug summary
+#[derive(Default)]
+struct ScoStats {
+    in_packets: u64,
+    in_bytes: u64,
+    in_errors: u64,
+    bad_iso_packets: u64,
+    out_packets: u64,
+    out_errors: u64,
+}
+
+/// The "usb-sco" thread (module docs). Waits for a queued packet, the
+/// oldest read and the oldest write, in that order of the wait list.
+fn sco_loop(input: IsochIn, mut output: IsochOut, out_packet_len: usize, shared: &ScoShared, upstream: &Upstream) {
+    let mut sco = Reassembler::new(HCI_SCO_DATA_PACKET);
+    let mut reader = ScoReader::new(input);
+    let n_out = output.slots();
+    let (mut out_next, mut out_oldest, mut out_in_flight) = (0usize, 0usize, 0usize);
+    let mut in_errors_in_a_row = 0u32;
+    let mut stats = ScoStats::default();
+    let mut stats_at = Instant::now();
+    let mut logged_out_layout = false;
+    tracing::debug!("USB: SCO thread started ({} reads, {n_out} write slots)", reader.idle.len());
+    'run: while !shared.stop.load(Ordering::Acquire) {
+        if stats_at.elapsed() >= STATS_EVERY {
+            tracing::debug!(
+                "USB: SCO last {:.1} s: in {} packets ({} B), out {}, errors in {} out {}, failed isochronous packets {}",
+                stats_at.elapsed().as_secs_f32(),
+                stats.in_packets,
+                stats.in_bytes,
+                stats.out_packets,
+                stats.in_errors,
+                stats.out_errors,
+                stats.bad_iso_packets
+            );
+            stats = ScoStats::default();
+            stats_at = Instant::now();
+        }
+        // Reads: every slot in flight
+        if let Err(e) = reader.submit_idle() {
+            tracing::debug!("USB: SCO read: error {e}, the adapter is gone");
+            break;
+        }
+        // Queued packets into free write slots (they complete in slot order)
+        while out_in_flight < n_out {
+            let Some(packet) = shared.queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front() else { break };
+            if !logged_out_layout {
+                logged_out_layout = true;
+                tracing::debug!(
+                    "USB: SCO out: {}-byte packets, {} isochronous packet(s) of {out_packet_len} B each",
+                    packet.len(),
+                    sco_out_packets(packet.len(), out_packet_len)
+                );
+            }
+            let result = output.submit(out_next, &packet, out_in_flight > 0);
+            shared.free.lock().unwrap_or_else(|e| e.into_inner()).push(packet);
+            match result {
+                Ok(()) => {
+                    out_in_flight += 1;
+                    out_next = (out_next + 1) % n_out;
+                }
+                Err(e) => {
+                    // The slot stays free for the next packet
+                    stats.out_errors += 1;
+                    tracing::debug!("USB: SCO write could not be submitted: error {e}, packet dropped");
+                    if shared.credits.give() {
+                        sco_can_send_now(upstream);
+                    }
+                    if sco_device_gone(e) {
+                        break 'run;
+                    }
+                }
+            }
+        }
+        let (woken, in_index, out_index) = {
+            let mut handles = vec![shared.wake.wait_handle()];
+            let in_index = reader.oldest().map(|slot| {
+                handles.push(reader.input.wait_handle(slot));
+                handles.len() - 1
+            });
+            let out_index = (out_in_flight > 0).then(|| {
+                handles.push(output.wait_handle(out_oldest));
+                handles.len() - 1
+            });
+            (usb_isoch::wait_any(&handles, POLL), in_index, out_index)
+        };
+        let Some(woken) = woken else { continue };
+        if Some(woken) == in_index {
+            let Some((slot, result, gap)) = reader.complete() else { continue };
+            if gap {
+                sco.reset();
+            }
+            match result {
+                Ok(()) => {
+                    in_errors_in_a_row = 0;
+                    let (mut n, mut bytes) = (0u64, 0u64);
+                    let failed = sco_in_transfer(&mut sco, reader.input.packets(slot), |p| {
+                        n += 1;
+                        bytes += p.len() as u64;
+                        upstream.deliver(HCI_SCO_DATA_PACKET, p)
+                    });
+                    stats.in_packets += n;
+                    stats.in_bytes += bytes;
+                    stats.bad_iso_packets += failed as u64;
+                }
+                Err(_) if shared.stop.load(Ordering::Acquire) => break,
+                Err(e) => {
+                    stats.in_errors += 1;
+                    in_errors_in_a_row += 1;
+                    sco.reset();
+                    if sco_device_gone(e) {
+                        tracing::debug!("USB: SCO read: error {e}, the adapter is gone");
+                        break;
+                    }
+                    if in_errors_in_a_row == SCO_IN_WARN_ERRORS {
+                        tracing::warn!(target: "hci", "USB: SCO reads keep failing (error {e})");
+                    } else {
+                        tracing::trace!("USB: SCO read {slot} failed: error {e}");
+                    }
+                }
+            }
+        } else if Some(woken) == out_index {
+            let Some(result) = output.complete(out_oldest) else { continue };
+            out_in_flight -= 1;
+            out_oldest = (out_oldest + 1) % n_out;
+            match result {
+                Ok(_) => stats.out_packets += 1,
+                Err(_) if shared.stop.load(Ordering::Acquire) => break,
+                Err(e) => {
+                    stats.out_errors += 1;
+                    tracing::trace!("USB: SCO write failed: error {e}");
+                    if sco_device_gone(e) {
+                        tracing::debug!("USB: SCO write: error {e}, the adapter is gone");
+                        break;
+                    }
+                }
+            }
+            if shared.credits.give() && shared.running.load(Ordering::Acquire) {
+                sco_can_send_now(upstream);
+            }
+        }
+    }
+    shared.running.store(false, Ordering::Release);
+    let (in_ok, out_ok) = (reader.input.abort(), output.abort());
+    tracing::debug!(
+        "USB: SCO thread stopped (stop flag {}, every transfer returned: in {in_ok}, out {out_ok})",
+        shared.stop.load(Ordering::Acquire)
+    );
 }
 
 pub struct UsbTransport {
     selector: UsbSelector,
     opened: Option<Opened>,
+    /// SCO over interface 1 wanted (the stack offers voice): an H2
+    /// transport, interface 1 claimed at open
+    sco: bool,
 }
 
 impl UsbTransport {
     pub fn new(selector: UsbSelector) -> UsbTransport {
-        UsbTransport { selector, opened: None }
+        UsbTransport { selector, opened: None, sco: false }
+    }
+
+    /// SCO audio over interface 1 (module docs, SCO); off by default. Set
+    /// before the transport is installed: BTstack reads `is_h2` then.
+    pub fn with_sco(mut self, sco: bool) -> UsbTransport {
+        self.sco = sco;
+        self
     }
 
     /// The WinUSB adapters the selector takes, in enumeration order
@@ -427,6 +1073,32 @@ impl UsbTransport {
             ),
             None => "no Bluetooth adapter with the WinUSB driver found".into(),
         })
+    }
+}
+
+const MEDIATEK_VID: u16 = 0x0E8D;
+
+/// GET_STATUS of an endpoint: halted, or no answer
+fn halted(interface: &Interface, addr: u8) -> bool {
+    let status = interface
+        .control_in(
+            ControlIn {
+                control_type: ControlType::Standard,
+                recipient: Recipient::Endpoint,
+                request: 0x00,
+                value: 0,
+                index: addr.into(),
+                length: 2,
+            },
+            COMMAND_TIMEOUT,
+        )
+        .wait();
+    match status {
+        Ok(s) => s.first().is_some_and(|b| b & 1 != 0),
+        Err(e) => {
+            tracing::debug!("USB: GET_STATUS of endpoint 0x{addr:02x}: {e}");
+            true
+        }
     }
 }
 
@@ -631,18 +1303,26 @@ impl HciBackend for UsbTransport {
         );
         // A halted endpoint or a data toggle left from an earlier session
         // keeps the controller from answering HCI Reset
+        // A MediaTek controller seems to keep its data toggle on a clear: a
+        // clear of a running pipe cost the first event after a restart
+        // (#86). Its pipes are cleared only when halted.
+        let keep = |addr: u8| vid == MEDIATEK_VID && !halted(&interface, addr);
         for (name, r) in [
-            ("event", event_in.clear_halt().wait()),
-            ("ACL in", acl_in.clear_halt().wait()),
-            ("ACL out", acl_out.clear_halt().wait()),
+            ("event", (!keep(event_addr)).then(|| event_in.clear_halt().wait())),
+            ("ACL in", (!keep(acl_in_addr)).then(|| acl_in.clear_halt().wait())),
+            ("ACL out", (!keep(acl_out_addr)).then(|| acl_out.clear_halt().wait())),
         ] {
-            if let Err(e) = r {
-                tracing::warn!(target: "hci", "USB: clearing the {name} pipe failed: {e}");
-                tracing::debug!("USB: clear halt on the {name} pipe: {e:?}");
-            } else {
-                tracing::debug!("USB: {name} pipe cleared");
+            match r {
+                Some(Err(e)) => {
+                    tracing::warn!(target: "hci", "USB: clearing the {name} pipe failed: {e}");
+                    tracing::debug!("USB: clear halt on the {name} pipe: {e:?}");
+                }
+                Some(Ok(())) => tracing::debug!("USB: {name} pipe cleared"),
+                None => tracing::debug!("USB: {name} pipe not halted, left as it is"),
             }
         }
+        // Interface 1 only when the stack offers voice
+        let sco = if self.sco { Sco::claim(&device) } else { None };
         STATS.take();
         tracing::info!(
             target: "hci",
@@ -710,14 +1390,20 @@ impl HciBackend for UsbTransport {
             upstream,
             bootloader,
             threads,
+            sco,
         });
         Ok(())
     }
 
     fn close(&mut self) {
-        let Some(opened) = self.opened.take() else { return };
+        let Some(mut opened) = self.opened.take() else { return };
         tracing::debug!("USB: closing; stopping {} I/O thread(s)", opened.threads.len());
         let started = Instant::now();
+        // Before interface 1 goes: its buffers are unregistered once the
+        // SCO transfers have come back
+        if let Some(sco) = opened.sco.as_mut() {
+            sco.stop();
+        }
         opened.stop.store(true, Ordering::Release);
         // The command writer finishes the command it has (bounded by its
         // timeout); the ACL writer cancels its transfers
@@ -817,17 +1503,38 @@ impl HciBackend for UsbTransport {
         Some(descriptors(&o.device))
     }
 
+    fn is_h2(&self) -> bool {
+        // Decided before open: with SCO wanted (module docs, SCO)
+        self.sco
+    }
+
+    fn sco_ready(&self) -> bool {
+        self.opened.as_ref().and_then(|o| o.sco.as_ref()).is_some_and(Sco::running)
+    }
+
+    fn set_sco_config(&mut self, voice_setting: u16, connections: u8) {
+        let Some(o) = &mut self.opened else { return };
+        match &mut o.sco {
+            Some(sco) => sco.configure(voice_setting, connections, &o.upstream),
+            None if connections > 0 => {
+                tracing::warn!(target: "hci", "USB: SCO link up, but the adapter's SCO interface is not available")
+            }
+            None => {}
+        }
+    }
+
     fn can_send(&mut self, packet_type: u8) -> bool {
         let Some(o) = &self.opened else { return false };
         match out_slot(packet_type) {
             Some(0) => !o.command_in_flight.load(Ordering::Acquire),
-            Some(_) => true,
+            Some(1) => true,
+            Some(_) => o.sco.as_ref().is_some_and(|s| s.running() && s.shared.credits.room()),
             None => false,
         }
     }
 
     fn send(&mut self, packet_type: u8, packet: &[u8]) -> bool {
-        let Some(o) = &self.opened else { return false };
+        let Some(o) = &mut self.opened else { return false };
         match out_slot(packet_type) {
             Some(0) => {
                 tracing::trace!("USB: command 0x{:04X} out, {} bytes", le16(packet), packet.len());
@@ -841,7 +1548,7 @@ impl HciBackend for UsbTransport {
                 }
                 true
             }
-            Some(_) => {
+            Some(1) => {
                 tracing::trace!(
                     "USB: {} out, handle 0x{:03X}, {} bytes",
                     if packet_type == HCI_ISO_DATA_PACKET { "ISO" } else { "ACL" },
@@ -862,6 +1569,14 @@ impl HciBackend for UsbTransport {
                 o.acl_writer.unpark();
                 // Copied: BTstack may reuse its buffer and send the next one
                 o.upstream.packet_sent();
+                true
+            }
+            Some(_) => {
+                match &mut o.sco {
+                    Some(sco) => sco.send(packet, &o.upstream),
+                    // Dropped, BTstack's buffer freed (module docs)
+                    None => o.upstream.packet_sent(),
+                }
                 true
             }
             None => false,
@@ -1283,9 +1998,119 @@ mod tests {
         assert_eq!(out_slot(HCI_COMMAND_DATA_PACKET), Some(0));
         assert_eq!(out_slot(HCI_ACL_DATA_PACKET), Some(1));
         assert_eq!(out_slot(HCI_ISO_DATA_PACKET), Some(1));
-        // SCO and events are not sent on this transport
-        assert_eq!(out_slot(btstack_sys::consts::HCI_SCO_DATA_PACKET), None);
+        // SCO has the isochronous pipe; events are not sent
+        assert_eq!(out_slot(HCI_SCO_DATA_PACKET), Some(2));
         assert_eq!(out_slot(HCI_EVENT_PACKET), None);
+    }
+
+    #[test]
+    fn sco_alt_settings_as_btstack() {
+        // 8-bit voice (CVSD 8-bit, transparent / mSBC): 1, 2, 3
+        for (n, alt) in [(1, 1), (2, 2), (3, 3), (4, 3)] {
+            assert_eq!(sco_alt_setting(0x0060 & !0x0020, n), Some(alt), "8-bit, {n} links");
+            assert_eq!(sco_alt_setting(0x0003, n), Some(alt), "transparent, {n} links");
+        }
+        // 16-bit samples (0x0060: CVSD, 16-bit, 2's complement): 2, 4, 5
+        for (n, alt) in [(1, 2), (2, 4), (3, 5), (7, 5)] {
+            assert_eq!(sco_alt_setting(0x0060, n), Some(alt), "16-bit, {n} links");
+        }
+        assert_eq!(sco_alt_setting(0x0060, 0), None);
+        assert_eq!(sco_alt_setting(0x0003, 0), None);
+    }
+
+    #[test]
+    fn sco_packet_sizes_fit_btstack_payloads() {
+        assert_eq!((0..=6).map(sco_packet_size).collect::<Vec<_>>(), [0, 9, 17, 25, 33, 49, 63]);
+        assert_eq!(sco_packet_size(9), 63);
+        // One 3 ms SCO packet is three full-speed packets: 3 + 24 bytes
+        // (8-bit / transparent) at alt 1, 3 + 48 (16-bit) at alt 2
+        assert_eq!(sco_out_packets(3 + 24, sco_packet_size(1)), 3);
+        assert_eq!(sco_out_packets(3 + 48, sco_packet_size(2)), 3);
+        assert_eq!(sco_out_packets(3 + 60, sco_packet_size(2)), 4);
+        assert_eq!(sco_out_packets(10, 0), 10);
+    }
+
+    /// A SCO packet: handle 0x0101 (packet status flags 0), payload
+    fn sco_packet(handle: u16, payload: &[u8]) -> Vec<u8> {
+        let [lo, hi] = handle.to_le_bytes();
+        [lo, hi, payload.len() as u8].into_iter().chain(payload.iter().copied()).collect()
+    }
+
+    fn feed(sco: &mut Reassembler, packets: &[Result<Vec<u8>, i32>]) -> (Vec<Vec<u8>>, usize) {
+        let mut out = Vec::new();
+        let failed =
+            sco_in_transfer(sco, packets.iter().map(|p| p.as_deref().map_err(|e| *e)), |p| out.push(p.to_vec()));
+        (out, failed)
+    }
+
+    #[test]
+    fn sco_in_stream_split_over_iso_packets() {
+        // Alt 2: 17-byte packets, one 51-byte SCO packet (16-bit, 3 ms) per
+        // three of them, as a controller sends it
+        let a = sco_packet(0x0101, &[0x11; 48]);
+        let b = sco_packet(0x0101, &[0x22; 48]);
+        let stream: Vec<u8> = a.iter().chain(&b).copied().collect();
+        let iso: Vec<Result<Vec<u8>, i32>> = stream.chunks(17).map(|c| Ok(c.to_vec())).collect();
+        let mut sco = Reassembler::new(HCI_SCO_DATA_PACKET);
+        let (out, failed) = feed(&mut sco, &iso[..4]);
+        assert_eq!((out, failed), (vec![a.clone()], 0));
+        assert_eq!(sco.pending(), 17);
+        let (out, _) = feed(&mut sco, &iso[4..]);
+        assert_eq!(out, vec![b.clone()]);
+        assert_eq!(sco.pending(), 0);
+        // Not aligned to the isochronous packets, with empty packets between
+        let mut iso: Vec<Result<Vec<u8>, i32>> = vec![Ok(stream[..5].to_vec()), Ok(Vec::new())];
+        iso.extend(stream[5..].chunks(9).map(|c| Ok(c.to_vec())));
+        iso.push(Ok(Vec::new()));
+        let (out, failed) = feed(&mut sco, &iso);
+        assert_eq!((out, failed), (vec![a, b], 0));
+    }
+
+    #[test]
+    fn sco_in_failed_packet_drops_the_partial_one() {
+        let a = sco_packet(0x0102, &[1; 24]);
+        let b = sco_packet(0x0102, &[2; 24]);
+        let mut sco = Reassembler::new(HCI_SCO_DATA_PACKET);
+        // a's first 9 bytes, a failed packet (its middle lost), then b whole
+        let iso = vec![Ok(a[..9].to_vec()), Err(-1), Ok(b[..9].to_vec()), Ok(b[9..18].to_vec()), Ok(b[18..].to_vec())];
+        let (out, failed) = feed(&mut sco, &iso);
+        assert_eq!((out, failed), (vec![b], 1));
+        assert_eq!(sco.pending(), 0);
+        // A header-only packet (no payload) is a packet as well
+        let (out, _) = feed(&mut sco, &[Ok(vec![0x02, 0x01, 0])]);
+        assert_eq!(out, vec![vec![0x02, 0x01, 0]]);
+    }
+
+    #[test]
+    fn sco_credits_hand_out_the_token_while_there_is_room() {
+        let c = ScoCredits::new(3);
+        assert!(c.room());
+        assert!(c.take());
+        assert!(c.take());
+        // The third fills it: no token from send
+        assert!(!c.take());
+        assert!(!c.room());
+        // A write done: room again, the token from the SCO thread
+        assert!(c.give());
+        assert!(c.room());
+        assert!(c.give());
+        assert!(c.give());
+        // Never below zero
+        assert!(c.give());
+        assert_eq!(c.outstanding.load(Ordering::Acquire), 0);
+        c.take();
+        c.clear();
+        assert_eq!(c.outstanding.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn sco_device_gone_errors() {
+        for e in [6, 2, 22, 433, 1167] {
+            assert!(sco_device_gone(e), "{e}");
+        }
+        for e in [31, 87, 995, 997, 121] {
+            assert!(!sco_device_gone(e), "{e}");
+        }
     }
 
     #[test]

@@ -78,7 +78,8 @@ jobs:
       - name: No unsafe outside the FFI crates
         shell: pwsh
         run: |
-          $allowed = 'btstack-sys','ldac-sys','openaptx-sys','fdkaac-sys','lhdcv5-sys','opus-sys','lc3-sys','win-sys'
+          # nusb: vendored 0.2.8 (third-party USB crate, one accessor added)
+          $allowed = 'btstack-sys','ldac-sys','openaptx-sys','fdkaac-sys','lhdcv5-sys','opus-sys','lc3-sys','win-sys','nusb'
           # a counting GlobalAlloc (unsafe impl by definition) in a test
           $allowedFiles = 'crates/pipeline/tests/le_no_alloc.rs'
           $src = (Resolve-Path app/src).Path

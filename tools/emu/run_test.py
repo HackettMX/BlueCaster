@@ -38,7 +38,9 @@ bluecaster_decode --le-audio on both sides:
     says "late SDU"), no underrun in BlueCaster's counters, audio (not counting
     inserted silence) for most of the duration
   - the checks of le_audio_tests/<profile>.py (core.py: each CIS's channel
-    allocation within the PACS locations of the sink it goes to)
+    allocation within the PACS locations of the sink it goes to; mic.py: the
+    headset microphone of the mic-* cases, run with --headset-mic
+    --mic-output <out>/le-<case>/mic.wav)
 Outputs go to tools/emu/out/le-<case>/.
 
     python tools/emu/run_test.py --scan [case ...]
@@ -52,6 +54,31 @@ bluecaster-core.exe --cli --scan lists it:
     not at the scan's end; its name from the inquiry result within 3 s, or
     from a name request after the first inquiry
 Outputs go to tools/emu/out/scan-<case>/.
+
+    python tools/emu/run_test.py --voice [cvsd msbc lc3swb cvsd-roundtrip cvsd-auto]
+
+runs the HFP audio cases instead (headset mode: bluecaster-core --headset-mic
+--mic-output <out>/mic.wav): emu_sink.py --hfp <codec> adds a hands-free
+unit (cvsd: without codec negotiation, msbc / lc3swb: offering those codecs)
+and carries SCO between the virtual controllers (hfp_audio.py); BlueCaster
+streams SBC with the test tone, and once the HFP service level connection is
+up suspends A2DP, opens the audio connection and sends the test tone (mixed
+to mono) over it; the hands-free unit sends a 1.5 kHz tone back (CVSD as PCM,
+mSBC / LC3-SWB as frames encoded by BlueCaster's codecs, voice_frames.py):
+  - the audio connection is established with the expected codec (BlueCaster's
+    log; the sink's log for the negotiated codec)
+  - SCO packets in both directions in both HCI captures, at about the air
+    rate (CVSD 16-bit: 267/s, transparent: 133/s, each way)
+  - the sink received SCO packets: cvsd, with the test tone's 1 kHz in the
+    PCM; msbc / lc3swb, each packet an H2 frame in sequence (no decoder
+    here: voice-link/tests/emu_frames.rs checks the encoder's frames)
+  - mic.wav, the microphone as BlueCaster decoded it, holds the 1.5 kHz tone
+cvsd-roundtrip: headset mode on 3 s after streaming starts and off at 6 s
+(--headset-mic-toggle 3,6); also A2DP media after the voice link closed and
+the test tone in the last second the sink decoded.
+cvsd-auto: --headset-mic auto; a WAV output counts as recorded from, so the
+checks are cvsd's, plus Auto's "an application records" in the log.
+Outputs go to tools/emu/out/voice-<case>/.
 """
 
 import argparse
@@ -91,6 +118,8 @@ CONFIG_PATTERN = {  # bluecaster_decode's "Configuration :" line
     'sbc-bp35': r'SBC \d+ Hz, joint stereo, 16 blocks, 8 subbands, loudness, bitpool 2-35$',
     'sbcxq-bp45': r'SBC 44100 Hz, dual channel, 16 blocks, 8 subbands, loudness, bitpool 2-45$',
     'sbcxq-bp39': r'SBC \d+ Hz, dual channel, 16 blocks, 8 subbands, loudness, bitpool 2-39$',
+    # SBC XQ not held to the sink's list (issue #86): up to SBC's 53
+    'sbcxq-bp53': r'SBC \d+ Hz, dual channel, 16 blocks, 8 subbands, loudness, bitpool 2-53$',
     'sbc-bp28': r'SBC \d+ Hz, joint stereo, 16 blocks, 8 subbands, loudness, bitpool 2-28$',
     # A profile's SBC frame setup (--sbc-*), in the configuration and every frame
     'sbc-8b-4sb-snr': r'SBC \d+ Hz, joint stereo, 8 blocks, 4 subbands, SNR, bitpool 2-53$',
@@ -148,6 +177,8 @@ NEGOTIATION = {
     'auto-sbcxq-bp39': ('auto', ['--codecs', 'sbc', '--sbc-max-bitpool', '39'], 'sbcxq-bp39', []),
     'auto-sbc-bp28': ('auto', ['--codecs', 'sbc', '--sbc-max-bitpool', '28'], 'sbc-bp28', []),
     'sbcxq-bp45': ('sbcxq', ['--sbc-max-bitpool', '45'], 'sbcxq-bp45', ['--rate', '44100']),
+    # Its card's "Show only options it supports" off: bitpool 53 (issue #86)
+    'sbcxq-unlisted-53': ('sbcxq', [], 'sbcxq-bp53', ['--unlisted-options', '--sbc-bitpool', '53']),
     # SBC frame setups other than the default (a profile's SBC settings)
     'sbc-8b-4sb-snr': ('sbc', [], 'sbc-8b-4sb-snr', ['--sbc-blocks', '8', '--sbc-subbands', '4', '--sbc-alloc', 'snr']),
     'sbc-stereo-12b': ('sbc', [], 'sbc-stereo-12b',
@@ -347,10 +378,15 @@ LOG_CHECKS = {
                              ('bluecaster.log', CTKD_ASKING, 1), ('bluecaster.log', CTKD_GIVEN, 1),
                              ('sink.log', 'CTKD: keys LTK', 1), ('bluecaster.log', PAIRED, 1)],
     'ctkd-unlisted': [('sink.log', 'SMP over BR/EDR not listed', True), ('bluecaster.log', CTKD_GIVEN, False),
-                      ('sink.log', 'CTKD:', False)],
+                      ('sink.log', 'CTKD:', False),
+                      ('bluecaster.log', f'CTKD: {SINK_ADDRESS} does not take SMP over BR/EDR', True)],
     'ctkd-refused': [('sink.log', 'CTKD: refusing', 1), ('bluecaster.log', CTKD_GIVEN, False),
-                     ('sink.log', 'CTKD: keys LTK', False)],
-    'ctkd-silent': [('sink.log', 'CTKD: ignoring SMP PDU', True), ('bluecaster.log', CTKD_GIVEN, False)],
+                     ('sink.log', 'CTKD: keys LTK', False),
+                     ('bluecaster.log', f'CTKD: no LE keys from {SINK_ADDRESS} (Refused', 1)],
+    'ctkd-silent': [('sink.log', 'CTKD: ignoring SMP PDU', True), ('bluecaster.log', CTKD_GIVEN, False),
+                    # NoAnswer after SM's 30 s (--duration 35), else the link ends
+                    # first and the next connection asks again (NotAsked)
+                    ('bluecaster.log', f'CTKD: no LE keys from {SINK_ADDRESS} (', 1)],
     'ctkd-developer-off': [('sink.log', 'SMP over BR/EDR listed', True), ('sink.log', 'CTKD:', False),
                            ('bluecaster.log', 'CTKD', False)],
 }
@@ -712,6 +748,7 @@ def run_le_case(args, case, port):
             cmd += ['--le-device', a]
         duration = case.duration or args.duration
         cmd += ['--test-tone', '--duration', str(duration), '--hci-capture', src_capture] + case.bluecaster_args
+        cmd += le_audio_tests.mic.bluecaster_args(case, out)   # --headset-mic --mic-output <out>/mic.wav
         with open(os.path.join(out, 'bluecaster.log'), 'w', encoding='utf-8', errors='replace') as log:
             try:
                 rc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, env=env,
@@ -817,6 +854,8 @@ def run_le_case(args, case, port):
     ctx = dict(out=out, bluecaster_log=bluecaster_log, sink_log=read_text(os.path.join(out, 'sink.log')),
                sent=sent, received=received, sink_addresses=addresses)
     failures.extend(le_audio_tests.check(case, ctx))
+    if ctx.get('mic_detail'):
+        detail += f" | {ctx['mic_detail']}"
     return failures, detail
 
 
@@ -1060,6 +1099,210 @@ def run_link_case(args, case, port):
     return failures, ''
 
 
+# HFP audio cases: the codec BlueCaster's log names, SCO packets per second
+# each way (60-byte packets: CVSD with 16-bit samples 16 kB/s, transparent
+# 8 kB/s)
+VOICE_CASES = {
+    'cvsd': ('CVSD', 16000 / 60),
+    'msbc': ('mSBC', 8000 / 60),
+    'lc3swb': ('LC3-SWB', 8000 / 60),
+    'cvsd-roundtrip': ('CVSD', 16000 / 60),
+    'cvsd-auto': ('CVSD', 16000 / 60),
+}
+# The hands-free unit's tone (hfp_audio.py TX_TONE_HZ, voice_frames.py) as
+# BlueCaster's mic.wav must hold it: frequency and amplitude
+MIC_TONE = (1500.0, 8000 / 32768)
+# cvsd-roundtrip: headset mode on / off at these seconds of the stream
+ROUNDTRIP_TOGGLE = (3, 6)
+
+
+def pklg_records(path):
+    """(time in s, type, length) of each record of a PacketLogger capture"""
+    records = []
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return records
+    i = 0
+    while i + 13 <= len(data):
+        length, secs, usecs = struct.unpack_from('>III', data, i)
+        records.append((secs + usecs / 1e6, data[i + 12], length - 9))
+        i += 4 + length
+    return records
+
+
+def mic_tone_check(path):
+    """(ok, description) for the hands-free unit's tone in the middle half
+    second of BlueCaster's mic.wav"""
+    try:
+        rate, channels = read_wav(path)
+    except (OSError, EOFError, wave.Error) as e:
+        return False, f'no mic.wav ({e})'
+    xs = channels[0] if channels else []
+    if len(channels) != 1 or len(xs) < rate:
+        return False, f'expected >= 1 s of mono audio, got {len(channels)} ch, {len(xs) / max(rate, 1):.2f} s'
+    start = len(xs) // 2 - rate // 4
+    ok, notes = tone_block(xs[start:start + rate // 2], rate, (MIC_TONE,))
+    return ok, f'{rate} Hz {len(xs) / rate:.1f} s, {", ".join(notes)}'
+
+
+def pklg_counts(path):
+    """Records of a PacketLogger capture by type"""
+    counts = {}
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return counts
+    i = 0
+    while i + 13 <= len(data):
+        length, = struct.unpack_from('>I', data, i)
+        counts[data[i + 12]] = counts.get(data[i + 12], 0) + 1
+        i += 4 + length
+    return counts
+
+
+def run_voice_case(args, case, port):
+    """bluecaster-core --headset-mic against emu_sink.py --hfp <codec>"""
+    codec, rate = VOICE_CASES[case]
+    hf_case = case.split('-')[0]
+    roundtrip = case.endswith('-roundtrip')
+    out = os.path.join(args.out, 'voice-' + case)
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(out)
+    failures = []
+    duration = max(args.duration, 10 if roundtrip else 6)
+    port = free_port(port)
+    src_capture, sink_capture = os.path.join(out, 'bluecaster.pklg'), os.path.join(out, 'sink.pklg')
+    mic_wav = os.path.join(out, 'mic.wav')
+    auto = case.endswith('-auto')
+    headset = (['--headset-mic-toggle', ','.join(map(str, ROUNDTRIP_TOGGLE))] if roundtrip
+               else ['--headset-mic', 'auto'] if auto else ['--headset-mic'])
+    sink = start_sink(port, sink_capture, os.path.join(out, 'sink.log'), extra=['--hfp', hf_case])
+    try:
+        env = dict(os.environ, BLUECASTER_CONFIG_DIR=os.path.join(out, 'config'), BLUECASTER_LOG='debug')
+        with open(os.path.join(out, 'bluecaster.log'), 'w', encoding='utf-8', errors='replace') as log:
+            try:
+                rc = subprocess.run(
+                    [args.bluecaster, '--cli', '--hci-tcp', f'127.0.0.1:{port}', '-d', SINK_ADDRESS, '-c', 'sbc',
+                     '--test-tone', '--duration', str(duration), '--hci-capture', src_capture]
+                    + headset + ['--mic-output', mic_wav],
+                    stdout=log, stderr=subprocess.STDOUT, env=env, timeout=duration + 90).returncode
+            except subprocess.TimeoutExpired:
+                rc = 'timeout'
+    finally:
+        sink.terminate()
+        sink.wait(10)
+    if rc != 0:
+        failures.append(f'BlueCaster exited with {rc} (see bluecaster.log)')
+    bc_log, sink_log = read_text(os.path.join(out, 'bluecaster.log')), read_text(os.path.join(out, 'sink.log'))
+    m = re.search(r'HFP: audio connection established, codec (\S+)', bc_log)
+    if not m:
+        failures.append('bluecaster.log: no audio connection')
+    elif m.group(1) != codec:
+        failures.append(f'audio connection with {m.group(1)}, not {codec}')
+    if hf_case != 'cvsd' and f'HFP: codec negotiated {hf_case}' not in sink_log:
+        failures.append(f'sink.log: codec {hf_case} not negotiated')
+    if not re.search(r'^Voice: \S+ at \d+ Hz', bc_log, re.M):
+        failures.append('bluecaster.log: the voice link never carried audio ("Voice: ..." missing)')
+    if re.search(r'Traceback|HFP-HF protocol failed', sink_log):
+        failures.append('sink.log: a Python error')
+    # Both captures: SCO out (0x08) and in (0x09), at about the air rate for
+    # the time the link was up (at least a second of it)
+    detail = []
+    for side, capture in (('bluecaster', src_capture), ('sink', sink_capture)):
+        c = pklg_counts(capture)
+        sent, received = c.get(0x08, 0), c.get(0x09, 0)
+        detail.append(f'{side} SCO out {sent} in {received}')
+        if sent < rate or received < rate:
+            failures.append(f'{side}.pklg: SCO out {sent}, in {received} (less than a second of audio)')
+    ok, notes = mic_tone_check(mic_wav)
+    detail.append(f'mic.wav {notes}')
+    if not ok:
+        failures.append(f'mic.wav: the sink\'s 1.5 kHz tone not found ({notes})')
+    rx = re.findall(r'HFP rx: (\d+) packets \d+ bytes codec (\S+) status (.*?) tone (.*?) \| tx: (\d+)', sink_log)
+    if not rx:
+        failures.append('sink.log: no HFP rx summary')
+    else:
+        packets, sink_codec, status, tone, tx = rx[-1]
+        detail.append(f'sink rx {packets} tx {tx} status {status} tone {tone}')
+        if int(packets) == 0:
+            failures.append('the sink received no SCO packets')
+        if sink_codec != hf_case:
+            failures.append(f'sink codec {sink_codec}, not {hf_case}')
+        if not tone.startswith('ok'):
+            failures.append(f'sink: what BlueCaster sent is not right ({tone})')
+    if 'dropped an incoming HCI packet' in bc_log:
+        failures.append('bluecaster.log: incoming HCI packets dropped')
+    if auto and 'voice: auto: an application records' not in bc_log:
+        failures.append('bluecaster.log: Auto never saw the WAV output as recorded from')
+    if roundtrip:
+        failures += roundtrip_checks(args, out, sink_capture, bc_log, detail)
+    return failures, ' | '.join(detail)
+
+
+def roundtrip_checks(args, out, sink_capture, bc_log, detail):
+    """cvsd-roundtrip: A2DP back after the voice link, with the test tone"""
+    failures = []
+    if 'voice: A2DP resumed' not in bc_log:
+        failures.append('bluecaster.log: A2DP did not resume ("voice: A2DP resumed" missing)')
+    # The sink's capture: media packets (incoming ACL, longer than any
+    # signalling) after its last SCO packet
+    records = pklg_records(sink_capture)
+    sco = [t for t, kind, _ in records if kind in (0x08, 0x09)]
+    if not sco:
+        return failures + ['sink.pklg: no SCO']
+    media = [t for t, kind, length in records if kind == 0x03 and length > 300]
+    before = [t for t in media if t < sco[0]]
+    after = [t for t in media if t > sco[-1] + 0.2]
+    span = after[-1] - after[0] if len(after) > 1 else 0
+    detail.append(f'A2DP {len(before)} media packets before the voice link, {len(after)} in {span:.1f} s after')
+    if not before:
+        failures.append('sink.pklg: no A2DP media before the voice link')
+    if span < 2.0:
+        failures.append(f'sink.pklg: A2DP media only {span:.1f} s after the voice link closed')
+    # The test tone in the last second the sink decoded
+    text = subprocess.run([args.decoder, sink_capture, '-o', os.path.join(out, 'received'), '--received'],
+                          capture_output=True, text=True, encoding='utf-8', errors='replace').stdout
+    with open(os.path.join(out, 'received_report.txt'), 'w', encoding='utf-8') as f:
+        f.write(text)
+    wavs = re.findall(r'WAV\s+: (.*)$', text, re.M)
+    if not wavs:
+        return failures + ['received: no decoded WAV']
+    rate, channels = read_wav(wavs[-1].strip())
+    end = len(channels[0]) - int(rate * MAX_END_GAP_S) if channels else 0
+    if len(channels) != 2 or end < rate:
+        return failures + [f'received: {len(channels)} channel(s), {end / max(rate, 1):.1f} s']
+    ok, notes = True, []
+    for xs, tone in zip(channels, TONES):
+        block_ok, block_notes = tone_block(xs[end - rate // 2:end], rate, (tone,))
+        ok &= block_ok
+        notes += block_notes
+    detail.append(f'last A2DP second {", ".join(notes)}')
+    if not ok:
+        failures.append(f'the test tone is not in the last second the sink decoded: {", ".join(notes)}')
+    return failures
+
+
+def main_voice(args):
+    wanted = args.voice or list(VOICE_CASES)
+    unknown = [n for n in wanted if n not in VOICE_CASES]
+    if unknown:
+        sys.exit(f'Unknown voice case(s) {unknown}; known: {list(VOICE_CASES)}')
+    results = []
+    for index, case in enumerate(wanted):
+        print(f'--- voice {case} ...', flush=True)
+        failures, detail = run_voice_case(args, case, args.base_port + 400 + index)
+        results.append((case, failures))
+        print(f'    {"PASS" if not failures else "FAIL"}  {detail}')
+        for failure in failures:
+            print(f'      - {failure}')
+    passed = sum(1 for _, f in results if not f)
+    print(f'\n{passed}/{len(results)} voice cases passed. Details: {args.out}')
+    sys.exit(0 if passed == len(results) else 1)
+
+
 def main_link(args):
     wanted = args.link or list(LINK_CASES)
     unknown = [n for n in wanted if n not in LINK_CASES]
@@ -1089,6 +1332,8 @@ def main():
                         help=f'run the device scan cases instead ({", ".join(SCAN_CASES)}; default: all of them)')
     parser.add_argument('--link', nargs='*', metavar='CASE',
                         help=f'run the link cases instead ({", ".join(LINK_CASES)}; default: all of them)')
+    parser.add_argument('--voice', nargs='*', metavar='CASE',
+                        help=f'run the HFP audio cases instead ({", ".join(VOICE_CASES)}; default: all of them)')
     parser.add_argument('--duration', type=int, default=5, help='seconds of streaming per codec')
     parser.add_argument('--max-packet', type=int, help='passed to BlueCaster --max-packet (default: its own)')
     parser.add_argument('--build-dir', default=os.path.join(REPO, 'build'),
@@ -1104,8 +1349,10 @@ def main():
     args.decoder = args.decoder or os.path.join(args.build_dir, 'a2dp_decode', args.config, 'bluecaster_decode.exe')
     for path, hint in ((VENV_PYTHON, 'run: python tools/emu/setup_env.py'),
                        (args.bluecaster, 'build BlueCaster'), (args.decoder, 'build bluecaster_decode')):
-        if path == args.decoder and (args.scan is not None or args.link is not None):
-            continue  # a scan streams nothing, a link case decodes nothing
+        voice_decodes = args.voice is not None and any(c.endswith('-roundtrip') for c in args.voice or VOICE_CASES)
+        if path == args.decoder and (args.scan is not None or args.link is not None
+                                     or (args.voice is not None and not voice_decodes)):
+            continue  # a scan streams nothing, a link or voice case decodes nothing (but a round trip)
         if not os.path.exists(path):
             sys.exit(f'Missing {path} ({hint})')
     if args.le_audio is not None:
@@ -1114,6 +1361,8 @@ def main():
         main_scan(args)
     if args.link is not None:
         main_link(args)
+    if args.voice is not None:
+        main_voice(args)
 
     results = []
     for index, codec in enumerate(args.codecs):

@@ -18,7 +18,34 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use bluecaster_core::{Service, ServiceEvent, ServiceOptions, SourceRequest, StreamRequest, StreamState, VolumeSync};
+/// `println!` that survives a closed stdout (the console or pipe reading
+/// the CLI went away: the run goes on, nothing is printed)
+macro_rules! outln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+/// `eprintln!` that survives a closed stderr
+macro_rules! eoutln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+/// `print!` that survives a closed stdout
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let mut o = std::io::stdout();
+        let _ = write!(o, $($arg)*);
+        let _ = o.flush();
+    }};
+}
+
+use bluecaster_core::{
+    HeadsetMic, Service, ServiceEvent, ServiceOptions, SourceRequest, StreamRequest, StreamState, VolumeSync,
+};
 use bt_host::HciCapture;
 use bt_host::media::clamp_media_payload_limit;
 use codec::{CodecKind, Quality};
@@ -84,6 +111,18 @@ LE Audio (experimental, LC3 over LE isochronous channels):
                         encrypt the broadcast with this code (4-16 bytes)
   --auracast-mono       one mono channel instead of left and right
 
+Headset microphone (developer mode):
+  --headset-mic [on|auto]
+                        headset mode: once streaming, the headphones'
+                        microphone goes to --mic-output; classic devices switch
+                        to the voice link (call quality), LE Audio devices use
+                        the conversational configuration. auto: classic
+                        devices switch only while an app records from the
+                        output's recording side (a WAV file counts as always)
+  --mic-output <name|path.wav>
+                        the microphone's output device (a part of its name;
+                        default: the default output), or a WAV file to write
+
 Development / testing:
   --hci-tcp <host:port> H4 over TCP to a virtual controller (tools/emu)
   --hci-capture <path>  HCI capture (.pklg) of the whole run
@@ -93,6 +132,9 @@ Development / testing:
                         Disconnect / Connect in the app (A2DP)
   --wait-off            headphones turned off: wait for them, as the app does
   --services            once streaming, list the services the device gives in SDP
+  --headset-mic-toggle <on_s>,<off_s>
+                        headset mode on <on_s> seconds after streaming starts
+                        and off at <off_s> (the voice link and back to A2DP)
   --restart-on-link     start the session again as soon as its link is up, as
                         a setting changed while connecting does
   --restart             with --sessions: between sessions restart Bluetooth
@@ -142,6 +184,11 @@ struct Args {
     probe: bool,
     /// --services: once streaming, the services the device lists in SDP
     services: bool,
+    /// --headset-mic [on|auto], --mic-output: headset mode once streaming
+    headset_mic: HeadsetMic,
+    mic_output: Option<String>,
+    /// --headset-mic-toggle: headset mode on and off at these seconds
+    headset_mic_toggle: Option<(u64, u64)>,
     script: Option<PathBuf>,
     allow_writes: bool,
     hci_tcp: Option<String>,
@@ -229,6 +276,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
         scan: None,
         probe: false,
         services: false,
+        headset_mic: HeadsetMic::Off,
+        mic_output: None,
+        headset_mic_toggle: None,
         script: None,
         allow_writes: false,
         hci_tcp: None,
@@ -281,7 +331,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 let v: u32 = value(&mut it, "--max-packet")?.parse().map_err(|_| "bad --max-packet")?;
                 a.max_packet = clamp_media_payload_limit(v);
                 if a.max_packet as u32 != v {
-                    println!("--max-packet {v} is outside 679-1679, using {}", a.max_packet);
+                    outln!("--max-packet {v} is outside 679-1679, using {}", a.max_packet);
                 }
             }
             "--sbc-blocks" => {
@@ -327,6 +377,28 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--probe" => a.probe = true,
             "--services" => a.services = true,
+            "--headset-mic" => {
+                // An optional mode; alone: on
+                let mode = match it.peek().map(|s| s.as_str()) {
+                    Some("on") => Some(HeadsetMic::On),
+                    Some("auto") => Some(HeadsetMic::Auto),
+                    _ => None,
+                };
+                if mode.is_some() {
+                    it.next();
+                }
+                a.headset_mic = mode.unwrap_or(HeadsetMic::On);
+            }
+            "--mic-output" => a.mic_output = Some(value(&mut it, "--mic-output")?),
+            "--headset-mic-toggle" => {
+                let v = value(&mut it, "--headset-mic-toggle")?;
+                let (on, off) = v
+                    .split_once(',')
+                    .and_then(|(on, off)| Some((on.trim().parse::<u64>().ok()?, off.trim().parse::<u64>().ok()?)))
+                    .filter(|(on, off)| on < off)
+                    .ok_or("--headset-mic-toggle takes <on_s>,<off_s> with on before off")?;
+                a.headset_mic_toggle = Some((on, off));
+            }
             "--script" => a.script = Some(value(&mut it, "--script")?.into()),
             "--allow-writes" => a.allow_writes = true,
             "--hci-tcp" => a.hci_tcp = Some(value(&mut it, "--hci-tcp")?),
@@ -379,9 +451,9 @@ pub fn run(args: &[String]) -> i32 {
         Ok(a) => a,
         Err(e) => {
             if !e.is_empty() {
-                eprintln!("{e}\n");
+                eoutln!("{e}\n");
             }
-            print!("{USAGE}");
+            out!("{USAGE}");
             return if e.is_empty() { 0 } else { 2 };
         }
     };
@@ -390,11 +462,11 @@ pub fn run(args: &[String]) -> i32 {
         return match bt_paired::paired_devices() {
             Ok(devices) => {
                 print_paired(&devices);
-                println!("\nDone.");
+                outln!("\nDone.");
                 0
             }
             Err(e) => {
-                eprintln!("BluetoothFindFirstDevice failed: {e}");
+                eoutln!("BluetoothFindFirstDevice failed: {e}");
                 1
             }
         };
@@ -407,19 +479,19 @@ pub fn run(args: &[String]) -> i32 {
 
     match (&a.hci_tcp, &a.usb) {
         (Some(addr), usb) => {
-            println!("Transport: H4 over TCP to {addr} (development / testing)");
+            outln!("Transport: H4 over TCP to {addr} (development / testing)");
             if let Some((u, _)) = usb {
-                println!("-u {u} is not used with --hci-tcp");
+                outln!("-u {u} is not used with --hci-tcp");
             }
         }
-        (None, Some((u, _))) => println!("Transport: USB (WinUSB), adapter {u}"),
-        (None, None) => println!("Transport: USB (WinUSB)"),
+        (None, Some((u, _))) => outln!("Transport: USB (WinUSB), adapter {u}"),
+        (None, None) => outln!("Transport: USB (WinUSB)"),
     }
     let capture = HciCapture::new();
     if let Some(path) = &a.hci_capture
         && let Err(e) = capture.start(path)
     {
-        eprintln!("Cannot create HCI capture file {}: {e}", path.display());
+        eoutln!("Cannot create HCI capture file {}: {e}", path.display());
         return 1;
     }
     let (tx, rx) = mpsc::channel();
@@ -433,6 +505,11 @@ pub fn run(args: &[String]) -> i32 {
         },
         tx,
     );
+    // --headset-mic-toggle: the stack offers HFP audio from the start, as
+    // a stream started in headset mode would
+    if a.headset_mic_toggle.is_some() {
+        service.set_voice_offered(true);
+    }
 
     if a.le.broadcast.is_some() {
         let code = le_broadcast(&a, &service, &rx, &running);
@@ -465,15 +542,15 @@ pub fn run(args: &[String]) -> i32 {
                         (None, Some(e)) => format!("failed: {e}"),
                         (None, None) => "no answer".to_owned(),
                     };
-                    println!("{:<34} {:>5} ms  {answer}", s.name, s.millis);
+                    outln!("{:<34} {:>5} ms  {answer}", s.name, s.millis);
                 }
                 if let Some(usb) = &report.usb {
-                    println!();
+                    outln!();
                     for line in &usb.summary {
-                        println!("{line}");
+                        outln!("{line}");
                     }
                 }
-                println!("\n{}", bluecaster_core::probe_report::summary_line(&report));
+                outln!("\n{}", bluecaster_core::probe_report::summary_line(&report));
                 let adapter = a.usb.as_ref().map(|(u, _)| u.as_str());
                 match bluecaster_core::probe_report::save(
                     &bluecaster_core::paths::config_dir(),
@@ -482,17 +559,17 @@ pub fn run(args: &[String]) -> i32 {
                     env!("CARGO_PKG_VERSION"),
                 ) {
                     Ok(path) => {
-                        println!("Saved to {}", path.display());
+                        outln!("Saved to {}", path.display());
                         0
                     }
                     Err(e) => {
-                        eprintln!("The report could not be saved: {e}");
+                        eoutln!("The report could not be saved: {e}");
                         1
                     }
                 }
             }
             Err(m) => {
-                eprintln!("{m}");
+                eoutln!("{m}");
                 1
             }
         };
@@ -505,7 +582,7 @@ pub fn run(args: &[String]) -> i32 {
         let code = match service.scan(secs) {
             Ok(found) => {
                 for d in found {
-                    println!(
+                    outln!(
                         "{}  {:<32} CoD 0x{:06X}  RSSI {}{}",
                         bt_host::addr_str(&d.addr),
                         d.name,
@@ -517,7 +594,7 @@ pub fn run(args: &[String]) -> i32 {
                 0
             }
             Err(m) => {
-                eprintln!("{m}");
+                eoutln!("{m}");
                 1
             }
         };
@@ -533,26 +610,26 @@ pub fn run(args: &[String]) -> i32 {
     if let Some(target) = &a.remote_sink {
         use bluecaster_core::receiver;
         let Some((host, port)) = receiver::split_target(target) else {
-            eprintln!("Bad --remote-sink {target}");
+            eoutln!("Bad --remote-sink {target}");
             return 2;
         };
         let auto = host.eq_ignore_ascii_case(receiver::AUTO);
         let found = receiver::discover((!auto).then_some(host.as_str()), port, receiver::DISCOVER_TIMEOUT);
         let mut stats_target = target.clone();
         match found.first() {
-            None => println!("Receiver: none answered {}", if auto { "on the local network" } else { host.as_str() }),
+            None => outln!("Receiver: none answered {}", if auto { "on the local network" } else { host.as_str() }),
             Some(r) => {
-                println!("{}", r.describe(found.len() > 1));
+                outln!("{}", r.describe(found.len() > 1));
                 if device_arg.is_none() && !r.bt_address.is_empty() {
                     device_arg = Some(r.bt_address.clone());
-                    println!("Streaming to the receiver (no -d given)");
+                    outln!("Streaming to the receiver (no -d given)");
                 }
                 if auto {
                     stats_target = format!("{}:{}", r.ip, r.port);
                 }
             }
         }
-        println!("Receiver statistics: {stats_target}");
+        outln!("Receiver statistics: {stats_target}");
         receiver.start(&stats_target);
     }
 
@@ -569,7 +646,7 @@ pub fn run(args: &[String]) -> i32 {
         Some(d) => match parse_device_address(d) {
             Some(addr) => addr,
             None => {
-                eprintln!("Invalid Bluetooth address: {d}");
+                eoutln!("Invalid Bluetooth address: {d}");
                 return stop(1);
             }
         },
@@ -577,23 +654,23 @@ pub fn run(args: &[String]) -> i32 {
         // class of device (works while the adapter has WinUSB: Windows
         // remembers its paired devices)
         None => {
-            println!("Scanning for Bluetooth audio devices...");
+            outln!("Scanning for Bluetooth audio devices...");
             let devices = match bt_paired::paired_devices() {
                 Ok(devices) => devices,
                 Err(e) => {
-                    eprintln!("BluetoothFindFirstDevice failed: {e}");
+                    eoutln!("BluetoothFindFirstDevice failed: {e}");
                     Vec::new()
                 }
             };
             print_paired(&devices);
             match bt_paired::first_a2dp_sink(&devices) {
                 Some(d) => {
-                    println!("Auto-selected device: {} ({})", d.name, d.address_string());
+                    outln!("Auto-selected device: {} ({})", d.name, d.address_string());
                     device_name = d.name.clone();
                     d.address
                 }
                 None => {
-                    eprintln!(
+                    eoutln!(
                         "No Bluetooth audio device found.\n\
                          Use -d XX:XX:XX:XX:XX:XX to specify the device address.\n\
                          (Find the address in Windows Settings > Bluetooth before switching to WinUSB,\n\
@@ -617,7 +694,7 @@ pub fn run(args: &[String]) -> i32 {
             _ => SourceRequest::SystemLoopback,
         }
     };
-    println!("Target device: {}", bt_host::addr_str(&device));
+    outln!("Target device: {}", bt_host::addr_str(&device));
     let request = StreamRequest {
         device,
         device_name,
@@ -642,6 +719,8 @@ pub fn run(args: &[String]) -> i32 {
         mute_output: false,
         max_media_payload: a.max_packet,
         le: None,
+        headset_mic: if a.headset_mic_toggle.is_none() { a.headset_mic } else { HeadsetMic::Off },
+        mic_output: a.mic_output.clone(),
     };
 
     let mut code = 0;
@@ -650,9 +729,9 @@ pub fn run(args: &[String]) -> i32 {
         if session > 1 && a.restart {
             // Restart Bluetooth, as the Adapters page does: the session
             // connects again on the new stack
-            println!("\nRestarting Bluetooth (session {} of {})...", session - 1, a.sessions);
+            outln!("\nRestarting Bluetooth (session {} of {})...", session - 1, a.sessions);
             let Some(again) = service.restart_adapter() else {
-                println!("Bluetooth restarted, but nothing to connect again");
+                outln!("Bluetooth restarted, but nothing to connect again");
                 code = 1;
                 break;
             };
@@ -661,21 +740,21 @@ pub fn run(args: &[String]) -> i32 {
             if !running.load(Ordering::Acquire) {
                 break;
             }
-            println!("Connecting again after the restart (session {session} of {})", a.sessions);
+            outln!("Connecting again after the restart (session {session} of {})", a.sessions);
         } else if session > 1 {
             // Disconnect, as the app's button does, and connect again
-            println!("\nDisconnecting (session {} of {})...", session - 1, a.sessions);
+            outln!("\nDisconnecting (session {} of {})...", session - 1, a.sessions);
             service.disconnect();
             while let Ok(e) = rx.try_recv() {
                 if let ServiceEvent::State(state, msg) = e {
-                    println!("[{state:?}] {msg}");
+                    outln!("[{state:?}] {msg}");
                 }
             }
             std::thread::sleep(SESSION_PAUSE);
             if !running.load(Ordering::Acquire) {
                 break;
             }
-            println!("Connecting again (session {session} of {})", a.sessions);
+            outln!("Connecting again (session {session} of {})", a.sessions);
         }
         service.start_streaming(request.clone());
         if a.restart_on_link && session == 1 {
@@ -683,7 +762,7 @@ pub fn run(args: &[String]) -> i32 {
             while Instant::now() < until && !service.host().is_some_and(|h| h.link_age(device).is_some()) {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            println!("Starting again while connecting");
+            outln!("Starting again while connecting");
             service.start_streaming(request.clone());
         }
         let duration_reached = stream_session(&a, &service, &rx, &running, &receiver, &mut code);
@@ -698,14 +777,14 @@ pub fn run(args: &[String]) -> i32 {
         std::thread::sleep(Duration::from_millis(1500));
     }
     let stats = service.stats();
-    println!(
+    outln!(
         "Sent {} media packets ({} bytes), {} dropped before the radio",
         stats.packets_sent.load(Ordering::Relaxed),
         stats.bytes_sent.load(Ordering::Relaxed),
         stats.queue_drops.load(Ordering::Relaxed) + stats.send_errors.load(Ordering::Relaxed)
     );
     if a.remote_sink.is_some() {
-        println!("{}", receiver.summary());
+        outln!("{}", receiver.summary());
         receiver.stop();
     }
     code
@@ -726,24 +805,35 @@ fn stream_session(
 ) -> bool {
     let mut streaming_since: Option<Instant> = None;
     let mut last_summary = Instant::now();
+    // --headset-mic-toggle: the steps still to take
+    let mut toggles: Vec<(u64, HeadsetMic)> =
+        a.headset_mic_toggle.map_or(Vec::new(), |(on, off)| vec![(on, HeadsetMic::On), (off, HeadsetMic::Off)]);
     loop {
+        if let Some(since) = streaming_since
+            && let Some(&(at, mode)) = toggles.first()
+            && since.elapsed() >= Duration::from_secs(at)
+        {
+            toggles.remove(0);
+            let taken = service.set_headset_mic(mode, a.mic_output.clone());
+            outln!("Headset mode {} at {at} s{}", mode.as_str(), if taken { "" } else { " (not taken)" });
+        }
         if a.remote_sink.is_some() && streaming_since.is_some() && last_summary.elapsed() >= Duration::from_secs(5) {
             last_summary = Instant::now();
-            println!("{}", receiver.summary());
+            outln!("{}", receiver.summary());
         }
         if !running.load(Ordering::Acquire) {
-            println!("\nStopping...");
+            outln!("\nStopping...");
             return false;
         }
         if let (Some(since), Some(d)) = (streaming_since, a.duration)
             && since.elapsed() >= Duration::from_secs(d)
         {
-            println!("\n--duration {d} s reached");
+            outln!("\n--duration {d} s reached");
             return true;
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(ServiceEvent::State(state, msg)) => {
-                println!("[{state:?}] {msg}");
+                outln!("[{state:?}] {msg}");
                 match state {
                     StreamState::Streaming if streaming_since.is_none() => {
                         streaming_since = Some(Instant::now());
@@ -760,16 +850,26 @@ fn stream_session(
                     _ => {}
                 }
             }
-            Ok(ServiceEvent::StreamInfo(i)) => println!(
+            Ok(ServiceEvent::StreamInfo(i)) => outln!(
                 "Codec: {} | Bitrate: {} kbps | Sample rate: {} Hz | Channels: {}",
-                i.codec, i.bitrate_kbps, i.sample_rate, i.channels
+                i.codec,
+                i.bitrate_kbps,
+                i.sample_rate,
+                i.channels
             ),
-            Ok(ServiceEvent::Volume(v)) => println!("Headphone volume: {v} ({}%)", v as u32 * 100 / 127),
-            Ok(ServiceEvent::Battery(v)) => println!("Headphone battery: {v}%"),
-            Ok(ServiceEvent::BatteryRefused) => println!("Headphone battery: unknown (HFP refused)"),
-            Ok(ServiceEvent::OtherDeviceBack(a)) => println!("Another device connected: {}", bt_host::addr_str(&a)),
+            Ok(ServiceEvent::Volume(v)) => outln!("Headphone volume: {v} ({}%)", v as u32 * 100 / 127),
+            Ok(ServiceEvent::Battery(v)) => outln!("Headphone battery: {v}%"),
+            Ok(ServiceEvent::BatteryRefused) => outln!("Headphone battery: unknown (HFP refused)"),
+            Ok(ServiceEvent::OtherDeviceBack(a)) => outln!("Another device connected: {}", bt_host::addr_str(&a)),
             // The loader's own log lines say it
             Ok(ServiceEvent::Loader(_)) => {}
+            Ok(ServiceEvent::Voice(Some(v))) => outln!(
+                "Voice: {} at {} Hz, microphone to {}",
+                v.codec,
+                v.rate,
+                if v.mic_device_id.is_empty() { a.mic_output.as_deref().unwrap_or("-") } else { &v.mic_device_id }
+            ),
+            Ok(ServiceEvent::Voice(None)) => outln!("Voice: off"),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return false,
         }
@@ -781,12 +881,12 @@ fn print_services(service: &Service, device: Option<&str>) {
     let (Some(host), Some(addr)) = (service.host(), device.and_then(bt_host::parse_addr)) else { return };
     let _ = std::thread::Builder::new().name("cli-services".into()).spawn(move || match host.device_services(addr) {
         Ok(records) => {
-            println!("Services: {} record(s)", records.len());
+            outln!("Services: {} record(s)", records.len());
             for r in records {
-                println!("  {} {}", r.classes.join(" "), r.name.as_deref().unwrap_or("-"));
+                outln!("  {} {}", r.classes.join(" "), r.name.as_deref().unwrap_or("-"));
             }
         }
-        Err(e) => println!("Services: {e:?}"),
+        Err(e) => outln!("Services: {e:?}"),
     });
 }
 
@@ -803,7 +903,7 @@ const LE_RESTORE_ATTEMPTS: u32 = 3;
 const LE_STATS_EVERY: Duration = Duration::from_secs(5);
 
 fn le_print_stats(host: &bt_host::BtHost) {
-    println!("{}", bluecaster_core::le_stats_line(&host.le_stream_stats()));
+    outln!("{}", bluecaster_core::le_stats_line(&host.le_stream_stats()));
 }
 
 /// What the CLI needs of the LE core (v1 le_audio::Core): [`bt_host::BtHost`],
@@ -834,7 +934,7 @@ fn le_connect_group(
     let mut ids = Vec::new();
     for a in addrs {
         let Some(parsed) = parse_device_address(a) else {
-            eprintln!("Invalid LE address: {a}");
+            eoutln!("Invalid LE address: {a}");
             return None;
         };
         let mut addr = bt_host::LeAddr { addr: parsed, addr_type: bt_host::LeAddr::PUBLIC };
@@ -862,7 +962,7 @@ fn le_connect_group(
         match host.le_connect(addr, &name, LE_CONNECT_TIMEOUT) {
             Ok(id) => ids.push(id),
             Err(e) => {
-                eprintln!("LE Audio: cannot connect {a}: {e}");
+                eoutln!("LE Audio: cannot connect {a}: {e}");
                 return None;
             }
         }
@@ -877,7 +977,7 @@ fn run_script(service: &Service, file: &std::path::Path, allow_writes: bool, ada
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("Cannot read {}: {e}", file.display());
+            eoutln!("Cannot read {}: {e}", file.display());
             return 1;
         }
     };
@@ -885,7 +985,7 @@ fn run_script(service: &Service, file: &std::path::Path, allow_writes: bool, ada
         Ok(s) => s,
         Err(errors) => {
             for e in errors {
-                eprintln!("{e}");
+                eoutln!("{e}");
             }
             return 1;
         }
@@ -899,17 +999,17 @@ fn run_script(service: &Service, file: &std::path::Path, allow_writes: bool, ada
         .map_or(bt_host::chips::ChipVendor::Unknown, |(vid, pid)| bt_host::chips::vendor_for_usb(vid, pid, None));
     let denied = script.denied(bt_host::chips::denied_opcodes(vendor));
     if !denied.is_empty() {
-        eprintln!("These lines could change the chip for good and never run on a {} adapter:", vendor.name());
+        eoutln!("These lines could change the chip for good and never run on a {} adapter:", vendor.name());
         for l in denied {
-            eprintln!("  {}", line(l));
+            eoutln!("  {}", line(l));
         }
         return 1;
     }
     let writes = script.writes();
     if !writes.is_empty() && !allow_writes {
-        eprintln!("These lines may change the chip; run with --allow-writes to send them:");
+        eoutln!("These lines may change the chip; run with --allow-writes to send them:");
         for l in writes {
-            eprintln!("  {}", line(l));
+            eoutln!("  {}", line(l));
         }
         return 1;
     }
@@ -917,11 +1017,11 @@ fn run_script(service: &Service, file: &std::path::Path, allow_writes: bool, ada
     match service.run_script(None, script) {
         Ok(report) => {
             for l in bt_host::script::report_text(&report) {
-                println!("{l}");
+                outln!("{l}");
             }
             match &report.error {
-                Some(e) => println!("\nStopped at {e}"),
-                None => println!("\n{} of {total} lines done", report.steps.len()),
+                Some(e) => outln!("\nStopped at {e}"),
+                None => outln!("\n{} of {total} lines done", report.steps.len()),
             }
             match bluecaster_core::probe_report::save_script(
                 &bluecaster_core::paths::config_dir(),
@@ -930,13 +1030,13 @@ fn run_script(service: &Service, file: &std::path::Path, allow_writes: bool, ada
                 adapter,
                 env!("CARGO_PKG_VERSION"),
             ) {
-                Ok(path) => println!("Saved to {}", path.display()),
-                Err(e) => eprintln!("The report could not be saved: {e}"),
+                Ok(path) => outln!("Saved to {}", path.display()),
+                Err(e) => eoutln!("The report could not be saved: {e}"),
             }
             i32::from(report.error.is_some())
         }
         Err(m) => {
-            eprintln!("{m}");
+            eoutln!("{m}");
             1
         }
     }
@@ -994,7 +1094,7 @@ fn le_broadcast(a: &Args, service: &Service, rx: &mpsc::Receiver<ServiceEvent>, 
     let mut request = match crate::state::broadcast_request(&b, bt_host::media::MEDIA_PAYLOAD_LIMIT_DEFAULT) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Auracast: {} {:?}", e.code, e.message.args);
+            eoutln!("Auracast: {} {:?}", e.code, e.message.args);
             return 2;
         }
     };
@@ -1002,7 +1102,7 @@ fn le_broadcast(a: &Args, service: &Service, rx: &mpsc::Receiver<ServiceEvent>, 
     if let (Some(p), Some(l)) = (&le.preset, request.le.as_mut()) {
         l.preset = Some(p.clone());
     }
-    println!("Starting the broadcast \"{}\"...", b.name.trim());
+    outln!("Starting the broadcast \"{}\"...", b.name.trim());
     service.start_streaming(request);
     let mut code = 0;
     let receiver = bluecaster_core::receiver::ReceiverClient::new();
@@ -1023,7 +1123,7 @@ fn le_run(a: &Args, service: &Service, running: &Arc<AtomicBool>) -> i32 {
     });
     let is_running = || running.load(Ordering::Acquire);
 
-    println!(
+    outln!(
         "\n[LE Audio, experimental] Initializing BTstack ({} transport)...",
         if a.hci_tcp.is_none() { "WinUSB" } else { "H4 over TCP" }
     );
@@ -1031,7 +1131,7 @@ fn le_run(a: &Args, service: &Service, running: &Arc<AtomicBool>) -> i32 {
         Ok(h) => h,
         Err(m) => {
             tracing::error!("{m}");
-            eprintln!("Failed to initialize BTstack.");
+            eoutln!("Failed to initialize BTstack.");
             return 1;
         }
     };
@@ -1054,50 +1154,60 @@ fn le_run(a: &Args, service: &Service, running: &Arc<AtomicBool>) -> i32 {
         std::thread::sleep(Duration::from_millis(100));
     }
     if !host.le_ready() {
-        eprintln!("LE Audio did not start (does the adapter support LE?)");
+        eoutln!("LE Audio did not start (does the adapter support LE?)");
         return 1;
     }
 
     if let Some(secs) = le.scan {
-        println!("Scanning for LE Audio devices ({secs} s)...");
+        outln!("Scanning for LE Audio devices ({secs} s)...");
         let results = host.le_scan(Duration::from_secs(secs.into()));
         let mut n = 0;
         for r in results.iter().filter(|r| r.le_audio) {
             n += 1;
-            println!("{}", le_scan_line(r));
+            outln!("{}", le_scan_line(r));
         }
-        println!("{n} LE Audio device(s) found");
+        outln!("{n} LE Audio device(s) found");
         return 0;
     }
 
     let devices: Vec<String> = a.device.iter().chain(le.devices.iter()).cloned().collect();
     if devices.is_empty() {
-        eprintln!("No LE Audio device given (-d <address>; --le-scan lists them)");
+        eoutln!("No LE Audio device given (-d <address>; --le-scan lists them)");
         return 1;
     }
 
-    let (request, low_latency, note) = le.request();
+    // The headset microphone (--headset-mic): its output resolved and
+    // checked as in the app, before the stream asks for it
+    let source = le_source(a);
+    let mic_target = match bluecaster_core::le_mic_target(a.headset_mic.is_on(), a.mic_output.as_deref(), &source) {
+        Ok(t) => t,
+        Err(m) => {
+            outln!("Microphone: not used ({m})");
+            None
+        }
+    };
+    let (mut request, low_latency, note) = le.request();
+    request.conversational = mic_target.is_some();
     host.le_set_low_latency(low_latency);
     if let Some(note) = note {
-        println!("{note}");
+        outln!("{note}");
     }
 
-    println!("\nConnecting {} LE Audio device(s)...", devices.len());
+    outln!("\nConnecting {} LE Audio device(s)...", devices.len());
     let started = match le_setup(&host, &devices, &request) {
         Ok(s) => s,
         Err(e) => {
             if !e.is_empty() {
-                eprintln!("LE Audio: cannot stream: {e}");
+                eoutln!("LE Audio: cannot stream: {e}");
             }
             host.le_stop_stream();
             host.le_disconnect_all();
             return 1;
         }
     };
-    println!("\nStreaming LE Audio: {}", started.status.summary);
+    outln!("\nStreaming LE Audio: {}", started.status.summary);
 
     // Audio at the LC3 rate (WASAPI converts to it)
-    let source = le_source(a);
     let mut rc = 0;
     let start_audio = |started: &bt_host::LeStreamStarted| match bluecaster_core::LeAudioPath::start(
         &source,
@@ -1107,16 +1217,16 @@ fn le_run(a: &Args, service: &Service, running: &Arc<AtomicBool>) -> i32 {
         Ok(path) => {
             let rate = path.rate();
             if a.test_tone {
-                println!("Audio: test tone (1 kHz left / 1.5 kHz right) at {rate} Hz");
+                outln!("Audio: test tone (1 kHz left / 1.5 kHz right) at {rate} Hz");
             } else {
                 let f = path.format();
-                println!("Audio: WASAPI capture {} Hz {} ch (LC3 at {rate} Hz)", f.sample_rate, f.channels);
+                outln!("Audio: WASAPI capture {} Hz {} ch (LC3 at {rate} Hz)", f.sample_rate, f.channels);
             }
             Some(path)
         }
         Err(e) => {
             tracing::error!("LE Audio: audio: {e}");
-            eprintln!("Failed to start audio capture");
+            eoutln!("Failed to start audio capture");
             None
         }
     };
@@ -1124,6 +1234,28 @@ fn le_run(a: &Args, service: &Service, running: &Arc<AtomicBool>) -> i32 {
     if audio.is_none() {
         rc = 1;
     }
+    // The headset microphone (--headset-mic)
+    let mut started = started;
+    let mut mic_streams = 1;
+    let start_mic = |started: &mut bt_host::LeStreamStarted, n: u32| {
+        let target = mic_target.as_ref()?;
+        match bluecaster_core::start_mic(started, target, n) {
+            Ok(Some(m)) => {
+                outln!("Microphone: LC3 at {} Hz -> {}", m.rate(), m.target());
+                Some(m)
+            }
+            Ok(None) => {
+                let note = &started.status.plan.source_note;
+                outln!("Microphone: none in the stream ({})", if note.is_empty() { "not set up" } else { note });
+                None
+            }
+            Err(e) => {
+                outln!("Microphone: the output did not open ({e})");
+                None
+            }
+        }
+    };
+    let mut mic = start_mic(&mut started, mic_streams);
 
     // Test only: the headset volume synced with a simulated Windows volume
     let mut sim_volume = None;
@@ -1131,7 +1263,7 @@ fn le_run(a: &Args, service: &Service, running: &Arc<AtomicBool>) -> i32 {
         match bluecaster_core::volume_sync::SimulatedWindowsVolume::parse(spec) {
             Some(v) => sim_volume = Some(v),
             None => {
-                eprintln!("Invalid --le-sim-volume {spec}");
+                eoutln!("Invalid --le-sim-volume {spec}");
                 rc = 1;
             }
         }
@@ -1145,7 +1277,7 @@ fn le_run(a: &Args, service: &Service, running: &Arc<AtomicBool>) -> i32 {
         if let Some(d) = a.duration
             && start.elapsed() >= Duration::from_secs(d)
         {
-            println!("\n--duration {d} s reached");
+            outln!("\n--duration {d} s reached");
             break;
         }
         if last_print.elapsed() >= LE_STATS_EVERY {
@@ -1157,11 +1289,15 @@ fn le_run(a: &Args, service: &Service, running: &Arc<AtomicBool>) -> i32 {
         }
         if host.le_stream_lost() {
             // A device or CIS went away: tear down and set it up again
-            println!("\n*** LE Audio stream lost - setting it up again ***");
+            outln!("\n*** LE Audio stream lost - setting it up again ***");
             if let Some(p) = audio.take() {
                 p.stop();
             }
             host.le_stop_stream();
+            // After the stream stopped: what arrived until then is decoded
+            if let Some(m) = mic.take() {
+                m.stop();
+            }
             let mut again = None;
             while again.is_none() && restarts < LE_RESTORE_ATTEMPTS && is_running() {
                 restarts += 1;
@@ -1176,29 +1312,37 @@ fn le_run(a: &Args, service: &Service, running: &Arc<AtomicBool>) -> i32 {
                     }
                 }
             }
-            let Some(started) = again else {
-                eprintln!("LE Audio: could not restore the stream");
+            let Some(mut started) = again else {
+                eoutln!("LE Audio: could not restore the stream");
                 rc = 1;
                 break;
             };
-            println!("*** LE Audio stream restored: {} ***", started.status.summary);
+            outln!("*** LE Audio stream restored: {} ***", started.status.summary);
             audio = start_audio(&started);
+            mic_streams += 1;
+            mic = start_mic(&mut started, mic_streams);
             if audio.is_none() {
                 rc = 1;
             }
         }
     }
 
-    println!("\nShutting down...");
+    outln!("\nShutting down...");
     if let Some(p) = audio.take() {
         p.stop();
     }
     std::thread::sleep(Duration::from_millis(100));
     le_print_stats(&host);
     host.le_stop_stream();
+    // After the stream stopped (Disable ends the receiving): every SDU that
+    // arrived is decoded
+    if let Some(m) = mic.take() {
+        let c = m.stop();
+        outln!("{}", c.message());
+    }
     host.le_disconnect_all();
     service.shutdown();
-    println!("Done.");
+    outln!("Done.");
     rc
 }
 
@@ -1206,17 +1350,13 @@ fn le_run(a: &Args, service: &Service, running: &Arc<AtomicBool>) -> i32 {
 /// scan_paired_devices)
 fn print_paired(devices: &[PairedDevice]) {
     if devices.is_empty() {
-        println!("No paired Bluetooth devices found");
+        outln!("No paired Bluetooth devices found");
         return;
     }
     for d in devices {
-        println!("  [{}] {} ({})", if d.is_a2dp_sink() { "A2DP" } else { "----" }, d.name, d.address_string());
+        outln!("  [{}] {} ({})", if d.is_a2dp_sink() { "A2DP" } else { "----" }, d.name, d.address_string());
     }
-    println!(
-        "Found {} devices ({} with A2DP Sink)",
-        devices.len(),
-        devices.iter().filter(|d| d.is_a2dp_sink()).count()
-    );
+    outln!("Found {} devices ({} with A2DP Sink)", devices.len(), devices.iter().filter(|d| d.is_a2dp_sink()).count());
 }
 
 /// A Bluetooth address as v1 took it (BtDeviceDiscovery::normalize_address):
@@ -1344,6 +1484,18 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(a.le.ccp_sim.as_deref(), Some("1:incoming tel:+1555|Alice|tel:+1666;4:hangup"));
+        assert!(a.headset_mic == HeadsetMic::Off && a.mic_output.is_none());
+
+        // The headset microphone (run_test.py's mic-* cases)
+        let a = parse(&args("--cli --le-audio -d 00:A2:D0:00:00:12 --headset-mic --mic-output out\\mic.wav")).unwrap();
+        assert!(a.le.on && a.headset_mic == HeadsetMic::On);
+        assert_eq!(a.mic_output.as_deref(), Some("out\\mic.wav"));
+        // A mode after it: on or auto; anything else is the next argument
+        let a = parse(&args("--cli --headset-mic auto --mic-output out\\mic.wav")).unwrap();
+        assert_eq!((a.headset_mic, a.mic_output.as_deref()), (HeadsetMic::Auto, Some("out\\mic.wav")));
+        assert_eq!(parse(&args("--cli --headset-mic on")).unwrap().headset_mic, HeadsetMic::On);
+        assert_eq!(parse(&args("--cli --headset-mic")).unwrap().headset_mic, HeadsetMic::On);
+        assert_eq!(parse(&args("--cli --mic-output")).err().as_deref(), Some("--mic-output needs a value"));
 
         assert_eq!(parse(&args("--cli --le-device")).err().as_deref(), Some("--le-device needs a value"));
         assert_eq!(parse(&args("--cli --le-preset")).err().as_deref(), Some("--le-preset needs a value"));

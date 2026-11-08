@@ -222,13 +222,24 @@ pub fn configure(config: &mut HostConfig, settings: &Settings, _config_dir: &Pat
                 && chips::chip_supported(a.vendor, a.device.vid, a.device.pid)
                 && !a.device.in_use()
         });
+        // A Realtek chip whose firmware comes from Realtek's Windows driver
+        // (the RTL8852BD): the first one present, never one in use
+        config.realtek_driver_chip = winusb
+            .iter()
+            .find(|a| {
+                a.vendor == ChipVendor::Realtek
+                    && bt_host::realtek_btnic::chip(a.device.vid, a.device.pid).is_some()
+                    && !a.device.in_use()
+            })
+            .map(|a| (a.device.vid, a.device.pid));
         config.broadcom_ids =
             winusb.iter().filter(|a| a.vendor == ChipVendor::Broadcom).map(|a| (a.device.vid, a.device.pid)).collect();
         tracing::debug!(
-            "adapter: intel bootloader download {}, mediatek download {}, qualcomm download {}, broadcom patchram ids {:04X?}",
+            "adapter: intel bootloader download {}, mediatek download {}, qualcomm download {}, realtek driver chip {:04X?}, broadcom patchram ids {:04X?}",
             config.intel_loader,
             config.mediatek_loader,
             config.qualcomm_loader,
+            config.realtek_driver_chip,
             config.broadcom_ids
         );
         for a in &winusb {

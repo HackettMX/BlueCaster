@@ -13,6 +13,7 @@
 
 pub mod convert;
 pub mod le;
+pub mod le_rx;
 pub mod packetizer;
 
 use std::sync::Arc;

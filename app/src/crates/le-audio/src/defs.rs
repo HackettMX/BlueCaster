@@ -249,11 +249,13 @@ pub const UGT_FEATURE_MULTIPLEX: u8 = 1 << 4;
 pub const UGT_FEATURE_MULTISINK: u8 = 1 << 5;
 pub const UGT_FEATURE_MULTISOURCE: u8 = 1 << 6;
 
-/// What the PC's TMAS says
-pub const PC_TMAP_ROLE: u16 = TMAP_ROLE_UMS;
+/// What the PC's TMAS says: Call Gateway (conversational streams with the
+/// headset microphone, CCP's GTBS) and Unicast Media Sender
+pub const PC_TMAP_ROLE: u16 = TMAP_ROLE_CG | TMAP_ROLE_UMS;
 /// What the PC's GMAS says
 pub const PC_GMAP_ROLE: u8 = GMAP_ROLE_UGG;
-pub const PC_UGG_FEATURES: u8 = UGG_FEATURE_MULTIPLEX | UGG_FEATURE_96KBPS_SRC;
+/// Multisink: the microphones of several UGTs (source ASEs, one CIS each)
+pub const PC_UGG_FEATURES: u8 = UGG_FEATURE_MULTIPLEX | UGG_FEATURE_96KBPS_SRC | UGG_FEATURE_MULTISINK;
 
 // ---- Sampling frequencies ----
 

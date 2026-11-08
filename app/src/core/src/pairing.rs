@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 
 use bt_host::ServicesError;
 use bt_host::link_keys::FileLinkKeyStore;
-use ipc::{DevicePairing, DeviceService, ErrorInfo, LeKeysInfo, LinkKeyInfo, Msg, ServiceList, WindowsImport};
+use ipc::{
+    DevicePairing, DeviceService, ErrorInfo, LeKeysInfo, LeKeysMissing, LinkKeyInfo, Msg, ServiceList, WindowsImport,
+};
 use serde_json::Value;
 
 use crate::state::CoreState;
@@ -60,8 +62,27 @@ pub fn pairing(state: &CoreState, addr: &str) -> Result<Value, ErrorInfo> {
         .find(|e| e.addr == addr)
         .map(|e| LinkKeyInfo { key: hex(&e.key), key_type: e.key_type.clamp(0, 255) as u8 });
     // Held by the running stack (its bond file is open there)
-    let le_keys = state.service.host().and_then(|h| h.le_keys(addr)).map(le_keys_info);
-    Ok(serde_json::to_value(DevicePairing { link_key, le_keys }).unwrap_or(Value::Null))
+    let (le_keys, le_keys_missing) = match state.service.host().and_then(|h| h.le_keys(addr)) {
+        Some(Ok(k)) => (Some(le_keys_info(k)), None),
+        Some(Err(why)) => (None, Some(missing(why))),
+        None => (None, Some(LeKeysMissing::NoStack)),
+    };
+    Ok(serde_json::to_value(DevicePairing { link_key, le_keys, le_keys_missing }).unwrap_or(Value::Null))
+}
+
+fn missing(why: bt_host::CtkdOutcome) -> LeKeysMissing {
+    use bt_host::CtkdOutcome as O;
+    match why {
+        O::NoLe => LeKeysMissing::NoLe,
+        O::NotAsked => LeKeysMissing::NotAsked,
+        O::Asking => LeKeysMissing::Asking,
+        O::NotSecure => LeKeysMissing::NotSecure,
+        O::DeviceLed => LeKeysMissing::DeviceLed,
+        O::NoSupport => LeKeysMissing::NoSupport,
+        O::Refused => LeKeysMissing::Refused,
+        O::NoAnswer => LeKeysMissing::NoAnswer,
+        O::NoneGiven => LeKeysMissing::NoneGiven,
+    }
 }
 
 /// BTstack keeps the LTK and IRK most significant octet first: shown least
@@ -94,9 +115,9 @@ fn list(services: Vec<DeviceService>, from_last_connection: bool) -> Value {
 }
 
 /// device.services: over the link the running stack has to the device; not
-/// connected, the list it gave last
+/// connected, the list it gave last (not developer mode only since issue
+/// #86: the tag is out of the way, the keys stay in developer mode)
 pub fn services(state: &CoreState, addr: &str) -> Result<Value, ErrorInfo> {
-    developer(state)?;
     let addr = address(addr)?;
     let not_connected = || match seen().get(&addr) {
         Some(last) => Ok(list(last.clone(), true)),
@@ -136,16 +157,24 @@ fn parse_key(v: &Value) -> Option<([u8; 6], [u8; 16])> {
 
 /// device.import_windows_pairings (not developer mode only since issue #86:
 /// it only reads Windows' keys, after an administrator prompt)
-pub fn import_windows(state: &Arc<CoreState>, adapter: &str) -> Result<Value, ErrorInfo> {
+pub fn import_windows(state: &Arc<CoreState>, adapter: &str, only: Option<&str>) -> Result<Value, ErrorInfo> {
     let radio = bt_host::addr_str(&address(adapter)?);
+    // One device's (Connect on a device Windows paired, issue #86)
+    let only = only.map(address).transpose()?;
     let (code, result) = crate::driver::run(&state.config_dir(), &["windows-keys", &radio])?;
     if code != 0 || result.get("ok").and_then(Value::as_bool) != Some(true) {
         tracing::warn!("Windows' keys of {radio}: helper exit {code}");
         return Err(err("adapter.import_failed", "ipc.error.import_failed"));
     }
     let adapter_found = result.get("radio_found").and_then(Value::as_bool) == Some(true);
-    let keys: Vec<([u8; 6], [u8; 16])> =
-        result.get("keys").and_then(Value::as_array).into_iter().flatten().filter_map(parse_key).collect();
+    let keys: Vec<([u8; 6], [u8; 16])> = result
+        .get("keys")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(parse_key)
+        .filter(|(a, _)| only.is_none_or(|o| *a == o))
+        .collect();
     let dir = state.config_dir();
     let have: Vec<[u8; 6]> = link_keys(&dir).entries().iter().map(|e| e.addr).collect();
     let (mut imported, mut kept) = (Vec::new(), Vec::new());

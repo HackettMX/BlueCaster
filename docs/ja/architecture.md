@@ -122,6 +122,7 @@ USB トランスポートには、v1 で実機のアダプターのために必�
 | 2. 部品 | `aptx-adaptive` | Rust の aptX Adaptive エンコーダー（AKS-Logic/aptx-adaptive-linux から取り込み、MIT） |
 | 2. 部品 | `codec` | `Encoder` トレイト、SBC エンコーダー（Bluedroid 版の Rust 移植）、C エンコーダーの安全なラッパー、Codec Information の解析とコーデックの選択 |
 | 2. 部品 | `audio-capture` | `wasapi` クレートによる WASAPI キャプチャ: システムループバック、仮想デバイス、アプリ単位（プロセスループバック）。デバイスとアプリの一覧、テストトーン、アプリごとの音量（音量ミキサー） |
+| 2. 部品 | `voice-link` | ヘッドセットマイクの音声（開発者モード）: 選んだ出力デバイスへのモノラル PCM の再生（WASAPI）、上り方向のためのキャプチャのモノラル化、SCO ペイロード上の音声コーデック CVSD / mSBC / LC3-SWB |
 | 3. エンジン | `bt-host` | BTstack を専用スレッドで動かし、コマンドと型付きイベントで操作する: GAP、A2DP Source、AVRCP、SDP、パススルー用の RFCOMM チャネル（`rfcomm.*`）、リンクキー、デバイスの SDP サービス、AFH、ファームウェアの読み込みとチップのローダー（`bringup`）、チップのプローブとチップスクリプト、HCI キャプチャ（`.pklg`）、LE Audio（`le/`） |
 | 2. 部品 | `le-audio` | LE Audio（実験的）: BTstack にも Windows にも依存しないロジック（Assigned Numbers、LTV、PACS / ASCS の PDU、プリセット、CSIP / VCP / MCP / CCP のモデル） |
 | 3. エンジン | `pipeline` | PCM のリング、形式変換、ダウンミックス、エンコード、メディアペイロード、送信ペース、ABR |

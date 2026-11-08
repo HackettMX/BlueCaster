@@ -1,0 +1,28 @@
+nusb 0.2.8, vendored for BlueCaster
+====================================
+
+Source: the crates.io package nusb 0.2.8
+(https://crates.io/crates/nusb/0.2.8, repository https://github.com/kevinmehall/nusb,
+git commit c80218d342740321190436bc45304ebbbf16bef0 per the package's .cargo_vcs_info.json).
+License: Apache-2.0 OR MIT (LICENSE-APACHE, LICENSE-MIT, unchanged), by Kevin Mehall.
+
+Wired in with [patch.crates-io] in the root Cargo.toml and kept out of the
+workspace (exclude), so it builds with its own settings, as from crates.io.
+
+Copied: src/, examples/, Cargo.toml (the normalized one of the package),
+Cargo.toml.orig, LICENSE-APACHE, LICENSE-MIT, README.md. Left out: .github/,
+.cargo/ (a wasm32 rustflags setting), Cargo.lock, .gitignore,
+.cargo_vcs_info.json, .cargo-ok.
+
+Changed (the only change):
+- src/device.rs: a Windows-only accessor Interface::winusb_handle(), the
+  WINUSB_INTERFACE_HANDLE of the claimed interface. hci-transport uses it for
+  the isochronous SCO pipes of a Bluetooth adapter's interface 1
+  (WinUsb_RegisterIsochBuffer, WinUsb_ReadIsochPipeAsap,
+  WinUsb_WriteIsochPipeAsap, through win-sys/src/usb_isoch.rs), which nusb
+  0.2.8 does not wrap. Its OVERLAPPED structures set the low bit of hEvent,
+  so nusb's thread-pool completion callback never sees them.
+
+To update: copy the new release the same way and apply the accessor again
+(or drop the vendored copy once nusb has isochronous transfers or exposes
+the handle).

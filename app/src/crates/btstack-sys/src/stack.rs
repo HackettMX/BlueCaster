@@ -94,12 +94,12 @@ impl Stack {
 
     /// Installs the HCI transport and initializes HCI on it
     pub fn hci_init(&self, backend: Box<dyn crate::HciBackend>) {
-        let is_async = transport::install(backend);
+        let kind = transport::install(backend);
         log_le_hidden();
-        tracing::debug!(target: "btstack", "hci_init (async transport {is_async})");
+        tracing::debug!(target: "btstack", "hci_init (transport {kind:?})");
         // SAFETY: on the BTstack thread; the backend is installed, so the
         // transport table's callbacks have something to call.
-        unsafe { ffi::bluecaster_hci_init(is_async as c_int) };
+        unsafe { ffi::bluecaster_hci_init(kind as c_int) };
         mark(INIT_HCI);
     }
 
@@ -113,9 +113,10 @@ impl Stack {
     /// Initializes HCI on the transport installed with
     /// [`Stack::install_transport`]
     pub fn hci_init_installed(&self) {
-        tracing::debug!(target: "btstack", "hci_init on the installed transport (async {})", transport::is_async());
+        let kind = transport::kind();
+        tracing::debug!(target: "btstack", "hci_init on the installed transport ({kind:?})");
         // SAFETY: on the BTstack thread.
-        unsafe { ffi::bluecaster_hci_init(transport::is_async() as c_int) };
+        unsafe { ffi::bluecaster_hci_init(kind as c_int) };
         mark(INIT_HCI);
     }
 
@@ -172,13 +173,17 @@ impl Stack {
         mark(INIT_AVRCP);
     }
 
-    /// HFP audio gateway (after sdp_init): only the service level
-    /// connection is made, for the headphones' battery level; events come as
-    /// [`crate::Source::Hfp`]
-    pub fn hfp_ag_init(&self) {
+    /// HFP audio gateway (after sdp_init); events come as
+    /// [`crate::Source::Hfp`]. Without `voice` only the service level
+    /// connection is made, for the headphones' battery level (CVSD only, no
+    /// codec negotiation). With `voice` the AG also offers codec negotiation
+    /// with LC3-SWB, mSBC and CVSD and eSCO S4, for
+    /// [`Stack::hfp_ag_audio_connect`].
+    pub fn hfp_ag_init(&self, voice: bool) {
         self.rfcomm_init();
+        tracing::debug!(target: "btstack", "hfp_ag_init (voice {voice})");
         // SAFETY: on the BTstack thread, after l2cap / sdp / rfcomm init.
-        unsafe { ffi::bluecaster_hfp_ag_init() };
+        unsafe { ffi::bluecaster_hfp_ag_init(voice as c_int) };
         mark(INIT_HFP);
     }
 
@@ -271,6 +276,79 @@ impl Stack {
         let status = unsafe { ffi::bluecaster_hfp_ag_release(acl_handle) };
         tracing::debug!(target: "btstack", "hfp_ag_release acl 0x{acl_handle:04X}: 0x{status:02X}");
         status
+    }
+
+    /// Opens the HFP audio connection (eSCO / SCO) on the service level
+    /// connection of `acl`: codec negotiation first when both sides support
+    /// it. The result comes as HFP_SUBEVENT_AUDIO_CONNECTION_ESTABLISHED
+    /// ([`crate::Source::Hfp`]).
+    pub fn hfp_ag_audio_connect(&self, acl: u16) -> u8 {
+        // SAFETY: on the BTstack thread after hfp_ag_init.
+        let status = unsafe { ffi::bluecaster_hfp_ag_audio_connect(acl) };
+        tracing::debug!(target: "btstack", "hfp_ag_audio_connect acl 0x{acl:04X}: 0x{status:02X}");
+        status
+    }
+
+    /// Closes the HFP audio connection; HFP_SUBEVENT_AUDIO_CONNECTION_RELEASED
+    /// follows
+    pub fn hfp_ag_audio_release(&self, acl: u16) -> u8 {
+        // SAFETY: on the BTstack thread after hfp_ag_init.
+        let status = unsafe { ffi::bluecaster_hfp_ag_audio_release(acl) };
+        tracing::debug!(target: "btstack", "hfp_ag_audio_release acl 0x{acl:04X}: 0x{status:02X}");
+        status
+    }
+
+    /// Sends one SCO packet with this payload (at most 255 bytes; use
+    /// [`Stack::sco_packet_length`] minus the 3 header bytes). Only after
+    /// HCI_EVENT_SCO_CAN_SEND_NOW ([`crate::Source::Sco`]); 0 = sent,
+    /// otherwise BTstack's status (BTSTACK_ACL_BUFFERS_FULL: not now).
+    pub fn sco_send(&self, handle: u16, payload: &[u8]) -> u8 {
+        let Ok(len) = u8::try_from(payload.len()) else {
+            return crate::consts::ERROR_CODE_INVALID_HCI_COMMAND_PARAMETERS;
+        };
+        // SAFETY: on the BTstack thread; the shim copies `payload` (len
+        // bytes) into HCI's outgoing buffer during the call.
+        unsafe { ffi::bluecaster_sco_send(handle, payload.as_ptr(), len as u16) }
+    }
+
+    /// Asks for HCI_EVENT_SCO_CAN_SEND_NOW for this SCO connection
+    pub fn sco_request_can_send_now(&self, handle: u16) {
+        // SAFETY: on the BTstack thread; unknown handles are ignored.
+        unsafe { ffi::bluecaster_sco_request_can_send_now(handle) };
+    }
+
+    /// The SCO packet length (3 header bytes included) BTstack wants for
+    /// this connection; 0 for an unknown handle. On an H2 transport
+    /// ([`Stack::transport_is_h2`]) BTstack asserts that the controller's SCO
+    /// data packet length holds 3 ms of audio (48 bytes CVSD, 24
+    /// transparent): check that first.
+    pub fn sco_packet_length(&self, handle: u16) -> u16 {
+        // SAFETY: on the BTstack thread; unknown handles give 0.
+        unsafe { ffi::bluecaster_sco_packet_length(handle) }
+    }
+
+    /// The installed transport is an H2 one (SCO over USB isochronous,
+    /// [`crate::HciBackend::is_h2`])
+    pub fn transport_is_h2(&self) -> bool {
+        transport::kind() == transport::TransportKind::H2
+    }
+
+    /// Whether the transport can carry SCO data now
+    /// ([`crate::HciBackend::sco_ready`])
+    pub fn sco_ready(&self) -> bool {
+        transport::sco_ready()
+    }
+
+    /// Hides the SCO commands of HCI init from BTstack (the default of every
+    /// run; see crate::transport): off when the stack offers voice. Takes
+    /// effect only before [`Stack::hci_init`] / [`Stack::install_transport`]:
+    /// false afterwards.
+    pub fn set_sco_hidden(&self, hidden: bool) -> bool {
+        let ok = transport::set_sco_hidden(hidden);
+        if !ok {
+            tracing::warn!(target: "hci", "SCO hidden: can only be changed before hci_init");
+        }
+        ok
     }
 
     /// SDP records: A2DP source (player), AVRCP controller and target with
@@ -939,6 +1017,9 @@ impl Stack {
 fn log_le_hidden() {
     if transport::le_hidden() {
         tracing::info!(target: "hci", "LE hidden: not using the controller's LE support (LE Audio off)");
+    }
+    if transport::sco_hidden() {
+        tracing::debug!(target: "hci", "SCO hidden: no SCO flow control / erroneous data reporting at init (no voice)");
     }
 }
 

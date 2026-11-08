@@ -51,6 +51,25 @@ export function deviceDefaults(profiles: readonly Profile[], address: string): D
   return p ? deviceFields(p) : null;
 }
 
+/** Headset mode (developer mode, Profile.headset_mic): Auto opens the
+ *  microphone link only while an app records from the cable; the core
+ *  switches it */
+export type HeadsetMode = "off" | "auto" | "on";
+
+/** In the order a click goes through them (Home's and the flyout's chip) */
+export const HEADSET_MODES: readonly HeadsetMode[] = ["off", "auto", "on"];
+
+/** A profile's headset mode; anything unknown reads as Off */
+export function headsetMode(p: Pick<Profile, "headset_mic">): HeadsetMode {
+  const m = p.headset_mic as string;
+  return (HEADSET_MODES as readonly string[]).includes(m) ? (m as HeadsetMode) : "off";
+}
+
+/** The mode after `m`: Off -> Auto -> On -> Off */
+export function nextHeadsetMode(m: HeadsetMode): HeadsetMode {
+  return HEADSET_MODES[(HEADSET_MODES.indexOf(m) + 1) % HEADSET_MODES.length];
+}
+
 export function newProfile(): Profile {
   return {
     name: "",
@@ -80,6 +99,9 @@ export function newProfile(): Profile {
     max_media_payload: PACKET_DEFAULT,
     le_audio: false,
     le_low_latency: true,
+    headset_mic: "off",
+    mic_device_id: "",
+    mic_device_name: "",
     sbc_bitpool: 0,
     sbcxq_bitpool: 0,
     sbc_min_bitpool: 0,

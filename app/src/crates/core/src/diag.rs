@@ -1363,6 +1363,13 @@ fn le_audio_section(out: &mut String, s: &Settings, le: Option<&LeAudioDiag>) {
             _ => "disconnected",
         };
         let _ = write!(out, "  Device {} {}: {state}, {} sink ASE(s)", d.addr, quoted(&d.name), d.sink_ases);
+        if d.source_ases > 0 {
+            let _ = write!(out, ", {} source ASE(s) (microphone", d.source_ases);
+            if !d.source_pacs.is_empty() {
+                let _ = write!(out, ": {}", d.source_pacs);
+            }
+            out.push(')');
+        }
         if !d.roles.is_empty() {
             let _ = write!(out, ", {}", d.roles);
         }
@@ -1440,7 +1447,11 @@ pub fn diag_text(d: &DiagInput<'_>) -> String {
         on_off(s.auto_codec),
         s.afh,
         on_off(s.check_updates_on_startup),
-        if s.include_prereleases { " (pre-releases too)" } else { "" }
+        match s.update_channel() {
+            crate::update::Channel::Alpha => " (alphas too)",
+            crate::update::Channel::Beta => " (pre-releases too)",
+            crate::update::Channel::Stable => "",
+        }
     );
     if let Some(l) = d.logging {
         let _ = writeln!(out, "Logging      : {l}");
@@ -2412,6 +2423,9 @@ mod tests {
                 sink_locations: 3,
                 sink_ases: 2,
                 pacs: String::new(),
+                source_locations: 1,
+                source_ases: 1,
+                source_pacs: "LC3 rates 0x0024 ch 0x01 octets 40-80".into(),
                 roles: "TMAP: UMR, GMAP: UGT (UGT features 0x3C: sink)".into(),
             }],
         };
@@ -2425,8 +2439,10 @@ mod tests {
         ));
         // The device's name is masked with the rest
         assert!(
-            text.contains(": ready, 2 sink ASE(s), TMAP: UMR, GMAP: UGT (UGT features 0x3C: sink)\n")
-                && text.contains("  Device <addr-")
+            text.contains(
+                ": ready, 2 sink ASE(s), 1 source ASE(s) (microphone: LC3 rates 0x0024 ch 0x01 octets 40-80), TMAP: \
+                 UMR, GMAP: UGT (UGT features 0x3C: sink)\n"
+            ) && text.contains("  Device <addr-")
                 && !text.contains("Earbuds"),
             "{text}"
         );

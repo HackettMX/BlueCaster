@@ -29,7 +29,7 @@ export type SbcFields = Pick<
   | "sbc_allocation"
   | "sbc_channel_mode"
 > &
-  Partial<Pick<Profile, "sbc_min_bitpool" | "sbcxq_min_bitpool">>;
+  Partial<Pick<Profile, "sbc_min_bitpool" | "sbcxq_min_bitpool" | "unlisted_options">>;
 
 /** What the device listed when it last connected (null: not known) */
 export function knownSbcCaps(devices: readonly Device[], address: string): SbcCaps | null {
@@ -102,7 +102,8 @@ export function sbcSetup(p: SbcFields, rate: number, caps: SbcCaps | null): SbcS
     : SBC_CHANNEL_MODES.includes(p.sbc_channel_mode) && sbcOffered(caps, "channel_modes", p.sbc_channel_mode)
       ? p.sbc_channel_mode
       : "joint_stereo";
-  const max = xq ? xqMaxBitpool(rate) : 53;
+  // SBC XQ not held to the device's list: up to SBC's 53 (issue #86)
+  const max = xq && !p.unlisted_options ? xqMaxBitpool(rate) : 53;
   const asked = xq ? p.sbcxq_bitpool : p.sbc_bitpool;
   const auto = xq ? xqBitpool(p.quality, rate) : qualityBitpool(p.quality);
   // Never below the profile's minimum (issue #86)

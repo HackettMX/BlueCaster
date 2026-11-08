@@ -359,7 +359,9 @@ describe("saved devices on the Audio Devices screen", () => {
 
   it("asks first when Windows' Bluetooth has the device paired too (issue #86)", async () => {
     const { calls } = start("#/devices");
+    // Through another radio: nothing to import
     mock!.windowsPaired = ["f4:4e:fd:00:11:22"];
+    mock!.windowsPairedThrough = [];
     fireEvent.click(await screen.findByRole("button", { name: t("connection.scan") }));
     const row = (await screen.findByText(/Galaxy Buds2 Pro/)).closest(".device-row") as HTMLElement;
     fireEvent.click(within(row).getByRole("button", { name: t("ui.devices.add") }));
@@ -373,6 +375,23 @@ describe("saved devices on the Audio Devices screen", () => {
     dialog = await screen.findByRole("dialog", { name: t("ui.devices.windows_paired_title") });
     fireEvent.click(within(dialog).getByRole("button", { name: t("ui.devices.add_anyway") }));
     await waitFor(() => expect(calls.some((c) => c.method === "profile.save")).toBe(true));
+  });
+
+  it("offers Windows' pairing of a device paired through this adapter (issue #86)", async () => {
+    const { calls } = start("#/devices");
+    mock!.windowsPaired = ["f4:4e:fd:00:11:22"];
+    fireEvent.click(await screen.findByRole("button", { name: t("connection.scan") }));
+    const row = (await screen.findByText(/Galaxy Buds2 Pro/)).closest(".device-row") as HTMLElement;
+    fireEvent.click(within(row).getByRole("button", { name: t("ui.devices.add") }));
+    const dialog = await screen.findByRole("dialog", { name: t("ui.devices.windows_paired_title") });
+    expect(dialog).toHaveTextContent(t("ui.devices.windows_import_text", "Galaxy Buds2 Pro"));
+    expect(within(dialog).getByRole("button", { name: t("ui.devices.add_new") })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: t("ui.devices.import_one") }));
+    // That device's key only, then added as usual
+    await waitFor(() => expect(calls.some((c) => c.method === "profile.save")).toBe(true));
+    const imported = calls.find((c) => c.method === "device.import_windows_pairings");
+    expect(imported?.params).toMatchObject({ address: expect.stringMatching(/^f4:4e:fd:00:11:22$/i) });
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("makes a profile that picks the best codec for a device added without one", async () => {
