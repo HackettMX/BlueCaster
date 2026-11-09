@@ -260,6 +260,8 @@ Windows 8 及更高版本自带 Microsoft 签名的 WinUSB 驱动程序（`winus
 
 链接密钥保存在 `link_keys.txt` 中。在添加设备的地方，核心可以接管 Windows 的 Bluetooth 为 BlueCaster 现在所用适配器保存的密钥：`bluecaster-driver.exe windows-keys` 读取它们（一次 UAC 提示），BlueCaster 已有的密钥会保留，其中的音频设备以 Windows 中的名称保存。开发者模式会显示设备的链接密钥及其列出的 SDP 服务。
 
+`pairing\` 中的密钥文件（链接密钥、LE 绑定信息、协调集、从 Windows 接管的 LE 密钥、被替换的 Windows 密钥）使用 DPAPI 按 Windows 用户加密（`win-sys::dpapi`）；其他用户以及复制到其他电脑上的同一文件都无法读取。旧版本的明文文件会被读取并以加密形式重写。无法解密的文件保留为 `<名称>.undecryptable`，其设备需要重新配对。BTstack 的 LE TLV 由 BlueCaster 自己保存（`btstack-sys` 的 `TlvStore`，内容与 `btstack_tlv_windows` 写入的相同）。恢复时由管理员权限的辅助程序读取的 `keys_for_windows.json` 仍为明文（辅助程序可能以另一位管理员身份运行），辅助程序结束后即删除。
+
 ### 音频编码器
 
 | 编码器 | 库 | 比特率 | 特性 |
@@ -325,6 +327,7 @@ AAC 和 SBC 使用 A2DP 规范中定义的标准 A2DP 编解码器 ID。
 | `devices\device_codecs.json` | 每台经典设备上次连接时提供的内容（以及是否已向 OPPO 耳塞请求过 Hi-Res） |
 | `pairing\link_keys.txt` | 链接密钥：与 v1 或 2.0.x 配对过的耳机无需重新配对即可再次连接 |
 | `pairing\le_audio_bonds.tlv`、`pairing\le_audio_csip.txt` | LE Audio（实验性）：LE 绑定信息（含 GATT 服务器持久保存的 CCC 值）以及协调集 |
+| `pairing\windows_le_keys.txt`、`pairing\replaced_windows_keys.json` | 从 Windows 接管的 LE 密钥（直到启用 LE 的协议栈将其加入）；**恢复原始驱动程序** 替换掉的 Windows 密钥 |
 | `adapters\adapter_caps.json` | 堆栈对每个适配器所了解的信息（是否支持 LE Audio、地址、HCI 版本、Windows 中的名称） |
 | `adapters\driver\<instance id>.json` | 每个被分配了 WinUSB 的适配器之前的驱动程序 |
 | `firmware\` | 固件文件（`*.bin`、`*.hcd`、`ibt-*`；Intel 的固件也位于 `firmware\intel\`，与 linux-firmware 的布局相同）；早期版本散放在设置文件夹中的文件会被移到这里 |

@@ -148,8 +148,13 @@ fn keep_services(config: &Path, addr: &[u8; 6], services: &[DeviceService]) {
     }
 }
 
-/// A forgotten device's services go with it
-pub fn forget_services(config: &Path, address: &str) {
+/// A forgotten device's services go with it (an LE Audio entry's kept
+/// GATT services too)
+pub fn forget_services(config: &Path, address: &str, le_audio: bool) {
+    if le_audio {
+        bt_host::le_gatt_cache::remove(&le_cache_file(config), address);
+        return;
+    }
     let _one = SEEN_FILE.lock().unwrap_or_else(|e| e.into_inner());
     let mut seen = load_seen(config);
     if seen.remove(&address.to_uppercase()).is_some() {
@@ -161,11 +166,33 @@ fn list(services: Vec<DeviceService>, from_last_connection: bool) -> Value {
     serde_json::to_value(ServiceList { services, from_last_connection }).unwrap_or(Value::Null)
 }
 
+fn le_cache_file(config: &Path) -> std::path::PathBuf {
+    paths::pairing_dir(config).join(bt_host::le_gatt_cache::FILE_NAME)
+}
+
+/// An LE Audio entry's services: the GATT services kept at its last
+/// connection (bt_host::le_gatt_cache), "from the last connection" unless
+/// it is connected now
+fn le_services(state: &CoreState, addr: &[u8; 6]) -> Result<Value, ErrorInfo> {
+    let text = bt_host::addr_str(addr).to_uppercase();
+    let Some(uuids) = bt_host::le_gatt_cache::service_uuids(&le_cache_file(&state.config_dir()), &text) else {
+        return Err(err("device.not_connected", "ipc.error.services_not_connected"));
+    };
+    let connected =
+        state.service.host().is_some_and(|h| h.le_devices().iter().any(|d| d.connected && d.addr.addr == *addr));
+    let services = uuids.into_iter().map(|u| DeviceService { uuids: vec![u], name: None }).collect();
+    Ok(list(services, !connected))
+}
+
 /// device.services: over the link the running stack has to the device; not
 /// connected, the list it gave last (not developer mode only since issue
-/// #86: the tag is out of the way, the keys stay in developer mode)
-pub fn services(state: &CoreState, addr: &str) -> Result<Value, ErrorInfo> {
+/// #86: the tag is out of the way, the keys stay in developer mode). An LE
+/// Audio entry: its kept GATT services
+pub fn services(state: &CoreState, addr: &str, le_audio: bool) -> Result<Value, ErrorInfo> {
     let addr = address(addr)?;
+    if le_audio {
+        return le_services(state, &addr);
+    }
     let config = state.config_dir();
     let not_connected = || match last_services(&config, &addr) {
         Some(last) => Ok(list(last, true)),
@@ -477,7 +504,10 @@ mod tests {
         keep_services(&config, &addr, &services);
         // Read back from the file, as after a restart
         assert_eq!(last_services(&config, &addr), Some(services));
-        forget_services(&config, "aa:bb:cc:dd:ee:0f");
+        // Forgetting the LE Audio entry leaves the classic one's list
+        forget_services(&config, "aa:bb:cc:dd:ee:0f", true);
+        assert!(last_services(&config, &addr).is_some());
+        forget_services(&config, "aa:bb:cc:dd:ee:0f", false);
         let left = last_services(&config, &addr);
         let _ = std::fs::remove_dir_all(&config);
         assert_eq!(left, None);

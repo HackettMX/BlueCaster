@@ -34,7 +34,9 @@ from bumble.a2dp import (
 )
 from bumble.avdtp import (
     AVDTP_AUDIO_MEDIA_TYPE,
+    AVDTP_BAD_STATE_ERROR,
     AVDTP_DELAY_REPORTING_SERVICE_CATEGORY,
+    AVDTP_DISCOVER,
     AVDTP_MEDIA_CODEC_SERVICE_CATEGORY,
     AVDTP_UNSUPPORTED_CONFIGURATION_ERROR,
     DelayReport_Command,
@@ -42,6 +44,7 @@ from bumble.avdtp import (
     EndPointInfo,
     Listener,
     MediaCodecCapabilities,
+    Open_Response,
     Protocol,
     ServiceCapabilities,
     Set_Configuration_Reject,
@@ -675,6 +678,17 @@ async def main(args):
     def on_avdtp_connection(server):
         log.info('AVDTP connection')
         on_avdtp_connection.sinks = {}
+        if args.stray_reject:
+            # As a MediaTek headset on a new link: a REJECT of DISCOVER under
+            # the label of BlueCaster's OPEN, just before accepting the OPEN
+            send = server.send_message
+
+            def send_message(label, message, send=send):
+                if isinstance(message, Open_Response):
+                    print('stray reject: REJECT DISCOVER before the OPEN accept', flush=True)
+                    server.l2cap_channel.send_pdu(bytes([label << 4 | 0x03, AVDTP_DISCOVER, AVDTP_BAD_STATE_ERROR]))
+                send(label, message)
+            server.send_message = send_message
         for _ in range(args.extra_seps):
             # A codec BlueCaster does not know, discovered before the real ones
             server.add_sink(MediaCodecCapabilities(
@@ -829,6 +843,8 @@ if __name__ == '__main__':
                         help='offer only these codecs (default: all)')
     parser.add_argument('--delay-report', type=float, metavar='MS',
                         help='list Delay Reporting on every codec and report this playout delay once a stream opens')
+    parser.add_argument('--stray-reject', action='store_true',
+                        help="answer OPEN with a REJECT of DISCOVER under the OPEN's label first, then the accept")
     parser.add_argument('--extra-seps', type=int, default=0, metavar='N',
                         help='list N more sink SEPs (an unknown vendor codec) before the codecs')
     parser.add_argument('--sbc-no-dual', action='store_true',

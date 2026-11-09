@@ -5,7 +5,7 @@
 //! bluecaster-driver list [--all] [--out <file>]
 //! bluecaster-driver state <instance-id> [--out <file>]
 //! bluecaster-driver assign <instance-id> [--out <file>]
-//! bluecaster-driver restore <instance-id> [--previous <json> | --previous @<file>] [--out <file>]
+//! bluecaster-driver restore <instance-id> [--previous <json> | --previous @<file>] [--keys <file>] [--out <file>]
 //! bluecaster-driver restore --records <dir> [--unrecorded] [--out <file>]
 //! bluecaster-driver unrecorded --records <dir> [--out <file>]
 //! bluecaster-driver windows-keys <radio-address> [--out <file>]
@@ -20,6 +20,18 @@
 //! with that address (win-sys::bt_keys), for the core to take over the
 //! devices paired with it. It needs administrator rights too; the keys go to
 //! stdout and `--out` only, never to the log.
+//!
+//! `restore --keys <file>` first writes BlueCaster's link keys from that file
+//! (`{"radio": "<address>", "keys": [{"address", "key"}]}`) to Windows,
+//! for the devices Windows paired with that radio too, while the adapter is
+//! still on WinUSB: Windows' Bluetooth reads them when the radio starts, so
+//! those devices connect in Windows without pairing again. The keys Windows
+//! had are given back as `replaced_keys` (stdout and `--out` only). With
+//! `le_keys` in the file (as `windows-keys` prints them; developer mode
+//! only) the LE keys of the devices Windows keeps LE keys of are written
+//! too, Windows' old ones given back as `replaced_le_keys`. Each value
+//! written is read back (`keys_verified`, `le_verified`); the log gets
+//! numbers only.
 //!
 //! Elevation: the exe has no manifest asking for administrator rights, so
 //! `list` and `state` run without a UAC prompt. The caller starts `assign`
@@ -75,7 +87,7 @@ const USAGE: &str = "usage:
   bluecaster-driver list [--all] [--out <file>]
   bluecaster-driver state <instance-id> [--out <file>]
   bluecaster-driver assign <instance-id> [--out <file>]
-  bluecaster-driver restore <instance-id> [--previous <json> | --previous @<file>] [--out <file>]
+  bluecaster-driver restore <instance-id> [--previous <json> | --previous @<file>] [--keys <file>] [--out <file>]
   bluecaster-driver restore --records <dir> [--unrecorded] [--out <file>]
   bluecaster-driver unrecorded --records <dir> [--out <file>]
   bluecaster-driver windows-keys <radio-address> [--out <file>]
@@ -86,7 +98,7 @@ enum Command {
     List { all: bool },
     State { instance_id: String },
     Assign { instance_id: String },
-    Restore { instance_id: String, previous: Option<String> },
+    Restore { instance_id: String, previous: Option<String>, keys: Option<PathBuf> },
     RestoreRecords { dir: PathBuf, unrecorded: bool },
     Unrecorded { dir: PathBuf },
     WindowsKeys { radio: [u8; 6] },
@@ -147,7 +159,13 @@ fn main() -> ExitCode {
         env!("CARGO_PKG_VERSION"),
         std::env::consts::ARCH,
         win_sys::elevation::is_elevated(),
-        argv.join(" ")
+        // The command and the option names: no address or path in the log
+        argv.iter()
+            .enumerate()
+            .filter(|(i, a)| *i == 0 || a.starts_with("--"))
+            .map(|(_, a)| a.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
     );
 
     let (code, result, out) = match parse_args(&argv) {
@@ -164,10 +182,7 @@ fn main() -> ExitCode {
     result["exit_code"] = json!(code);
     let text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".into());
     // Link keys are secrets: the log gets their number only
-    match result.get("keys").and_then(Value::as_array) {
-        Some(keys) => tracing::info!("exit {code}: {} key(s)", keys.len()),
-        None => tracing::info!("exit {code}: {result}"),
-    }
+    tracing::info!("exit {code}: {}", without_keys(&result));
     println!("{text}");
     if let Some(path) = out
         && let Err(e) = std::fs::write(&path, &text)
@@ -183,6 +198,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut out = None;
     let mut previous = None;
     let mut records = None;
+    let mut keys = None;
     let mut all = false;
     let mut unrecorded = false;
     let mut it = argv.iter();
@@ -191,6 +207,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--out" => out = Some(PathBuf::from(it.next().ok_or("--out needs a file")?)),
             "--previous" => previous = Some(it.next().ok_or("--previous needs a value")?.clone()),
             "--records" => records = Some(PathBuf::from(it.next().ok_or("--records needs a folder")?)),
+            "--keys" => keys = Some(PathBuf::from(it.next().ok_or("--keys needs a file")?)),
             "--all" => all = true,
             "--unrecorded" => unrecorded = true,
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
@@ -204,12 +221,12 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         "list" => Command::List { all },
         "state" => Command::State { instance_id: instance_id()? },
         "assign" => Command::Assign { instance_id: instance_id()? },
-        "restore" if previous.is_none() && records.is_some() => {
+        "restore" if previous.is_none() && keys.is_none() && records.is_some() => {
             let dir = records.take().unwrap_or_default();
             Command::RestoreRecords { dir, unrecorded: std::mem::take(&mut unrecorded) }
         }
         "unrecorded" => Command::Unrecorded { dir: records.take().ok_or("unrecorded needs --records <dir>")? },
-        "restore" => Command::Restore { instance_id: instance_id()?, previous: previous.take() },
+        "restore" => Command::Restore { instance_id: instance_id()?, previous: previous.take(), keys: keys.take() },
         "windows-keys" => {
             let a = positional.next().ok_or("windows-keys needs the radio's address")?;
             Command::WindowsKeys { radio: parse_address(&a).ok_or(format!("bad address {a}"))? }
@@ -221,6 +238,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     }
     if previous.is_some() {
         return Err("--previous is for restore only".into());
+    }
+    if keys.is_some() {
+        return Err("--keys is for restore of one adapter only".into());
     }
     if records.is_some() {
         return Err("--records is for restore without an instance ID or --previous only".into());
@@ -239,7 +259,7 @@ fn run(command: &Command) -> (u8, Value) {
             Err(e) => driver_error("state", &e),
         },
         Command::Assign { instance_id } => assign(instance_id),
-        Command::Restore { instance_id, previous } => restore(instance_id, previous.as_deref()),
+        Command::Restore { instance_id, previous, keys } => restore(instance_id, previous.as_deref(), keys.as_deref()),
         Command::RestoreRecords { dir, unrecorded } => restore_records(dir, *unrecorded),
         Command::Unrecorded { dir } => list_unrecorded(dir),
         Command::WindowsKeys { radio } => windows_keys(radio),
@@ -292,6 +312,13 @@ fn windows_keys(radio: &[u8; 6]) -> (u8, Value) {
                     })
                 })
                 .collect();
+            // Names, types and sizes only: what Windows keeps, not the data
+            let names = |values: &[win_sys::bt_keys::ValueName]| -> Vec<Value> {
+                values
+                    .iter()
+                    .map(|v| json!({ "name": v.name, "kind": v.kind, "size": v.size, "count": v.count }))
+                    .collect()
+            };
             (
                 exit::OK,
                 json!({
@@ -300,6 +327,8 @@ fn windows_keys(radio: &[u8; 6]) -> (u8, Value) {
                     "radio_found": keys.is_some(),
                     "keys": list,
                     "le_keys": le,
+                    "radio_values": keys.as_ref().map(|k| names(&k.radio_values)).unwrap_or_default(),
+                    "le_values": keys.as_ref().map(|k| names(&k.le_values)).unwrap_or_default(),
                 }),
             )
         }
@@ -350,31 +379,175 @@ fn assign(instance_id: &str) -> (u8, Value) {
     }
 }
 
-fn restore(instance_id: &str, previous: Option<&str>) -> (u8, Value) {
+fn restore(instance_id: &str, previous: Option<&str>, keys: Option<&std::path::Path>) -> (u8, Value) {
     let previous = match previous.map(parse_previous).transpose() {
         Ok(p) => p,
         Err(message) => return (exit::USAGE, error_json("usage", &message)),
     };
+    let keys = match keys.map(parse_keys).transpose() {
+        Ok(k) => k,
+        Err(message) => return (exit::USAGE, error_json("usage", &message)),
+    };
+    // Written while the adapter is still on WinUSB: Windows' Bluetooth
+    // reads the keys when it starts the radio
+    let written = keys.and_then(|(radio, keys)| {
+        let on_winusb = driver::driver_state(instance_id).is_ok_and(|s| s.kind == driver::DriverKind::WinUsb);
+        if !on_winusb || !win_sys::elevation::is_elevated() {
+            return None;
+        }
+        Some(win_sys::bt_keys::write_keys(&radio, &keys.link, &keys.le).map_err(|e| {
+            tracing::warn!("restore: writing the keys to Windows failed: {e}");
+            e.to_string()
+        }))
+    });
     match driver::restore(instance_id, previous.as_ref()) {
         Ok(outcome) => {
             let verified = outcome.state.as_ref().is_some_and(|s| s.present && s.kind != driver::DriverKind::WinUsb)
                 && outcome.matches_previous != Some(false);
             let code = if verified { exit::OK } else { exit::UNVERIFIED };
-            (
-                code,
-                json!({
-                    "ok": verified,
-                    "command": "restore",
-                    "instance_id": instance_id,
-                    "already_restored": outcome.already_restored,
-                    "reboot_required": outcome.reboot_required,
-                    "matches_previous": outcome.matches_previous,
-                    "state": outcome.state.as_ref().map(StateJson::from),
-                }),
-            )
+            let mut result = json!({
+                "ok": verified,
+                "command": "restore",
+                "instance_id": instance_id,
+                "already_restored": outcome.already_restored,
+                "reboot_required": outcome.reboot_required,
+                "matches_previous": outcome.matches_previous,
+                "state": outcome.state.as_ref().map(StateJson::from),
+            });
+            add_written_keys(&mut result, written);
+            (code, result)
         }
-        Err(e) => driver_error("restore", &e),
+        Err(e) => {
+            let (code, mut result) = driver_error("restore", &e);
+            add_written_keys(&mut result, written);
+            (code, result)
+        }
     }
+}
+
+/// BlueCaster's keys from the file of `restore --keys`
+#[derive(Debug, Default)]
+struct KeysToWrite {
+    link: Vec<win_sys::bt_keys::WindowsLinkKey>,
+    /// Only when developer mode asked for them (issue #86)
+    le: Vec<win_sys::bt_keys::WindowsLeKey>,
+}
+
+fn unhex<const N: usize>(text: &str) -> Option<[u8; N]> {
+    if text.len() != N * 2 || !text.is_ascii() {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// The file of `restore --keys`: the radio, BlueCaster's link keys and, if
+/// asked for, its LE keys as Windows keeps them (`windows-keys`' format)
+fn parse_keys(path: &std::path::Path) -> Result<([u8; 6], KeysToWrite), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    parse_keys_text(&text)
+}
+
+fn parse_keys_text(text: &str) -> Result<([u8; 6], KeysToWrite), String> {
+    let value: Value =
+        serde_json::from_str(text.trim_start_matches('\u{FEFF}')).map_err(|e| format!("--keys is not JSON: {e}"))?;
+    let radio =
+        value.get("radio").and_then(Value::as_str).and_then(parse_address).ok_or("--keys names no radio address")?;
+    let list = |name: &str| value.get(name).and_then(Value::as_array).cloned().unwrap_or_default();
+    let link = list("keys")
+        .iter()
+        .filter_map(|k| {
+            Some(win_sys::bt_keys::WindowsLinkKey {
+                address: parse_address(k.get("address")?.as_str()?)?,
+                key: unhex(k.get("key")?.as_str()?)?,
+            })
+        })
+        .collect();
+    let le = list("le_keys")
+        .iter()
+        .filter_map(|k| {
+            let number = |name: &str| k.get(name).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
+            Some(win_sys::bt_keys::WindowsLeKey {
+                address: parse_address(k.get("address")?.as_str()?)?,
+                address_type: number("address_type"),
+                ltk: unhex(k.get("ltk")?.as_str()?)?,
+                key_length: number("key_length"),
+                ediv: number("ediv"),
+                erand: k.get("erand").and_then(Value::as_str).and_then(|t| u64::from_str_radix(t, 16).ok()),
+                irk: k.get("irk").and_then(Value::as_str).and_then(unhex),
+                auth_req: None,
+            })
+        })
+        .collect();
+    Ok((radio, KeysToWrite { link, le }))
+}
+
+/// What writing the keys did, in the restore's result: the devices written
+/// and Windows' keys they replaced (for the core's backup)
+fn add_written_keys(result: &mut Value, written: Option<Result<Option<win_sys::bt_keys::WrittenKeys>, String>>) {
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let address = |a: &[u8; 6]| win_sys::bt_paired::format_address(a);
+    match written {
+        None => {}
+        Some(Err(e)) => result["keys_error"] = json!(e),
+        Some(Ok(None)) => result["keys_written"] = json!([]),
+        Some(Ok(Some(w))) => {
+            result["keys_written"] = json!(w.replaced.iter().map(|k| address(&k.address)).collect::<Vec<_>>());
+            result["keys_same"] = json!(w.same.iter().map(address).collect::<Vec<_>>());
+            result["keys_verified"] = json!(w.verified);
+            result["replaced_keys"] = json!(
+                w.replaced
+                    .iter()
+                    .map(|k| json!({ "address": address(&k.address), "key": hex(&k.key) }))
+                    .collect::<Vec<_>>()
+            );
+            result["le_written"] = json!(w.le_replaced.iter().map(|k| address(&k.address)).collect::<Vec<_>>());
+            result["le_same"] = json!(w.le_same.iter().map(address).collect::<Vec<_>>());
+            result["le_verified"] = json!(w.le_verified);
+            // As Windows kept them, for the core's backup
+            result["replaced_le_keys"] = json!(
+                w.le_replaced
+                    .iter()
+                    .map(|k| {
+                        json!({
+                            "address": address(&k.address),
+                            "address_type": k.address_type,
+                            "ltk": hex(&k.ltk),
+                            "key_length": k.key_length,
+                            "ediv": k.ediv,
+                            "erand": k.erand.map(|r| format!("{r:016x}")),
+                            "irk": k.irk.map(|i| hex(&i)),
+                            "auth_req": k.auth_req,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// The result as the log may show it: lists of keys and of devices by
+/// their number only (no address or key in a log)
+fn without_keys(result: &Value) -> Value {
+    let mut shown = result.clone();
+    for field in
+        ["keys", "le_keys", "replaced_keys", "replaced_le_keys", "keys_written", "keys_same", "le_written", "le_same"]
+    {
+        if let Some(list) = result.get(field).and_then(Value::as_array) {
+            shown[field] = json!(list.len());
+        }
+    }
+    // The adapter's instance ID ends in its USB serial number, often its
+    // Bluetooth address
+    for pointer in ["/instance_id", "/state/instance_id"] {
+        if let Some(id) = shown.pointer_mut(pointer).filter(|id| id.is_string()) {
+            *id = Value::from("<adapter>");
+        }
+    }
+    shown
 }
 
 /// What to do with one file of `restore --records`
@@ -508,7 +681,7 @@ fn restore_records(dir: &std::path::Path, unrecorded: bool) -> (u8, Value) {
     for (path, plan) in plans {
         let (one, mut result, remove) = match plan {
             RecordPlan::Restore { instance_id } => {
-                let (one, result) = restore(&instance_id, Some(&format!("@{}", path.display())));
+                let (one, result) = restore(&instance_id, Some(&format!("@{}", path.display())), None);
                 (one, result, one == exit::OK)
             }
             RecordPlan::Skip { reason, remove } => (exit::OK, json!({ "ok": true, "skipped": reason }), remove),
@@ -522,7 +695,7 @@ fn restore_records(dir: &std::path::Path, unrecorded: bool) -> (u8, Value) {
         adapters.push(result);
     }
     for id in others {
-        let (one, mut result) = restore(&id, None);
+        let (one, mut result) = restore(&id, None, None);
         result["unrecorded"] = json!(true);
         result["exit_code"] = json!(one);
         code = worse(code, one);
@@ -741,6 +914,48 @@ impl From<&UsbDevice> for AdapterJson {
 mod tests {
     use super::*;
 
+    #[test]
+    fn keys_file_gives_link_and_le_keys() {
+        let ltk = "00112233445566778899aabbccddeeff";
+        let text = format!(
+            r#"{{"radio":"AA:BB:CC:DD:EE:FF",
+                "keys":[{{"address":"11:22:33:44:55:66","key":"{ltk}"}},{{"address":"bad","key":"{ltk}"}}],
+                "le_keys":[{{"address":"C0:11:22:33:44:55","address_type":1,"ltk":"{ltk}","key_length":16,
+                             "ediv":4660,"erand":"0102030405060708","irk":null}}]}}"#
+        );
+        let (radio, keys) = parse_keys_text(&text).unwrap();
+        assert_eq!(radio, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        assert_eq!(keys.link.len(), 1);
+        assert_eq!(keys.le.len(), 1);
+        let le = &keys.le[0];
+        assert_eq!((le.address_type, le.key_length, le.ediv), (Some(1), Some(16), Some(4660)));
+        assert_eq!(le.erand, Some(0x0102_0304_0506_0708));
+        assert_eq!(le.irk, None);
+        assert_eq!(le.ltk[15], 0xFF);
+        // A file without LE keys writes none
+        let (_, keys) = parse_keys_text(r#"{"radio":"AA:BB:CC:DD:EE:FF","keys":[]}"#).unwrap();
+        assert!(keys.le.is_empty());
+        assert!(parse_keys_text(r#"{"keys":[]}"#).is_err());
+    }
+
+    #[test]
+    fn no_address_or_key_reaches_the_log() {
+        let result = json!({
+            "ok": true,
+            "keys_written": ["11:22:33:44:55:66"],
+            "keys_same": [],
+            "keys_verified": 1,
+            "replaced_keys": [{ "address": "11:22:33:44:55:66", "key": "00" }],
+            "le_written": ["C0:11:22:33:44:55"],
+            "le_same": [],
+            "replaced_le_keys": [{ "address": "C0:11:22:33:44:55", "ltk": "00" }],
+        });
+        let shown = without_keys(&result).to_string();
+        assert!(!shown.contains("11:22") && !shown.contains("\"00\""), "{shown}");
+        assert_eq!(without_keys(&result)["keys_written"], 1);
+        assert_eq!(without_keys(&result)["le_written"], 1);
+    }
+
     fn args(s: &[&str]) -> Result<Args, String> {
         parse_args(&s.iter().map(|a| a.to_string()).collect::<Vec<_>>())
     }
@@ -782,12 +997,18 @@ mod tests {
         );
         assert_eq!(
             args(&["restore", "X", "--previous", "{}"]).unwrap().command,
-            Command::Restore { instance_id: "X".into(), previous: Some("{}".into()) }
+            Command::Restore { instance_id: "X".into(), previous: Some("{}".into()), keys: None }
         );
         assert_eq!(
             args(&["restore", "X"]).unwrap().command,
-            Command::Restore { instance_id: "X".into(), previous: None }
+            Command::Restore { instance_id: "X".into(), previous: None, keys: None }
         );
+        assert_eq!(
+            args(&["restore", "X", "--keys", r"C:\u\keys.json"]).unwrap().command,
+            Command::Restore { instance_id: "X".into(), previous: None, keys: Some(PathBuf::from(r"C:\u\keys.json")) }
+        );
+        assert!(args(&["restore", "--records", "D", "--keys", "k.json"]).is_err());
+        assert!(args(&["assign", "X", "--keys", "k.json"]).is_err());
         assert!(args(&[]).is_err());
         assert!(args(&["assign"]).is_err());
         assert!(args(&["assign", "X", "Y"]).is_err());

@@ -34,6 +34,7 @@ import type { LogLine as BLogLine } from "./bindings/LogLine";
 import type { Method as BMethod } from "./bindings/Method";
 import type { Profile as BProfile } from "./bindings/Profile";
 import type { ReceivedStream as BReceivedStream } from "./bindings/ReceivedStream";
+import type { DevDebug as BDevDebug } from "./bindings/DevDebug";
 import type { DevLog as BDevLog } from "./bindings/DevLog";
 import type { DevOverrides as BDevOverrides } from "./bindings/DevOverrides";
 import type { VendorInfo as BVendorInfo } from "./bindings/VendorInfo";
@@ -54,6 +55,9 @@ import type { VoiceStatus as BVoiceStatus } from "./bindings/VoiceStatus";
 import type { UpdateState as BUpdateState } from "./bindings/UpdateState";
 import type { VerboseState as BVerboseState } from "./bindings/VerboseState";
 import type { WindowsImport as BWindowsImport } from "./bindings/WindowsImport";
+import type { KeysComparison as BKeysComparison } from "./bindings/KeysComparison";
+import type { KeyCounts as BKeyCounts } from "./bindings/KeyCounts";
+import type { WindowsValueName as BWindowsValueName } from "./bindings/WindowsValueName";
 import type { WindowsPairedDevice as BWindowsPairedDevice } from "./bindings/WindowsPairedDevice";
 
 export type Wire<T> = T extends bigint
@@ -103,6 +107,7 @@ export type LogLine = Wire<BLogLine>;
 export type Method = Wire<BMethod>;
 export type Profile = Wire<BProfile>;
 export type ReceivedStream = Wire<BReceivedStream>;
+export type DevDebug = Wire<BDevDebug>;
 export type DevLog = Wire<BDevLog>;
 export type DevOverrides = Wire<BDevOverrides>;
 export type VendorInfo = Wire<BVendorInfo>;
@@ -124,6 +129,9 @@ export type DevicePairing = Wire<BDevicePairing>;
 export type DeviceService = Wire<BDeviceService>;
 export type ServiceList = Wire<BServiceList>;
 export type WindowsImport = Wire<BWindowsImport>;
+export type KeysComparison = Wire<BKeysComparison>;
+export type KeyCounts = Wire<BKeyCounts>;
+export type WindowsValueName = Wire<BWindowsValueName>;
 export type WindowsPairedDevice = Wire<BWindowsPairedDevice>;
 
 export type MethodName = Method["method"];
@@ -141,6 +149,7 @@ interface Results {
   "device.pairing": DevicePairing;
   "device.services": ServiceList;
   "device.import_windows_pairings": WindowsImport;
+  "dev.compare_windows_keys": KeysComparison;
   "adapter.list": AdapterInfo[];
   "adapter.assign_winusb": AdapterInfo[];
   "adapter.restore_driver": AdapterInfo[];
@@ -173,7 +182,9 @@ interface Results {
   "settings.set": SettingsApplied;
 }
 
-export type ResultOf<M extends MethodName> = M extends keyof Results ? Results[M] : null;
+export type ResultOf<M extends MethodName> = M extends keyof Results
+  ? Results[M]
+  : null;
 
 /** request(method) for methods without parameters (or whose parameters
  *  may be left out, as diag.info's), request(method, params) otherwise */
@@ -199,10 +210,17 @@ export class IpcError extends Error {
     if (e instanceof IpcError) return e;
     if (e && typeof e === "object" && "code" in e && "message" in e) {
       const o = e as { code: unknown; message: unknown };
-      if (typeof o.code === "string" && o.message && typeof o.message === "object") {
+      if (
+        typeof o.code === "string" &&
+        o.message &&
+        typeof o.message === "object"
+      ) {
         return new IpcError(o as ErrorInfo);
       }
     }
-    return new IpcError({ code: "ipc.failed", message: { key: "ipc.error.failed", args: [String(e)] } });
+    return new IpcError({
+      code: "ipc.failed",
+      message: { key: "ipc.error.failed", args: [String(e)] },
+    });
   }
 }

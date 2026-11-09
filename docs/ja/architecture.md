@@ -259,6 +259,8 @@ Windows Audio Session API で音声をリアルタイムに取り込みます。
 
 リンクキーは `link_keys.txt` に保存します。デバイスを追加する画面で、コアは BlueCaster が今使っているアダプターについて Windows の Bluetooth が保持していたキーを引き継げます。`bluecaster-driver.exe windows-keys` がそれを読み（UAC の確認が 1 回）、BlueCaster がすでに持っているキーはそのまま残し、その中のオーディオデバイスを Windows での名前で保存します。開発者モードでは、デバイスのリンクキーと、デバイスが公開する SDP サービスを表示します。
 
+`pairing\` の鍵のファイル（リンクキー、LE のボンディング情報、コーディネートセット、Windows から引き継いだ LE のキー、置き換えた Windows のキー）は、DPAPI で Windows のユーザーごとに暗号化します（`win-sys::dpapi`）。ほかのユーザーや、別の PC にコピーしたファイルからは読めません。以前のバージョンの平文のファイルは、読み込んだあと暗号化して書き直します。復号できないファイルは `<名前>.undecryptable` として残し、そのデバイスはペアリングし直します。BTstack の LE の TLV は BlueCaster 自身が保持します（`btstack-sys` の `TlvStore`。内容は `btstack_tlv_windows` が書いていたものと同じ）。復元のときに管理者権限のヘルパーが読む `keys_for_windows.json` は平文のままです（ヘルパーは別の管理者として動くことがあるため）。ヘルパーが終わると削除します。
+
 ### オーディオエンコーダー {#audio-encoders}
 
 | エンコーダー | ライブラリ | ビットレート | 特徴 |
@@ -324,6 +326,7 @@ AAC と SBC は、A2DP の仕様で定義された標準のコーデック ID �
 | `devices\device_codecs.json` | クラシックの各デバイスが前回の接続で提示した内容（と、OPPO のイヤホンに Hi-Res を求めたかどうか） |
 | `pairing\link_keys.txt` | リンクキー。v1 や 2.0.x でペアリングしたヘッドホンは、ペアリングし直さずに再接続する |
 | `pairing\le_audio_bonds.tlv`、`pairing\le_audio_csip.txt` | LE Audio（実験的）: LE のボンディング情報（GATT サーバーが保持する CCC の値を含む）とコーディネートセット |
+| `pairing\windows_le_keys.txt`、`pairing\replaced_windows_keys.json` | Windows から引き継いだ LE のキー（LE を使うスタックが取り込むまで）と、**元のドライバに戻す** で置き換えた Windows のキー |
 | `adapters\adapter_caps.json` | スタックが各アダプターについて知ったこと（LE Audio への対応、アドレス、HCI のバージョン、Windows でのアダプターの名前） |
 | `adapters\driver\<instance id>.json` | WinUSB を割り当てた各アダプターの、元のドライバー |
 | `firmware\` | ファームウェアのファイル（`*.bin`、`*.hcd`、`ibt-*`。Intel のものは linux-firmware と同じ配置で `firmware\intel\` にも）。以前のバージョンが設定フォルダーに直接置いていたファイルはここに移す |

@@ -1,5 +1,5 @@
-// The device's Services dialog (developer mode, issue #86): names of
-// well-known service UUIDs, the Bluetooth SIG's and some vendors'.
+// The device's Services dialog (issue #86): names of well-known service
+// UUIDs, the Bluetooth SIG's (classic and LE GATT services) and some vendors'.
 
 const BASE = "-0000-1000-8000-00805f9b34fb";
 
@@ -30,6 +30,24 @@ const NAMES: Record<number, string> = {
   0x1801: "Generic Attribute",
   0x180a: "Device Information",
   0x180f: "Battery",
+  0x1812: "Human Interface Device",
+  // LE Audio and its neighbours
+  0x1843: "Audio Input Control",
+  0x1844: "Volume Control",
+  0x1845: "Volume Offset Control",
+  0x1846: "Coordinated Set Identification",
+  0x1848: "Media Control",
+  0x1849: "Generic Media Control",
+  0x184b: "Telephone Bearer",
+  0x184c: "Generic Telephone Bearer",
+  0x184d: "Microphone Control",
+  0x184e: "Audio Stream Control",
+  0x184f: "Broadcast Audio Scan",
+  0x1850: "Published Audio Capabilities",
+  0x1853: "Common Audio",
+  0x1854: "Hearing Access",
+  0x1855: "Telephony and Media Audio",
+  0x1858: "Gaming Audio",
 };
 
 /** Vendors' 128-bit service UUIDs that devices list without a name (issue

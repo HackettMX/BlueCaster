@@ -6,8 +6,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 
 use crate::{
-    APP, App, LINK_KEYS, LOGGER, PENDING, POISONED, Source, Stack, WAKE_APP, WAKE_EXIT, WAKE_FLAGS, ffi, post_wake,
-    transport,
+    APP, App, LINK_KEYS, LOGGER, PENDING, POISONED, Source, Stack, TLV, WAKE_APP, WAKE_EXIT, WAKE_FLAGS, ffi,
+    post_wake, transport,
 };
 
 /// An event for the app that could not be delivered at once
@@ -414,6 +414,58 @@ extern "C" fn bluecaster_rs_lk_at(index: c_int, addr: *mut u8, key: *mut u8, key
             }
             None => 0,
         }
+    })
+}
+
+// ---- The LE TLV (btstack_tlv_t of shim.c) ----
+
+/// The value's length (copied into `buffer`, at most `size` bytes, if not
+/// NULL); 0 when the tag is not there
+#[unsafe(no_mangle)]
+extern "C" fn bluecaster_rs_tlv_get(tag: u32, buffer: *mut u8, size: u32) -> c_int {
+    guard(0, || {
+        TLV.with(|t| {
+            let mut t = t.borrow_mut();
+            let Some(value) = t.as_mut().and_then(|t| t.get(tag)) else { return 0 };
+            if buffer.is_null() {
+                return c_int::try_from(value.len()).unwrap_or(0);
+            }
+            let n = value.len().min(size as usize);
+            // SAFETY: BTstack passes a buffer of `size` bytes.
+            unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), buffer, n) };
+            n as c_int
+        })
+    })
+}
+
+/// 0 when stored
+#[unsafe(no_mangle)]
+extern "C" fn bluecaster_rs_tlv_store(tag: u32, data: *const u8, size: u32) -> c_int {
+    guard(1, || {
+        let value: &[u8] = if data.is_null() || size == 0 {
+            &[]
+        } else {
+            // SAFETY: BTstack passes `size` bytes at `data`.
+            unsafe { std::slice::from_raw_parts(data, size as usize) }
+        };
+        TLV.with(|t| match t.borrow_mut().as_mut() {
+            Some(t) => {
+                t.store(tag, value);
+                0
+            }
+            None => 1,
+        })
+    })
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn bluecaster_rs_tlv_delete(tag: u32) {
+    guard((), || {
+        TLV.with(|t| {
+            if let Some(t) = t.borrow_mut().as_mut() {
+                t.delete(tag)
+            }
+        })
     })
 }
 

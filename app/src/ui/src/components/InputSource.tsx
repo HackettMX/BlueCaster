@@ -5,10 +5,11 @@
 // label and the device below, always there (disabled while Off) so that
 // switching does not move the page. The list names each device by the side
 // apps pick ("CABLE Output", not "CABLE Input"; an output whose recording
-// side another one already names, by its own name); the 16-channel cable and
-// outputs without a recording side only in developer mode. A classic device
-// that has no profile yet shows what its first one gets: Auto with VB-CABLE
-// (the core's default_mic_output).
+// side another one already names, with its own name added); the 16-channel
+// cable and outputs without a recording side (under Monitoring) only in
+// developer mode. The output source's cable is listed but disabled, saying
+// so. A classic device that has no profile yet shows what its first one
+// gets: Auto with VB-CABLE (the core's default_mic_output).
 
 import { createSignal, Show } from "solid-js";
 import { useApp } from "../app/context";
@@ -30,9 +31,14 @@ import { Icon } from "./Icon";
 
 /** The render endpoint the stream records with this source (the default
  *  output for System Loopback): the microphone must not go there */
-function sourceDevice(source: Pick<Profile, "capture_mode" | "audio_device_id">, devices: readonly AudioDevice[]) {
-  if (source.capture_mode === "virtual" || source.capture_mode === "output") return source.audio_device_id;
-  if (source.capture_mode === "loopback") return devices.find((d) => d.is_default)?.id ?? "";
+function sourceDevice(
+  source: Pick<Profile, "capture_mode" | "audio_device_id">,
+  devices: readonly AudioDevice[],
+) {
+  if (source.capture_mode === "virtual" || source.capture_mode === "output")
+    return source.audio_device_id;
+  if (source.capture_mode === "loopback")
+    return devices.find((d) => d.is_default)?.id ?? "";
   return "";
 }
 
@@ -44,7 +50,8 @@ export function InputSource(props: {
 }) {
   const app = useApp();
   const snap = () => app.core.state.snap!;
-  const entry = () => audioEntries(snap()).find((e) => e.key === deviceKey(props.device)) ?? null;
+  const entry = () =>
+    audioEntries(snap()).find((e) => e.key === deviceKey(props.device)) ?? null;
   const developer = () => snap().settings.developer_mode;
   const looped = () => sourceDevice(props.source, props.devices);
   /** The profile shown: a classic device without one, its first one's defaults */
@@ -55,11 +62,28 @@ export function InputSource(props: {
     const base = entryBase(e, snap().profiles);
     const cable = vbCable(props.devices);
     return !e.le_audio && cable && cable.id !== looped()
-      ? { ...base, headset_mic: "auto", mic_device_id: cable.id, mic_device_name: cable.name }
+      ? {
+          ...base,
+          headset_mic: "auto",
+          mic_device_id: cable.id,
+          mic_device_name: cable.name,
+        }
       : base;
   };
   const mode = () => (shown() ? headsetMode(shown()!) : "off");
   const chosen = () => shown()?.mic_device_id ?? "";
+  /** The output source and what records with it (the other side of the
+   *  same cable): the microphone would reach the headphones or be mixed
+   *  with what plays, so these are listed but cannot be chosen */
+  const usedBySource = (id: string) => {
+    const source = props.devices.find((d) => d.id === looped());
+    if (!source || !id) return false;
+    const d = props.devices.find((x) => x.id === id);
+    return (
+      id === source.id ||
+      (!!d?.capture_name && d.capture_name === source.capture_name)
+    );
+  };
   const [busy, setBusy] = createSignal(false);
   const save = async (patch: Partial<Profile>) => {
     const e = entry();
@@ -75,30 +99,55 @@ export function InputSource(props: {
     setBusy(false);
   };
   const options = (): Option<string>[] => {
+    // Cables first (the standard one before the 16-channel one), then what
+    // only plays the microphone; a group's options next to each other
+    const rank = (d: AudioDevice) =>
+      (d.capture_name || d.is_virtual ? 0 : 2) + Number(multichannelCable(d));
     const list = props.devices
-      .filter((d) => d.id === chosen() || developer() || (d.is_virtual && d.capture_name && !multichannelCable(d)))
-      .sort((a, b) => Number(b.is_virtual) - Number(a.is_virtual));
+      .filter(
+        (d) =>
+          d.id === chosen() ||
+          developer() ||
+          (d.is_virtual && d.capture_name && !multichannelCable(d)),
+      )
+      .sort((a, b) => rank(a) - rank(b));
     // Outputs sharing a recording side ("CABLE Input" and "CABLE In 16ch" both
     // record as "CABLE Output"): only the first keeps that name, the others
-    // show their own (the 16-channel one last, so the standard cable keeps it)
-    const named = [...list].sort((a, b) => Number(multichannelCable(a)) - Number(multichannelCable(b)));
+    // add their own (the 16-channel one is after, so the standard cable keeps it)
     const label = (d: AudioDevice) => {
-      const first = d.capture_name ? named.find((x) => x.capture_name === d.capture_name) : undefined;
-      return d.capture_name && first === d ? d.capture_name : d.name;
+      if (!d.capture_name) return d.name;
+      const first = list.find((x) => x.capture_name === d.capture_name);
+      return first === d
+        ? d.capture_name
+        : `${d.capture_name} · ${d.name.replace(/\s*\(.*\)$/, "")}`;
     };
     const out: Option<string>[] = list.map((d) => ({
       value: d.id,
-      label: label(d),
-      // Its sound would go to the headphones
-      disabled: d.id === looped(),
-      group: developer() ? (d.is_virtual ? t("capture.virtual") : t("capture.sound_devices")) : undefined,
+      label: usedBySource(d.id)
+        ? t("capture.mic_used_by_source", label(d))
+        : label(d),
+      disabled: usedBySource(d.id),
+      // Developer mode lists every output: those with no recording side only
+      // play the microphone (issue #86: they read as microphones)
+      group: developer()
+        ? d.capture_name || d.is_virtual
+          ? t("capture.virtual")
+          : t("capture.mic_monitoring")
+        : undefined,
     }));
     const p = shown();
     // One chosen before and not there now: by its name
     if (p?.mic_device_id && !list.some((d) => d.id === p.mic_device_id)) {
-      out.unshift({ value: p.mic_device_id, label: t("capture.volume_sync_missing", p.mic_device_name || p.mic_device_id) });
+      out.unshift({
+        value: p.mic_device_id,
+        label: t(
+          "capture.volume_sync_missing",
+          p.mic_device_name || p.mic_device_id,
+        ),
+      });
     }
-    if (!p?.mic_device_id) out.unshift({ value: "", label: t("ui.codec.none"), disabled: true });
+    if (!p?.mic_device_id)
+      out.unshift({ value: "", label: t("ui.codec.none"), disabled: true });
     return out;
   };
   const choose = (id: string) => {
@@ -114,7 +163,11 @@ export function InputSource(props: {
           <Segmented<HeadsetMode>
             label={t("capture.input_source")}
             value={mode()}
-            options={HEADSET_MODES.map((m) => ({ value: m, label: t(`ui.headset_mic_${m}`), disabled: busy() }))}
+            options={HEADSET_MODES.map((m) => ({
+              value: m,
+              label: t(`ui.headset_mic_${m}`),
+              disabled: busy(),
+            }))}
             onChange={(m) => void save({ headset_mic: m, mic_muted: false })}
           />
         </div>
@@ -134,7 +187,7 @@ export function InputSource(props: {
         <Show when={mode() !== "off" && !chosen()}>
           <p class="field-warn">{t("ui.headset_mic_no_output")}</p>
         </Show>
-        <Show when={mode() !== "off" && chosen() && chosen() === looped()}>
+        <Show when={mode() !== "off" && usedBySource(chosen())}>
           <p class="field-warn">
             <Icon name="warning" />
             <span>{t("error.headset_mic_loop")}</span>

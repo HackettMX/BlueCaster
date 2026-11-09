@@ -8,7 +8,8 @@
 //! ```
 //!
 //! Addresses as `XX:XX:..`, keys and Rand most significant octet first (as
-//! BTstack keeps them). Lives in `pairing\`, which no bundle takes.
+//! BTstack keeps them). Lives in `pairing\`, which no bundle takes,
+//! encrypted for the Windows user ([`win_sys::dpapi`]).
 
 use std::path::Path;
 
@@ -75,7 +76,9 @@ fn parse_line(line: &str) -> Option<PendingLeBond> {
 }
 
 pub fn load(file: &Path) -> Vec<PendingLeBond> {
-    std::fs::read_to_string(file).map(|t| t.lines().filter_map(parse_line).collect()).unwrap_or_default()
+    win_sys::dpapi::read_secret(file)
+        .map(|b| String::from_utf8_lossy(&b).lines().filter_map(parse_line).collect())
+        .unwrap_or_default()
 }
 
 /// Keeps `bond` for the next stack with LE (one per classic device: a
@@ -85,9 +88,8 @@ pub fn add(file: &Path, bond: PendingLeBond) {
     all.retain(|p| p.classic != bond.classic);
     all.push(bond);
     let text: String = all.iter().map(format_line).collect();
-    let result = file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(file, text));
-    if let Err(e) = result {
-        tracing::error!("Windows' LE keys: cannot write {}: {e}", file.display());
+    if let Err(e) = win_sys::dpapi::write_secret(file, text.as_bytes()) {
+        tracing::error!("Windows' LE keys: cannot write the file: {e}");
     }
 }
 
@@ -107,7 +109,7 @@ pub(crate) fn apply(stack: &Stack, file: &Path) {
         }
     }
     if let Err(e) = std::fs::remove_file(file) {
-        tracing::warn!("Windows' LE keys: cannot remove {}: {e}", file.display());
+        tracing::warn!("Windows' LE keys: cannot remove the file: {e}");
     }
 }
 
@@ -152,7 +154,9 @@ mod tests {
         p.bond.ediv = 1;
         add(&file, p);
         let all = load(&file);
+        let encrypted = win_sys::dpapi::is_encrypted(&std::fs::read(&file).unwrap());
         let _ = std::fs::remove_file(&file);
+        assert!(encrypted);
         assert_eq!(all, vec![p]);
     }
 }

@@ -29,7 +29,7 @@ for reference (`git show b819893:app/src/le_audio/<file>`).
 | `app/src/crates/le-audio/` | Pure logic, no BTstack, `#![forbid(unsafe_code)]`: `defs` (UUIDs, LTV types, contexts, locations, ASE states), `ltv`, `pacs_ascs` (PAC records, ASE values, Control Point PDUs), `presets` (BAP / GMAP configurations), `plan` (`plan_stream`: preset, ASEs, CIS, channels; the source direction of a conversational stream), `csip_crypto` (AES-128, AES-CMAC, s1 / k1 / sef / sdf / sih, RSI), `vcp_scale`, `ccp_model` (call model, simulation), `mcp_model` (media state, `SimulatedPlayer`), `db_hash` (Database Hash), `sdu_queue` (jitter buffer, send guard, counters and their log lines) |
 | `app/src/crates/lc3-sys/` | liblc3 (`extern/btstack/3rd-party/lc3-google`, Apache-2.0) built with `cc`; `Lc3Encoder` |
 | `app/src/crates/codec/src/lc3.rs` | LC3 behind the `codec` crate's `lc3` feature (not a `CodecKind`) |
-| `app/src/crates/btstack-sys/` | `btstack_config.h` LE block (`ENABLE_BLE`, LE central / peripheral, LE Secure Connections with micro-ecc, extended advertising, `ENABLE_LE_ISOCHRONOUS_STREAMS`, `MAX_NR_CIS 4`, `HCI_ISO_PAYLOAD_SIZE 400`, `NVN_NUM_GATT_SERVER_CCC 256`); `build.rs` adds `src/ble`, micro-ecc and `btstack_tlv_windows.c`; `src/le.rs` (Stack's LE API: scan, connect, SM, LE device DB, TLV, GATT client, att_db_util, att_server, CIG / CIS, ISO send), `src/att.rs` (ATT read / write callbacks, notification queue), `src/events.rs` (event readers), `src/transport.rs` (LE hidden, below), `src/timer_resolution.rs` (`HighTimerResolution`) |
+| `app/src/crates/btstack-sys/` | `btstack_config.h` LE block (`ENABLE_BLE`, LE central / peripheral, LE Secure Connections with micro-ecc, extended advertising, `ENABLE_LE_ISOCHRONOUS_STREAMS`, `MAX_NR_CIS 4`, `HCI_ISO_PAYLOAD_SIZE 400`, `NVN_NUM_GATT_SERVER_CCC 256`); `build.rs` adds `src/ble` and micro-ecc; `src/le.rs` (Stack's LE API: scan, connect, SM, LE device DB, TLV through a `TlvStore` (bt-host's `le_bond_file::TlvFile`, encrypted at rest), GATT client, att_db_util, att_server, CIG / CIS, ISO send), `src/att.rs` (ATT read / write callbacks, notification queue), `src/events.rs` (event readers), `src/transport.rs` (LE hidden, below), `src/timer_resolution.rs` (`HighTimerResolution`) |
 | `app/src/crates/hci-transport/src/usb.rs` | HCI ISO data on the ACL bulk endpoints (OUT: the bulk ACL slot; IN: passed up as ACL, `hci.c` reclassifies by CIS handle), as v1 and Linux btusb |
 | `app/src/crates/bt-host/src/le/` | The LE core: `mod.rs` (public types), `api.rs` (`BtHost::le_*`, worker side), `core.rs` (`LeCore`, `LeCtx`, scan / connect / SM / discovery, module dispatch), `gatt_client.rs` (per-connection queue), `gatt_server.rs` (the PC's GATT server), `bap.rs` (PACS / ASCS client, `Unicast` state machine), `iso_send.rs` (`IsoSender`), `iso_recv.rs` (ISO data of source ASEs: parser, `IsoRx`, `LeRxHandle`), `module.rs` (hook traits) |
 | `app/src/crates/bt-host/src/le/modules/` | The profiles: `csip.rs`, `vcp.rs`, `mcp.rs`, `ccp.rs`, `tmap_gmap.rs`, `bas.rs`; `mod.rs` registers them (v1's order: CSIP, VCP, MCP, CCP, TMAP / GMAP, then BAS) |
@@ -44,12 +44,14 @@ for reference (`git show b819893:app/src/le_audio/<file>`).
 | `app/src/ui/src/` | The Codecs screen's LC3 card and GMAP low-latency check box (the profile's `le_low_latency`), DevicePicker's LE tags, Diagnostics' ISO counters; `?mock=le` mocks LE |
 | `tools/a2dp_decode/le_audio_decode.cpp` | `bluecaster_decode --le-audio` |
 | `tools/emu/emu_le_audio_sink.py`, `tools/emu/le_audio/` | Bumble LE Audio sink(s); `le_audio/<profile>.py` = the sink side of each profile; `le_audio/mic.py` + `mic_frames.py` the headset microphone (`--mic`) |
-| `tools/emu/le_audio_tests/` | `run_test.py --le-audio` cases and checks, one file per profile (`core.py`, `privacy.py`, `csip.py`, `vcp.py`, `mcp.py`, `ccp.py`, `tmap_gmap.py`, `bas.py`, `mic.py`) |
+| `tools/emu/le_audio_tests/` | `run_test.py --le-audio` cases and checks, one file per profile (`core.py`, `privacy.py`, `csip.py`, `vcp.py`, `mcp.py`, `ccp.py`, `tmap_gmap.py`, `bas.py`, `mic.py`, `gatt_cache.py`) |
 
 Files in the config folder (the formats are the same as v1; the paths are
 in [Settings and Files](architecture#settings-and-files)):
 `pairing\le_audio_bonds.tlv` (LE bonds and the GATT server's persistent CCC
 values), `pairing\le_audio_csip.txt` (coordinated sets),
+`pairing\le_gatt_cache.txt` (each bonded device's GATT services with its
+Database Hash, `le/gatt_cache.rs`; also what the Services tag lists),
 `devices\le_audio_devices.txt` (LE Audio entries of the device list).
 
 ## Threads - the one rule that matters
@@ -99,7 +101,8 @@ the GATT client or the GATT server runs on the **BTstack thread**, through an
 4. `le_connect(addr, name, timeout)`: `gap_connect` -> **`on_connected`** ->
    SM pairing / re-encryption (a bond the device lost is deleted and pairing
    repeated once) -> **`on_encrypted`** -> GATT discovery into
-   `LeDevice::services` -> PACS / ASCS reads and notifications ->
+   `LeDevice::services` (skipped when the device's Database Hash matches the
+   one kept with its services in `le_gatt_cache.txt`) -> PACS / ASCS reads and notifications ->
    **`on_gatt_ready`** -> the device id. On timeout / cancel the connect is
    cancelled; a link that still comes up afterwards is disconnected.
 5. `le_start_stream(devices, request, silence)`: **`prepare_group`** (worker)

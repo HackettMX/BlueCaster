@@ -28,7 +28,7 @@ members = [
 exclude = ["app/src/crates/aptx-adaptive", "app/src/crates/nusb"]
 
 [workspace.package]
-version = "3.0.0-beta.3.alpha.2"
+version = "3.0.0-beta.3.alpha.3"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0 OR MIT"

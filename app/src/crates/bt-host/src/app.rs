@@ -156,6 +156,14 @@ pub(crate) struct HostApp {
     init_started: Instant,
     /// Manufacturer the controller reported in this init (Read Local Version)
     controller_company: Option<u16>,
+    /// Developer > Debug's command (crate::debug_command): waiting to be
+    /// sent, then its opcode until the answer comes
+    debug_command: Option<Vec<u8>>,
+    debug_command_sent: Option<u16>,
+    /// Packets the controller reported completed (Number Of Completed
+    /// Packets), by connection handle; logged when the handle disconnects,
+    /// so a CIS that never had one shows 0 (issue #86: MediaTek ISO)
+    completed_by_handle: std::collections::BTreeMap<u16, u64>,
     rtk_version_seen: bool,
     rtk_lmp_first: u16,
     rtk_verify_pending: bool,
@@ -261,6 +269,9 @@ impl HostApp {
             caps: Default::default(),
             init_started: Instant::now(),
             controller_company: None,
+            debug_command: None,
+            debug_command_sent: None,
+            completed_by_handle: Default::default(),
             rtk_version_seen: false,
             rtk_lmp_first: 0,
             rtk_verify_pending: false,
@@ -1145,6 +1156,9 @@ impl HostApp {
         }
         if ev == HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS {
             tracing::trace!("HCI completed packets: {:02X?}", p.get(2..));
+            for (handle, n) in completed_counts(p) {
+                *self.completed_by_handle.entry(handle).or_default() += u64::from(n);
+            }
         }
         // The controller's SCO buffer length, which BTstack's H2 path
         // asserts on (crate::voice)
@@ -1174,6 +1188,15 @@ impl HostApp {
             },
             HCI_EVENT_COMMAND_STATUS => {
                 if let (Some(status), Some(opcode)) = (u8_at(p, 2), le16(p, 4))
+                    && self.debug_command_sent == Some(opcode)
+                {
+                    self.debug_command_sent = None;
+                    tracing::info!(
+                        "debug command 0x{opcode:04X}: Command Status 0x{status:02X} ({})",
+                        hci_error_string(status)
+                    );
+                }
+                if let (Some(status), Some(opcode)) = (u8_at(p, 2), le16(p, 4))
                     && status != ERROR_CODE_SUCCESS
                 {
                     tracing::debug!("HCI command 0x{opcode:04X} status 0x{status:02X} ({})", hci_error_string(status));
@@ -1187,6 +1210,16 @@ impl HostApp {
             }
             HCI_EVENT_COMMAND_COMPLETE => {
                 let opcode = le16(p, 3).unwrap_or(0);
+                if self.debug_command_sent == Some(opcode) {
+                    self.debug_command_sent = None;
+                    let status = u8_at(p, 5).unwrap_or(0xFF);
+                    let local = self.shared.lock().local_address.clone();
+                    tracing::info!(
+                        "debug command 0x{opcode:04X}: Command Complete 0x{status:02X} ({}), return {}",
+                        hci_error_string(status),
+                        return_bytes(p.get(6..).unwrap_or_default(), local.as_deref())
+                    );
+                }
                 tracing::trace!("HCI command complete 0x{opcode:04X} status {:?}", u8_at(p, 5));
                 if let Some(status) = u8_at(p, 5)
                     && status != ERROR_CODE_SUCCESS
@@ -1400,8 +1433,9 @@ impl HostApp {
                 let (Some(handle), Some(reason)) = (le16(p, 3), u8_at(p, 5)) else { return };
                 let handle = handle & 0x0FFF;
                 tracing::info!(
-                    "HCI disconnection (handle 0x{handle:04x}, reason 0x{reason:02x}: {})",
-                    hci_error_string(reason)
+                    "HCI disconnection (handle 0x{handle:04x}, reason 0x{reason:02x}: {}), {} packet(s) completed by the controller",
+                    hci_error_string(reason),
+                    self.completed_by_handle.remove(&handle).unwrap_or(0)
                 );
                 // The audio connection's SCO link: released even if HFP
                 // never says so
@@ -1511,6 +1545,11 @@ impl HostApp {
                 self.shared.update(|s| s.realtek_rom = true);
             }
         }
+        self.completed_by_handle.clear();
+        // Developer > Debug: MediaTek controllers only
+        self.debug_command_sent = None;
+        self.debug_command = crate::debug_command::get().filter(|_| self.controller_company == Some(0x0046));
+        self.send_debug_command(stack);
         let le_audio_capable = stack.controller_iso() == Some(true);
         tracing::info!(
             "controller: LE Audio isochronous channels {}",
@@ -2298,10 +2337,26 @@ impl HostApp {
             stack.release_command_slot(opcode, ERROR_CODE_UNKNOWN_HCI_COMMAND);
         }
     }
+    /// Developer > Debug's command once BTstack can send one (HCI ready,
+    /// then each AFH tick until it went)
+    fn send_debug_command(&mut self, stack: &Stack) {
+        if self.debug_command.is_none() || !stack.can_send_command_now() {
+            return;
+        }
+        let Some(packet) = self.debug_command.take() else { return };
+        let opcode = u16::from_le_bytes([packet[0], packet[1]]);
+        let status = stack.cmd_raw(&packet);
+        tracing::info!("debug command {packet:02X?} sent (MediaTek controller): 0x{status:02X}");
+        if status == ERROR_CODE_SUCCESS {
+            self.debug_command_sent = Some(opcode);
+        }
+    }
+
     fn afh_tick(&mut self, stack: &Stack) {
         if !self.shared.lock().hci_ready {
             return;
         }
+        self.send_debug_command(stack);
         let version = self.controls.afh_version.load(Ordering::Acquire);
         let classify =
             self.afh_policy_version_seen != Some(version) || self.afh_ticks.is_multiple_of(AFH_CLASSIFY_EVERY_TICKS);
@@ -2648,9 +2703,56 @@ fn find_bcm_hcd(dir: &Path, adapters: &[(u16, u16)]) -> Option<PathBuf> {
     None
 }
 
+/// (handle, count) pairs of a Number Of Completed Packets event
+fn completed_counts(p: &[u8]) -> Vec<(u16, u16)> {
+    let n = p.get(2).copied().unwrap_or(0) as usize;
+    (0..n)
+        .filter_map(|i| {
+            let at = 3 + 4 * i;
+            Some((le16(p, at)? & 0x0FFF, le16(p, at + 2)?))
+        })
+        .collect()
+}
+
+/// A debug command's return parameters as hex bytes for the log, the
+/// controller's own address (little-endian, as HCI carries it) replaced:
+/// the diagnostics mask only addresses written as addresses
+fn return_bytes(bytes: &[u8], local_address: Option<&str>) -> String {
+    let le: Option<Vec<u8>> = local_address.and_then(crate::parse_addr).map(|a| a.iter().rev().copied().collect());
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if le.as_deref().is_some_and(|le| bytes[i..].starts_with(le)) {
+            out.push("<adapter>".to_string());
+            i += 6;
+        } else {
+            out.push(format!("{:02X}", bytes[i]));
+            i += 1;
+        }
+    }
+    format!("[{}]", out.join(" "))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ConnectFailure, missing_loader_warning, remove_alias, signaling_failure};
+    use super::{
+        ConnectFailure, completed_counts, missing_loader_warning, remove_alias, return_bytes, signaling_failure,
+    };
+
+    #[test]
+    fn counts_completed_packets_by_handle() {
+        let p = [0x13, 9, 2, 0x00, 0x04, 1, 0, 0x00, 0x22, 3, 0];
+        assert_eq!(completed_counts(&p), vec![(0x0400, 1), (0x0200, 3)]);
+    }
+
+    #[test]
+    fn hides_the_adapter_address_in_debug_command_returns() {
+        let addr = "00:11:22:33:44:55";
+        let bytes = [0x01, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0x7F];
+        assert_eq!(return_bytes(&bytes, Some(addr)), "[01 <adapter> 7F]");
+        assert_eq!(return_bytes(&[0x08, 0x01], Some(addr)), "[08 01]");
+        assert_eq!(return_bytes(&[], None), "[]");
+    }
 
     #[test]
     fn no_loader_warning_after_a_loader_ran() {

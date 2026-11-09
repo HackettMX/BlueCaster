@@ -759,6 +759,21 @@ pub struct VendorInfo {
     pub options: Vec<String>,
 }
 
+/// Developer > Debug (bluecaster_core::settings::DevDebug)
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct DevDebug {
+    /// LE Audio over the MediaTek adapter's interrupt interface
+    pub mtk_iso_interface: bool,
+    /// Outgoing ISO packets zero-padded to this length; 0: none
+    pub mtk_iso_pad: u16,
+    /// One HCI command after init, in hex ("FD98 08 01"); empty: none
+    pub mtk_command: String,
+    /// Restore original driver hands Windows BlueCaster's LE keys too, for
+    /// the devices Windows keeps LE keys of (issue #86)
+    pub le_keys_to_windows: bool,
+}
+
 /// Developer mode's logging (bluecaster_core::settings::DevLog), in force while
 /// developer_mode is on
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -850,6 +865,9 @@ pub struct Settings {
     /// that stays on, the stream health line every interval
     #[serde(default)]
     pub dev_log: DevLog,
+    /// Developer > Debug: experiments for one adapter's transport
+    #[serde(default)]
+    pub dev_debug: DevDebug,
     /// 0 = auto, a Realtek PID, 0xFFFE = not Realtek
     pub bt_chip_pid: u16,
     pub bt_chip_fw_stem: String,
@@ -1582,10 +1600,16 @@ pub enum Method {
     #[serde(rename = "device.pairing")]
     DevicePairing { address: String },
     /// -> ServiceList: the services a classic device lists, asked over the
-    /// connection BlueCaster has to it, else the list from its last connection
-    /// since the core started
+    /// connection BlueCaster has to it, else the list from its last
+    /// connection; `le_audio` true: the GATT services its LE Audio entry had
+    /// at its last connection
     #[serde(rename = "device.services")]
-    DeviceServices { address: String },
+    DeviceServices {
+        address: String,
+        #[ts(optional = nullable)]
+        #[serde(default)]
+        le_audio: Option<bool>,
+    },
     /// -> WindowsPairedDevice[]: the classic audio devices Windows'
     /// Bluetooth paired through the adapter with the Bluetooth address
     /// `adapter` (what device.import_windows_pairings can take over; no
@@ -1604,6 +1628,11 @@ pub enum Method {
         #[serde(default)]
         addresses: Option<Vec<String>>,
     },
+    /// -> KeysComparison (developer mode): BlueCaster's pairing keys against
+    /// the ones Windows keeps for the adapter with the Bluetooth address
+    /// `adapter` (one administrator prompt; numbers only)
+    #[serde(rename = "dev.compare_windows_keys")]
+    DevCompareWindowsKeys { adapter: String },
     /// Removes a saved device; `le_audio` true: its LE Audio entry (absent
     /// or false: the classic one)
     #[serde(rename = "device.forget")]
@@ -1836,7 +1865,7 @@ pub struct AudioDevice {
     pub mix_bits: Option<u16>,
     /// The recording side apps pick as a microphone when the headset
     /// microphone is rendered here ("CABLE Output" for "CABLE Input");
-    /// None: it has none
+    /// None: it has none or is not a virtual device
     #[serde(default)]
     pub capture_name: Option<String>,
 }
@@ -2170,6 +2199,49 @@ pub struct WindowsPairedDevice {
     pub address: String,
     /// Windows' name for it (empty when it has none)
     pub name: String,
+}
+
+/// How many devices' keys agree, for one kind of key
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct KeyCounts {
+    /// The same in BlueCaster and Windows
+    pub same: u32,
+    /// Both have keys of the device, but not the same
+    pub differ: u32,
+    /// Only BlueCaster has keys of the device
+    pub only_bluecaster: u32,
+    /// Only Windows has keys of the device (for this adapter)
+    pub only_windows: u32,
+}
+
+/// A value Windows keeps under its keys: its name, type and size, never its
+/// data
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct WindowsValueName {
+    pub name: String,
+    /// "binary", "DWORD", "QWORD", "string" or "type N"
+    pub kind: String,
+    /// Bytes of data
+    pub size: u32,
+    /// How many keys have it (LE devices)
+    pub count: u32,
+}
+
+/// dev.compare_windows_keys' result: counts and value names, no address or
+/// key
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct KeysComparison {
+    /// Windows keeps keys for the adapter
+    pub adapter_found: bool,
+    /// Link keys
+    pub classic: KeyCounts,
+    /// LE keys; None: BlueCaster's could not be read
+    #[ts(optional = nullable)]
+    pub le: Option<KeyCounts>,
+    /// The values of the adapter's key in Windows (its own, not the devices')
+    pub radio_values: Vec<WindowsValueName>,
+    /// The values of Windows' LE device keys, counted over the devices
+    pub le_values: Vec<WindowsValueName>,
 }
 
 /// device.import_windows_pairings' result

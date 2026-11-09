@@ -249,7 +249,9 @@ export function pickedCodec(
 
 /** Whether a codec's card shows: the one picked always, the others unless
  *  `hide` and the device did not offer them (a codec chosen that it does
- *  not offer neither: the one used instead is picked) */
+ *  not offer neither: the one used instead is picked). A device never
+ *  connected shows SBC alone, the codec every device has (issue #86: an
+ *  imported device's cards were a wall of unconfirmed ones). */
 export function codecShown(
   id: string,
   picked: string | null,
@@ -257,7 +259,9 @@ export function codecShown(
   hide: boolean,
   onRequest: readonly string[] = [],
 ) {
-  return !hide || id === picked || codecSupport(id, known, onRequest) !== "not_offered";
+  if (!hide || id === picked) return true;
+  if (known.length === 0) return id === "sbc";
+  return codecSupport(id, known, onRequest) !== "not_offered";
 }
 
 /** Whether `order` puts the cards in `ids` (those shown) in their default
@@ -390,6 +394,9 @@ function DeviceCodecs(props: {
   const known =() => knownCodecs(snap().devices, e().address);
   const onRequest = () => codecsOnRequest(snap().devices, e().address);
   const support = (id: string) => codecSupport(id, known(), onRequest());
+  // On its card, SBC is supported before the first connection too: every
+  // device has it (SBC XQ needs what the device lists, so not it)
+  const shownSupport = (id: string) => (id === "sbc" && known().length === 0 ? "offered" : support(id));
   // The device's order while it is being dragged (null: the saved one)
   const [dragOrder, setDragOrder] = createSignal<CodecId[] | null>(null);
   // Its cards' order, which Auto follows under Auto-select too
@@ -720,7 +727,7 @@ function DeviceCodecs(props: {
                 disabled={locked()}
                 readOnly={props.auto}
                 // Only supported codecs shown: no "Supported" tag on each
-                support={props.hide && support(c.id) === "offered" ? null : support(c.id)}
+                support={props.hide && shownSupport(c.id) === "offered" ? null : shownSupport(c.id)}
                 orderable
                 dragging={dragging() === c.id}
                 // The keys need a card that takes the focus (not under Auto-select)

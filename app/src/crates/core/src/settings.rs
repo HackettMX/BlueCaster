@@ -175,6 +175,10 @@ pub struct Settings {
     /// Developer mode: how the core logs (in force only while debug_mode is
     /// on; otherwise [`DevLog::default`])
     pub dev_log: DevLog,
+    /// Developer > Debug: experiments for one adapter's transport (in force
+    /// only while debug_mode is on)
+    #[serde(default, skip_serializing_if = "DevDebug::is_default")]
+    pub dev_debug: DevDebug,
 
     /// Realtek chip for the firmware download: 0 = auto; a Realtek PID for
     /// OEM adapters whose VID is not Realtek's
@@ -232,6 +236,29 @@ pub const LOG_KEEP_DAYS: u32 = 7;
 /// What a day's log file takes by default before its debug and trace lines
 /// stop
 pub const LOG_DAY_CAP_MB: u32 = 100;
+
+/// Developer > Debug (issue #86): LE Audio on a MediaTek adapter, tried
+/// over its interrupt interface (hci_transport::iso_intr), with optional
+/// zero padding, and one HCI command sent after init (bt_host::debug_command);
+/// the driver restore handing Windows the LE keys too
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DevDebug {
+    pub mtk_iso_interface: bool,
+    /// Outgoing ISO packets zero-padded to this length; 0: none
+    pub mtk_iso_pad: u16,
+    /// "FD98 08 01": opcode, then parameter bytes, in hex; empty: none
+    pub mtk_command: String,
+    /// Restore original driver writes BlueCaster's LE keys to Windows too
+    /// (core driver.rs; only where Windows keeps LE keys of the device)
+    pub le_keys_to_windows: bool,
+}
+
+impl DevDebug {
+    pub fn is_default(&self) -> bool {
+        *self == DevDebug::default()
+    }
+}
 
 /// Developer mode's logging: retention, the daily size cap, verbose logging
 /// that does not run out, and the stream health line every interval
@@ -315,6 +342,7 @@ impl Default for Settings {
             dev_overrides: codec::dev::DevOverrides::default(),
             dev_vendors: Default::default(),
             dev_log: DevLog::default(),
+            dev_debug: DevDebug::default(),
             bt_chip_pid: 0,
             bt_chip_fw_stem: String::new(),
             afh: default_afh(),

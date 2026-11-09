@@ -1,11 +1,11 @@
 //! The LE bond store across BTstack restarts in one process (core restarts
 //! BTstack between streams): what the first run stored is read back by the
-//! second, and the file is closed after each run.
+//! second, through the TlvStore handed to le_init.
 
 use std::sync::mpsc;
 use std::time::Duration;
 
-use btstack_sys::{App, HciBackend, Remote, Source, Stack, Upstream};
+use btstack_sys::{App, HciBackend, MemoryTlv, Remote, Source, Stack, Upstream};
 
 /// A controller that never answers: LE init needs only hci_init
 struct Silent;
@@ -35,8 +35,8 @@ const TAG: u32 = 0x4132_5754;
 
 /// One run with LE on `tlv`: stores `store` under TAG, returns what TAG held
 /// right after le_init
-fn one_run(tlv: &std::path::Path, store: Option<&'static [u8]>) -> Option<Vec<u8>> {
-    let path = tlv.to_str().unwrap().to_string();
+fn one_run(tlv: &MemoryTlv, store: Option<&'static [u8]>) -> Option<Vec<u8>> {
+    let tlv = tlv.clone();
     let (tx, rx) = mpsc::channel::<(Remote, Option<Vec<u8>>)>();
     let thread = std::thread::spawn(move || {
         btstack_sys::run(move |s, remote| {
@@ -44,7 +44,7 @@ fn one_run(tlv: &std::path::Path, store: Option<&'static [u8]>) -> Option<Vec<u8
             s.hci_init(Box::new(Silent));
             s.set_link_key_store(None);
             s.l2cap_init();
-            assert!(s.le_init(&path));
+            s.le_init(Box::new(tlv.clone()));
             let held = s.tlv_get(TAG);
             if let Some(value) = store {
                 assert!(s.tlv_store(TAG, value));
@@ -63,11 +63,8 @@ fn one_run(tlv: &std::path::Path, store: Option<&'static [u8]>) -> Option<Vec<u8
 
 #[test]
 fn bonds_survive_a_restart() {
-    let tlv = std::env::temp_dir().join(format!("bluecaster_le_tlv_test_{}.tlv", std::process::id()));
-    let _ = std::fs::remove_file(&tlv);
+    let tlv = MemoryTlv::default();
     assert_eq!(one_run(&tlv, Some(b"bond")), None);
-    // The second run opens the same file (in the same process) and reads it
+    // The second run (in the same process) reads the same store
     assert_eq!(one_run(&tlv, None).as_deref(), Some(&b"bond"[..]));
-    // Closed after the run: it can be removed
-    std::fs::remove_file(&tlv).expect("the TLV file is still open");
 }

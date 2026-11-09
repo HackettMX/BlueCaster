@@ -396,6 +396,17 @@ already has is kept, and the audio devices among them are saved with
 Windows' names. Developer mode shows a device's link key and the SDP
 services it lists.
 
+The key files in `pairing\` (link keys, LE bonds, coordinated sets, LE keys
+taken from Windows, Windows' replaced keys) are encrypted for the Windows user
+with DPAPI (`win-sys::dpapi`); other users, and the same files copied to
+another PC, cannot read them. Plain-text files of earlier versions are read
+and rewritten encrypted. A file that cannot be decrypted is kept as
+`<name>.undecryptable` and its devices are paired again. BlueCaster keeps
+BTstack's LE TLV itself (the `TlvStore` of `btstack-sys`, with the content
+`btstack_tlv_windows` wrote). `keys_for_windows.json`, which the elevated
+helper reads during a restore, stays plain text (the helper may run as another
+administrator) and is deleted when the helper ends.
+
 ### Audio Encoders
 
 | Encoder | Library | Bitrate | Features |
@@ -500,6 +511,7 @@ below):
 | `devices\device_codecs.json` | What each classic device offered when it last connected (and whether OPPO earbuds were asked for Hi-Res) |
 | `pairing\link_keys.txt` | Link keys: headphones paired with v1 or 2.0.x reconnect without pairing again |
 | `pairing\le_audio_bonds.tlv`, `pairing\le_audio_csip.txt` | LE Audio (experimental): LE bonds (with the GATT server's persistent CCC values) and coordinated sets |
+| `pairing\windows_le_keys.txt`, `pairing\replaced_windows_keys.json` | LE keys taken from Windows until a stack with LE adds them; Windows' keys that **Restore original driver** replaced |
 | `adapters\adapter_caps.json` | What a stack learnt about each adapter (LE Audio support, address, HCI version, Windows' name for it) |
 | `adapters\driver\<instance id>.json` | The previous driver of each adapter WinUSB was assigned to |
 | `firmware\` | Firmware files (`*.bin`, `*.hcd`, `ibt-*`; Intel's also in `firmware\intel\`, as linux-firmware lays them out); files earlier versions kept loose in the settings folder are moved there |

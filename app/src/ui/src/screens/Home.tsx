@@ -361,9 +361,9 @@ function DeviceCard(props: { entry: AudioEntry; onError: (e: unknown) => void })
 /** The headset microphone's mute at one click (Home's card and the
  *  flyout): a microphone icon, crossed out while muted, which closes the
  *  microphone link as Off does and keeps the mode chosen on Audio Devices
- *  (Auto / On). Only for a device with headset mode on and its microphone
- *  output chosen. An icon alone keeps the card still as it switches (issue
- *  #86); Auto with no microphone link open shows dimmed, and why the
+ *  (Auto / On). Only for a device in use with headset mode on and its
+ *  microphone output chosen. An icon alone keeps the card still as it
+ *  switches (issue #86); Auto with no microphone link open shows dimmed, and why the
  *  microphone did not open (MIC_NOTES) shows on it, not as the card's
  *  status. */
 export function HeadsetChip(props: { entry: AudioEntry }) {
@@ -371,12 +371,13 @@ export function HeadsetChip(props: { entry: AudioEntry }) {
   const snap = () => app.core.state.snap!;
   const profile = () => props.entry.profile;
   const mode = (): HeadsetMode => (profile() ? headsetMode(profile()!) : "off");
-  const shown = () => !!profile()?.mic_device_id && mode() !== "off";
   const muted = () => !!profile()?.mic_muted;
   const ours = () => {
     const s = snap().stream;
     return s.state !== "idle" && s.profile === profile()?.name;
   };
+  // Only while the device is connected or connecting (issue #86)
+  const shown = () => ours() && !!profile()?.mic_device_id && mode() !== "off";
   const linked = () => ours() && !!snap().stream.voice;
   const note = () => {
     const m = snap().stream.message;

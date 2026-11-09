@@ -376,6 +376,13 @@ Bluetooth가 BlueCaster가 지금 사용하는 어댑터용으로 보관한 키�
 가진 키는 유지되며, 그중 오디오 장치는 Windows의 이름으로 저장됩니다. 개발자 모드에서는
 장치의 링크 키와 그 장치가 알리는 SDP 서비스를 보여 줍니다.
 
+`pairing\`의 키 파일(링크 키, LE 본딩 정보, 조정 세트, Windows에서 가져온 LE 키, 교체된 Windows 키)은
+DPAPI로 Windows 사용자별로 암호화됩니다(`win-sys::dpapi`). 다른 사용자나 다른 PC에 복사한 같은 파일로는 읽을 수
+없습니다. 이전 버전의 평문 파일은 읽은 뒤 암호화해서 다시 씁니다. 복호화할 수 없는 파일은 `<이름>.undecryptable`로
+남기고, 그 장치는 다시 페어링합니다. BTstack의 LE TLV는 BlueCaster가 직접 보관합니다(`btstack-sys`의
+`TlvStore`, 내용은 `btstack_tlv_windows`가 쓰던 것과 같음). 복원할 때 관리자 권한 도우미가 읽는
+`keys_for_windows.json`은 평문으로 남으며(도우미가 다른 관리자로 실행될 수 있으므로), 도우미가 끝나면 삭제됩니다.
+
 ### 오디오 인코더
 
 | 인코더 | 라이브러리 | 비트레이트 | 특징 |
@@ -478,6 +485,7 @@ LL 패킷은 348바이트(10 ms)입니다. 자동은 이를 기본 aptX, Opus, A
 | `devices\device_codecs.json` | 각 클래식 장치가 마지막으로 연결했을 때 제공한 내용 (그리고 OPPO 이어폰에 Hi-Res를 요청했는지 여부) |
 | `pairing\link_keys.txt` | 링크 키: v1이나 2.0.x에서 페어링한 헤드폰은 다시 페어링하지 않고 다시 연결됨 |
 | `pairing\le_audio_bonds.tlv`, `pairing\le_audio_csip.txt` | LE 오디오(실험적): LE 본딩 정보(GATT 서버가 유지하는 CCC 값 포함)와 조정 세트 |
+| `pairing\windows_le_keys.txt`, `pairing\replaced_windows_keys.json` | Windows에서 가져온 LE 키(LE를 쓰는 스택이 추가할 때까지)와 **원래 드라이버 복원**이 교체한 Windows의 키 |
 | `adapters\adapter_caps.json` | 스택이 각 어댑터에 대해 알아낸 내용 (LE 오디오 지원, 주소, HCI 버전, Windows에서의 이름) |
 | `adapters\driver\<instance id>.json` | WinUSB를 할당한 각 어댑터의 이전 드라이버 |
 | `firmware\` | 펌웨어 파일 (`*.bin`, `*.hcd`, `ibt-*`. Intel 파일은 linux-firmware의 배치처럼 `firmware\intel\`에도 둠). 이전 버전이 설정 폴더에 그냥 두었던 파일은 이곳으로 옮겨짐 |

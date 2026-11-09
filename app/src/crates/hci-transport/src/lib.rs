@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod iso_intr;
 pub mod reassembly;
 pub mod tcp;
 pub mod usb;

@@ -12,7 +12,9 @@
 //!   Member Lock (0x2B86) and Set Member Rank (0x2B87). Devices with the
 //!   same SIRK form one set (an index into the module's sets, the
 //!   `LeScanResult::set_id`). The SIRK of a bonded device is kept in
-//!   `<bond_dir>\le_audio_csip.txt` for later sessions.
+//!   `<bond_dir>\le_audio_csip.txt` for later sessions, encrypted for the
+//!   Windows user like the bonds (the SIRK resolves the set's private
+//!   addresses, as an IRK does a device's).
 //! - `on_scan_result`: an advertised RSI (AD 0x2E) is checked against every
 //!   known SIRK (sih, CSIS 4.7); a match sets `set_id` / `note` /
 //!   `le_audio`.
@@ -377,15 +379,16 @@ impl State {
 
     fn save_stored(&self) {
         let Some(path) = &self.file else { return };
-        if std::fs::write(path, format_stored(&self.stored)).is_err() {
-            tracing::warn!("CSIP: cannot write {}", path.display());
+        if let Err(e) = win_sys::dpapi::write_secret(path, format_stored(&self.stored).as_bytes()) {
+            tracing::warn!("CSIP: cannot write the SIRK file: {e}");
         }
     }
 
     fn load_stored(&mut self, stack: &Stack) {
         self.stored.clear();
         let Some(path) = &self.file else { return };
-        let Ok(text) = std::fs::read_to_string(path) else { return };
+        let Ok(bytes) = win_sys::dpapi::read_secret(path) else { return };
+        let text = String::from_utf8_lossy(&bytes);
         let mut dropped = 0;
         for s in text.lines().filter_map(parse_stored_line) {
             if !bonded(stack, &s.addr) {

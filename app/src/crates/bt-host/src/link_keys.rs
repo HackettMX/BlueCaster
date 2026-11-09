@@ -7,7 +7,9 @@
 //! XX-XX-XX-XX-XX-XX <32 hex digits of the key> <key type>
 //! ```
 //!
-//! Kept in memory and written in full (temp file + rename) on every change.
+//! Kept in memory and written in full (temp file + rename) on every change,
+//! encrypted for the Windows user ([`win_sys::dpapi`]); a plain-text file
+//! (v1, older v3 builds) is read and rewritten encrypted.
 
 use std::path::{Path, PathBuf};
 
@@ -58,14 +60,14 @@ fn format_entry(e: &LinkKeyEntry) -> String {
 }
 
 impl FileLinkKeyStore {
-    /// Loads the file (missing or unreadable: empty); its folder is made
-    /// when a key is saved
+    /// Loads the file (missing, unreadable or not decryptable: empty); its
+    /// folder is made when a key is saved
     pub fn open(file: &Path) -> FileLinkKeyStore {
         let path = file.to_path_buf();
-        let entries: Vec<LinkKeyEntry> = std::fs::read_to_string(&path)
-            .map(|text| text.lines().filter_map(parse_line).take(MAX_LINK_KEYS).collect())
+        let entries: Vec<LinkKeyEntry> = win_sys::dpapi::read_secret(&path)
+            .map(|bytes| String::from_utf8_lossy(&bytes).lines().filter_map(parse_line).take(MAX_LINK_KEYS).collect())
             .unwrap_or_default();
-        tracing::info!("link keys: {} loaded from {}", entries.len(), path.display());
+        tracing::info!("link keys: {} loaded", entries.len());
         FileLinkKeyStore { path, entries }
     }
 
@@ -78,15 +80,8 @@ impl FileLinkKeyStore {
         for e in &self.entries {
             text.push_str(&format_entry(e));
         }
-        let tmp = self.path.with_extension("txt.tmp");
-        let result = self
-            .path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(&tmp, text))
-            .and_then(|()| std::fs::rename(&tmp, &self.path));
-        if let Err(e) = result {
-            tracing::error!("link keys: cannot write {}: {e}", self.path.display());
+        if let Err(e) = win_sys::dpapi::write_secret(&self.path, text.as_bytes()) {
+            tracing::error!("link keys: cannot write the file: {e}");
         }
     }
 }
@@ -166,6 +161,10 @@ mod tests {
         )
         .unwrap();
         let mut store = FileLinkKeyStore::open(&file);
+        // The plain-text file was rewritten encrypted
+        let on_disk = std::fs::read(&file).unwrap();
+        assert!(win_sys::dpapi::is_encrypted(&on_disk));
+        assert!(!String::from_utf8_lossy(&on_disk).contains("00112233"));
         let addr = [0x00, 0xA2, 0xD0, 0x00, 0x00, 0x02];
         let (key, t) = store.get(&addr).unwrap();
         assert_eq!(key[0], 0x00);

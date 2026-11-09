@@ -52,7 +52,6 @@
 #include "classic/sdp_util.h"
 #include "btstack_crypto.h"
 #include "btstack_tlv.h"
-#include "btstack_tlv_windows.h"
 #include "ble/att_db.h"
 #include "ble/att_db_util.h"
 #include "ble/att_server.h"
@@ -76,6 +75,9 @@ int bluecaster_rs_lk_get(const uint8_t *addr, uint8_t *key, int *type);
 void bluecaster_rs_lk_put(const uint8_t *addr, const uint8_t *key, int type);
 void bluecaster_rs_lk_delete(const uint8_t *addr);
 int bluecaster_rs_lk_at(int index, uint8_t *addr, uint8_t *key, int *type);
+int bluecaster_rs_tlv_get(uint32_t tag, uint8_t *buffer, uint32_t size);
+int bluecaster_rs_tlv_store(uint32_t tag, const uint8_t *data, uint32_t size);
+void bluecaster_rs_tlv_delete(uint32_t tag);
 uint16_t bluecaster_rs_att_read(uint16_t con, uint16_t handle, uint16_t offset, uint8_t *buffer, uint16_t buffer_size);
 int bluecaster_rs_att_write(uint16_t con, uint16_t handle, uint16_t mode, uint16_t offset, const uint8_t *buffer,
                         uint16_t size);
@@ -1027,53 +1029,35 @@ static void le_hci_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 
 /* ---- Setup ---- */
 
-static btstack_tlv_windows_t le_tlv_context;
-static int le_tlv_open;
-static char le_tlv_path[1024];
 static btstack_packet_callback_registration_t sm_event_registration;
 
-/* btstack_tlv_windows opens the file with CreateFileA: the path in the ANSI
- * code page, or with the folder's 8.3 name if it does not fit in it */
-static int utf8_to_ansi_path(const char *in, char *out, int out_size) {
-    wchar_t wide[1024];
-    if (MultiByteToWideChar(CP_UTF8, 0, in, -1, wide, 1024) <= 0) return 0;
-    if (GetACP() == CP_UTF8) {
-        size_t n = strlen(in) + 1;
-        if (n > (size_t)out_size) return 0;
-        memcpy(out, in, n);
-        return 1;
-    }
-    BOOL lossy = FALSE;
-    if (WideCharToMultiByte(CP_ACP, 0, wide, -1, out, out_size, NULL, &lossy) > 0 && !lossy) return 1;
-    wchar_t *sep = wcsrchr(wide, L'\\');
-    wchar_t *sep2 = wcsrchr(wide, L'/');
-    if (sep2 > sep) sep = sep2;
-    if (sep == NULL) return 0;
-    *sep = 0;
-    wchar_t short_dir[1024];
-    DWORD n = GetShortPathNameW(wide, short_dir, 1024);
-    if (n == 0 || n >= 1024 || wcslen(short_dir) + 1 + wcslen(sep + 1) + 1 > 1024) return 0;
-    wcscat(short_dir, L"\\");
-    wcscat(short_dir, sep + 1);
-    lossy = FALSE;
-    return WideCharToMultiByte(CP_ACP, 0, short_dir, -1, out, out_size, NULL, &lossy) > 0 && !lossy;
+/* The LE TLV is kept in Rust (btstack-sys TlvStore: the bonds file,
+ * encrypted at rest, instead of btstack_tlv_windows' plain file) */
+static int rs_tlv_get_tag(void *context, uint32_t tag, uint8_t *buffer, uint32_t buffer_size) {
+    (void)context;
+    return bluecaster_rs_tlv_get(tag, buffer, buffer_size);
 }
 
-/* LE bonds in a TLV file (le_device_db_tlv, as v1's le_audio_bonds.tlv),
- * SM with LE Secure Connections, Just Works and bonding, GATT client, ISO.
- * Returns 0 when the path cannot be used (LE is set up anyway, with a TLV
- * store that keeps nothing). */
-int bluecaster_le_init(const char *tlv_path) {
+static int rs_tlv_store_tag(void *context, uint32_t tag, const uint8_t *data, uint32_t data_size) {
+    (void)context;
+    return bluecaster_rs_tlv_store(tag, data, data_size);
+}
+
+static void rs_tlv_delete_tag(void *context, uint32_t tag) {
+    (void)context;
+    bluecaster_rs_tlv_delete(tag);
+}
+
+static const btstack_tlv_t le_tlv_rust = {&rs_tlv_get_tag, &rs_tlv_store_tag, &rs_tlv_delete_tag};
+
+/* LE bonds in the Rust TLV store (le_device_db_tlv), SM with LE Secure
+ * Connections, Just Works and bonding, GATT client, ISO. */
+int bluecaster_le_init(void) {
     le_slots_reset();
     cig_slots_reset();
     broadcast_reset();
-    int path_ok = utf8_to_ansi_path(tlv_path, le_tlv_path, (int)sizeof(le_tlv_path));
-    if (!path_ok) strcpy(le_tlv_path, "NUL");
-    memset(&le_tlv_context, 0, sizeof(le_tlv_context));
-    const btstack_tlv_t *tlv = btstack_tlv_windows_init_instance(&le_tlv_context, le_tlv_path);
-    le_tlv_open = 1;
-    btstack_tlv_set_instance(tlv, &le_tlv_context);
-    le_device_db_tlv_configure(tlv, &le_tlv_context);
+    btstack_tlv_set_instance(&le_tlv_rust, NULL);
+    le_device_db_tlv_configure(&le_tlv_rust, NULL);
 
     /* sm_init sets up btstack_crypto only once per process: a later run's
      * hci_init has dropped its HCI event handler, so it never got its LE
@@ -1093,7 +1077,7 @@ int bluecaster_le_init(const char *tlv_path) {
     le_hci_registration.callback = &le_hci_handler;
     hci_add_event_handler(&le_hci_registration);
     hci_register_iso_packet_handler(&handler_iso);
-    return path_ok;
+    return 1;
 }
 
 void bluecaster_le_deinit(int att_server_started) {
@@ -1103,18 +1087,6 @@ void bluecaster_le_deinit(int att_server_started) {
     if (att_server_started) att_server_deinit();
     sm_deinit();
     btstack_tlv_set_instance(NULL, NULL);
-    if (le_tlv_open) {
-        btstack_tlv_windows_deinit(&le_tlv_context);
-        /* btstack_tlv_windows_deinit frees the entries but leaves the file
-         * open, without sharing: the next bluecaster_le_init (BTstack restarted
-         * in this process) could then neither open nor re-create it, and the
-         * LE bonds would be neither loaded nor saved */
-        if (le_tlv_context.file != INVALID_HANDLE_VALUE) {
-            CloseHandle(le_tlv_context.file);
-            le_tlv_context.file = INVALID_HANDLE_VALUE;
-        }
-        le_tlv_open = 0;
-    }
     cig_slots_reset();
     broadcast_reset();
 }

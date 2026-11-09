@@ -9,6 +9,6 @@ mix_rate: number | null, mix_channels: number | null, mix_bits: number | null,
 /**
  * The recording side apps pick as a microphone when the headset
  * microphone is rendered here ("CABLE Output" for "CABLE Input");
- * None: it has none
+ * None: it has none or is not a virtual device
  */
 capture_name: string | null, };

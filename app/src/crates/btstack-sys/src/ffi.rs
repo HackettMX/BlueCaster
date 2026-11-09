@@ -7,6 +7,11 @@
 use std::ffi::{c_char, c_int};
 
 unsafe extern "C" {
+    // ---- hci.c ----
+    /// A whole command packet (opcode, length, parameters); BTstack hands
+    /// it to the transport, which copies it
+    pub fn hci_send_cmd_packet(packet: *mut u8, size: c_int) -> u8;
+
     // ---- shim.c: run loop ----
     pub fn bluecaster_runloop_init();
     pub fn bluecaster_wake();
@@ -199,7 +204,7 @@ pub struct CisParamsC {
 // LE (experimental LE Audio)
 unsafe extern "C" {
     // ---- shim.c: setup ----
-    pub fn bluecaster_le_init(tlv_path: *const c_char) -> c_int;
+    pub fn bluecaster_le_init() -> c_int;
     pub fn bluecaster_le_deinit(att_server_started: c_int);
 
     // ---- shim.c: GAP, HCI ----

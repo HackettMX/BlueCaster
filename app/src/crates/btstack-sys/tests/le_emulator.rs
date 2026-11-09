@@ -238,8 +238,6 @@ fn start(
     let (tx, rx) = mpsc::channel();
     let (rtx, rrx) = mpsc::channel();
     let address = emulator();
-    let tlv = std::env::temp_dir().join(format!("bluecaster_le_test_{}.tlv", std::process::id()));
-    let _ = std::fs::remove_file(&tlv);
     let thread = std::thread::spawn(move || {
         btstack_sys::run(move |s, remote| {
             assert!(s.set_le_hidden(hidden));
@@ -249,7 +247,7 @@ fn start(
             s.l2cap_init();
             s.add_hci_event_handler();
             if !hidden {
-                assert!(s.le_init(tlv.to_str().unwrap()));
+                s.le_init(Box::new(btstack_sys::MemoryTlv::default()));
                 s.att_db_init();
                 s.att_db_add_service_uuid16(0x1800, true);
                 let name = s.att_db_add_characteristic_uuid16(

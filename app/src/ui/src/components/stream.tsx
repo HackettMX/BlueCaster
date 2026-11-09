@@ -2,7 +2,7 @@
 // ring, the Connect / Disconnect button, volume, codec badge, link quality
 // and the error panel with its fix.
 
-import { createMemo, createResource, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, Show, type JSX } from "solid-js";
 import { errorText, useApp, type AppContext } from "../app/context";
 import { t, tm } from "../i18n";
 import { bitrateNoteKey, codecLabelKey } from "../lib/codecs";
@@ -816,25 +816,8 @@ export function ErrorPanel(props: { code?: string | null; message: Msg; title?: 
 export function WinusbDialog(props: { adapter: AdapterInfo | null; mode: "assign" | "restore"; onClose: (done: boolean) => void }) {
   const app = useApp();
   const [busy, setBusy] = createSignal(false);
-  // Restore: saved devices Windows has paired too. A pairing in BlueCaster
-  // gave the device a new key, so Windows' old one fails (BTHUSB event 16)
-  // until the device is paired in Windows again. Read per adapter: Windows'
-  // own list needs a radio of its own running, which an adapter on WinUSB
-  // is not (BluetoothFindFirstDevice fails, the list came back empty).
-  const [windowsPaired] = createResource(
-    () => (props.adapter && props.mode === "restore" ? props.adapter.address : null),
-    (adapter) =>
-      app.core
-        .request("device.windows_paired_through", { adapter })
-        .then((list) => list.map((d) => d.address))
-        .catch(() => [] as string[]),
-  );
-  const repair = () => {
-    const paired = new Set((windowsPaired() ?? []).map((a) => a.toUpperCase()));
-    return (app.core.state.snap?.devices ?? [])
-      .filter((d) => d.saved && !d.le_audio && paired.has(d.address.toUpperCase()))
-      .map((d) => d.name || d.address);
-  };
+  // Restore: devices paired in BlueCaster since Windows paired them need no
+  // word here; the restore hands Windows the newer keys (issue #86)
   const go = async () => {
     const a = props.adapter;
     if (!a) return;
@@ -877,9 +860,6 @@ export function WinusbDialog(props: { adapter: AdapterInfo | null; mode: "assign
         <span class="muted"> · {props.adapter?.device_name}</span>
       </p>
       <p>{props.mode === "assign" ? t("ui.adapter.assign_explain") : t("ui.adapter.restore_explain")}</p>
-      <Show when={props.mode === "restore" && repair().length > 0}>
-        <Banner kind="warn">{t("ui.adapter.restore_repair", repair().join(", "))}</Banner>
-      </Show>
       <p class="muted">{t("ui.adapter.uac_note")}</p>
     </Dialog>
   );

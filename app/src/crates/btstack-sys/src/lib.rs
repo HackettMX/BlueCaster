@@ -154,6 +154,43 @@ pub trait LinkKeyStore {
     fn at(&self, index: usize) -> Option<([u8; 6], [u8; 16], i32)>;
 }
 
+/// Keeps BTstack's LE TLV (the LE bonds of le_device_db_tlv, the GATT
+/// server's client configurations) for [`Stack::le_init`]; values are
+/// copied in and out
+pub trait TlvStore {
+    fn get(&mut self, tag: u32) -> Option<Vec<u8>>;
+    /// An empty value deletes the tag
+    fn store(&mut self, tag: u32, value: &[u8]);
+    fn delete(&mut self, tag: u32);
+}
+
+/// A [`TlvStore`] in memory; its clones share it, so it can outlive one
+/// run (tests)
+#[derive(Clone, Default)]
+pub struct MemoryTlv(std::sync::Arc<std::sync::Mutex<TlvEntries>>);
+
+/// Tags and their values, in the order they were stored
+type TlvEntries = Vec<(u32, Vec<u8>)>;
+
+impl TlvStore for MemoryTlv {
+    fn get(&mut self, tag: u32) -> Option<Vec<u8>> {
+        let entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        entries.iter().find(|(t, _)| *t == tag).map(|(_, v)| v.clone())
+    }
+
+    fn store(&mut self, tag: u32, value: &[u8]) {
+        let mut entries = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        entries.retain(|(t, _)| *t != tag);
+        if !value.is_empty() {
+            entries.push((tag, value.to_vec()));
+        }
+    }
+
+    fn delete(&mut self, tag: u32) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).retain(|(t, _)| *t != tag);
+    }
+}
+
 /// Receives every HCI packet BTstack sends or receives (`incoming`), e.g. to
 /// write an HCI capture
 pub type PacketLogger = Box<dyn FnMut(u8, bool, &[u8])>;
@@ -193,6 +230,8 @@ thread_local! {
     static PENDING: RefCell<VecDeque<callbacks::Pending>> = const { RefCell::new(VecDeque::new()) };
     static LOGGER: RefCell<Option<PacketLogger>> = const { RefCell::new(None) };
     static LINK_KEYS: RefCell<Option<Box<dyn LinkKeyStore>>> = const { RefCell::new(None) };
+    /// The LE TLV between le_init and le_deinit
+    static TLV: RefCell<Option<Box<dyn TlvStore>>> = const { RefCell::new(None) };
 }
 
 /// Wakes the run loop from any thread. Cheap and lock-free: usable from the

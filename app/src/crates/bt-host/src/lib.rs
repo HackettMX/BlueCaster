@@ -14,9 +14,11 @@ mod app;
 pub mod bringup;
 pub mod capture;
 pub mod chips;
+pub mod debug_command;
 pub mod events;
 pub mod intel;
 mod le;
+pub mod le_bond_file;
 pub mod le_import;
 pub mod link_details;
 pub mod link_keys;
@@ -46,6 +48,7 @@ use app::{HostApp, Job, Setup};
 pub use btstack_sys::{CtkdOutcome, ImportedLeBond, LeBondAdded, LeKeys, expect_transport_loss, set_ctkd};
 pub use capture::HciCapture;
 pub use events::{addr_str, parse_addr};
+pub use le::gatt_cache as le_gatt_cache;
 pub use le::iso_recv::{
     ISO_STATUS_LOST, ISO_STATUS_POSSIBLY_INVALID, ISO_STATUS_VALID, LeRxHandle, LeRxStats, LeRxStream, MAX_RX_SDU,
     RxSdu,

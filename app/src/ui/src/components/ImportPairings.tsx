@@ -10,6 +10,7 @@ import { createResource, createSignal, For, Show } from "solid-js";
 import { useApp } from "../app/context";
 import { t } from "../i18n";
 import { Button, Dialog } from "./controls";
+import { Icon } from "./Icon";
 
 export function ImportPairings() {
   const app = useApp();
@@ -86,10 +87,13 @@ export function ImportPairings() {
                         disabled={busy()}
                         onChange={(e) => tick(d.address, e.currentTarget.checked)}
                       />
-                      <span class="ellipsis">{d.name || d.address}</span>
-                      <Show when={d.name}>
-                        <span class="mono muted">{d.address}</span>
-                      </Show>
+                      <Icon name="headphones" />
+                      <span class="check-item-text">
+                        <span class="ellipsis">{d.name || d.address}</span>
+                        <Show when={d.name}>
+                          <span class="mono muted">{d.address}</span>
+                        </Show>
+                      </span>
                     </label>
                   </li>
                 )}

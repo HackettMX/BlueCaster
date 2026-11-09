@@ -164,27 +164,17 @@ describe("Adapter firmware", () => {
     await waitFor(() => expect(calls.filter((c) => c.method === "adapter.list").length).toBe(2));
   });
 
-  it("names the saved devices Windows has paired too before giving the adapter back", async () => {
-    const { calls, mock } = start();
+  it("gives the adapter back without a pairing warning", async () => {
+    const { mock } = start();
     await screen.findByRole("heading", { level: 1, name: "Adapters" });
     const m = mock as any;
     const saved = m.snap.devices.filter((d: { saved: boolean; le_audio: boolean }) => d.saved && !d.le_audio);
-    expect(saved.length).toBeGreaterThan(0);
-    m.windowsPaired = [saved[0].address.toLowerCase(), "00:11:22:33:44:55"];
+    // Windows paired a saved device too: the restore hands it BlueCaster's key
+    m.windowsPaired = [saved[0].address.toLowerCase()];
     fireEvent.click((await screen.findAllByRole("button", { name: "Restore original driver" }))[0]);
     const dialog = await screen.findByRole("dialog", { name: "Give the adapter back to Windows" });
-    expect(await within(dialog).findByText(new RegExp(`^${saved[0].name} may not connect in Windows`))).toBeInTheDocument();
-    // Asked per adapter: Windows' own list is empty while the adapter is on WinUSB
-    const winusb = m.snap.adapter.adapters.find((a: { driver: string }) => a.driver === "winusb");
-    expect(calls.find((c) => c.method === "device.windows_paired_through")?.params).toEqual({ adapter: winusb.address });
-    expect(calls.some((c) => c.method === "device.windows_paired")).toBe(false);
-    // None of them paired in Windows: nothing to say
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    m.windowsPaired = ["00:11:22:33:44:55"];
-    fireEvent.click(screen.getAllByRole("button", { name: "Restore original driver" })[0]);
-    const again = await screen.findByRole("dialog", { name: "Give the adapter back to Windows" });
     await new Promise((r) => setTimeout(r, 10));
-    expect(within(again).queryByText(/may not connect in Windows/)).toBeNull();
+    expect(within(dialog).queryByText(/may not connect in Windows/)).toBeNull();
   });
 
   it("adapter names", () => {

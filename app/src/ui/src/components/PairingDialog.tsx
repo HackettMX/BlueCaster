@@ -1,5 +1,6 @@
-// A saved classic device's services and pairing keys (issue #86), from the
-// Services tag of its row. In developer mode the link key BlueCaster keeps
+// A saved device's services and pairing keys (issue #86), from the
+// Services tag of its row. An LE Audio entry has its GATT services from its
+// last connection and no keys here. In developer mode the link key BlueCaster keeps
 // for it and the LE keys derived from it (LE Audio on) come first, folded
 // until clicked and only then asked for, each "not available" when
 // BlueCaster has none; below them the services it lists (the last
@@ -27,7 +28,8 @@ export function PairingDialog(props: { device: Device | null; onClose: () => voi
   // An error is the answer here (not connected, no answer): shown in place
   // The keys only in developer mode (the core refuses them otherwise), and
   // only once unfolded: secrets, not on screen with every opening
-  const keysOf = () => (app.core.state.snap?.settings.developer_mode ? address() : null);
+  const le = () => props.device?.le_audio === true;
+  const keysOf = () => (app.core.state.snap?.settings.developer_mode && !le() ? address() : null);
   const [keysOpen, setKeysOpen] = createSignal(false);
   const [pairing] = createResource(() => (keysOpen() ? keysOf() : null), (a) =>
     app.core
@@ -41,7 +43,7 @@ export function PairingDialog(props: { device: Device | null; onClose: () => voi
   // unless it lasts
   const askServices = async (a: string, retries: number): Promise<{ list: DeviceService[]; last: boolean; error: string | null }> => {
     try {
-      const l = await app.core.request("device.services", { address: a });
+      const l = await app.core.request("device.services", le() ? { address: a, le_audio: true } : { address: a });
       return { list: l.services, last: l.from_last_connection, error: null };
     } catch (e: unknown) {
       if (IpcError.from(e).code === "device.busy" && retries > 0 && !closed && address() === a) {
@@ -104,21 +106,6 @@ export function PairingDialog(props: { device: Device | null; onClose: () => voi
                     value={p().le?.identity_resolving_key}
                     copy={copy}
                   />
-                  <Show when={p().le}>
-                    {(le) => (
-                      <tr>
-                        <th scope="row">{t("ui.pairing.identity_address")}</th>
-                        <td>
-                          <span class="pairing-key-row">
-                            <span class="mono pairing-key">{le().identity_address}</span>
-                            <Show when={le().identity_random}>
-                              <span class="tag">{t("ui.pairing.random")}</span>
-                            </Show>
-                          </span>
-                        </td>
-                      </tr>
-                    )}
-                  </Show>
                   </tbody>
                 </table>
                 {/* Why there are no LE keys (issue #86) */}

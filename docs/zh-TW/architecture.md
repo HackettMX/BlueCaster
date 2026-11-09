@@ -356,6 +356,8 @@ BlueCaster 現在使用的介面卡所保存的金鑰：`bluecaster-driver.exe w
 這些金鑰（一次 UAC 提示），BlueCaster 已有的金鑰會保留，其中的音訊裝置會以
 Windows 中的名稱儲存。開發人員模式會顯示裝置的連結金鑰與其列出的 SDP 服務。
 
+`pairing\` 中的金鑰檔案（連結金鑰、LE 綁定資訊、協調集、從 Windows 接手的 LE 金鑰、被取代的 Windows 金鑰）以 DPAPI 依 Windows 使用者加密（`win-sys::dpapi`）；其他使用者，以及複製到其他電腦的相同檔案，都無法讀取。舊版本的明文檔案會被讀取並以加密形式重寫。無法解密的檔案保留為 `<名稱>.undecryptable`，其裝置需要重新配對。BTstack 的 LE TLV 由 BlueCaster 自行保存（`btstack-sys` 的 `TlvStore`，內容與 `btstack_tlv_windows` 寫入的相同）。還原時由系統管理員權限的輔助程式讀取的 `keys_for_windows.json` 仍為明文（輔助程式可能以另一位系統管理員身分執行），輔助程式結束後即刪除。
+
 ### 音訊編碼器 {#audio-encoders}
 
 | 編碼器 | 程式庫 | 位元率 | 特色 |
@@ -455,6 +457,7 @@ BlueCaster 自己的 12 位元組 RTP 標頭（BTstack 不另加）：酬載類�
 | `devices\device_codecs.json` | 每個傳統藍牙裝置上次連線時提供的內容（以及是否曾向 OPPO 耳機要求 Hi-Res） |
 | `pairing\link_keys.txt` | 連結金鑰：與 v1 或 2.0.x 配對過的耳機不需重新配對即可重新連線 |
 | `pairing\le_audio_bonds.tlv`、`pairing\le_audio_csip.txt` | LE Audio（實驗性）：LE 綁定資訊（含 GATT 伺服器持久保存的 CCC 值）以及協調集 |
+| `pairing\windows_le_keys.txt`、`pairing\replaced_windows_keys.json` | 從 Windows 接手的 LE 金鑰（直到啟用 LE 的協定堆疊將其加入）；**還原原始驅動程式** 取代掉的 Windows 金鑰 |
 | `adapters\adapter_caps.json` | 堆疊對每個介面卡得知的資訊（是否支援 LE Audio、位址、HCI 版本、Windows 中的名稱） |
 | `adapters\driver\<instance id>.json` | 每個曾指派 WinUSB 的介面卡先前使用的驅動程式 |
 | `firmware\` | 韌體檔案（`*.bin`、`*.hcd`、`ibt-*`；Intel 的也放在 `firmware\intel\`，與 linux-firmware 的配置相同）；舊版直接放在設定資料夾中的檔案會移到這裡 |

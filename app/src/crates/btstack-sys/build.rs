@@ -172,12 +172,10 @@ fn main() {
     build.file(patched_sm(&btstack));
     build.files(CLASSIC.iter().map(|f| match *f {
         "a2dp.c" => patched_a2dp(&btstack),
+        "avdtp_initiator.c" => patched_avdtp_initiator(&btstack),
         f => btstack.join("src/classic").join(f),
     }));
     build.file(btstack.join("platform/windows/btstack_run_loop_windows.c"));
-    // LE bonds (le_device_db_tlv) and the GATT server's client
-    // configurations in a TLV file, readable by v1's le_audio_bonds.tlv
-    build.file(btstack.join("platform/windows/btstack_tlv_windows.c"));
     // Software P-256 for LE Secure Connections (ENABLE_MICRO_ECC_P256)
     build.file(btstack.join("3rd-party/micro-ecc/uECC.c"));
     build.file(btstack.join("chipset/bcm/btstack_chipset_bcm.c"));
@@ -244,8 +242,97 @@ fn patched_a2dp(btstack: &Path) -> PathBuf {
 }
 
 fn replace_once(source: &mut String, file: &str, from: &str, to: &str) {
-    assert_eq!(source.matches(from).count(), 1, "{file} patch: `{from}` not found once (BTstack changed?)");
-    *source = source.replacen(from, to, 1);
+    replace_n(source, file, from, to, 1);
+}
+
+fn replace_n(source: &mut String, file: &str, from: &str, to: &str, n: usize) {
+    assert_eq!(source.matches(from).count(), n, "{file} patch: `{from}` not found {n} time(s) (BTstack changed?)");
+    *source = source.replace(from, to);
+}
+
+/// src/classic/avdtp_initiator.c taking only the response to the command it
+/// sent, written to OUT_DIR.
+///
+/// BTstack 1.8.1 takes any response on the signaling channel as the answer
+/// to its pending command, by neither signal nor label. A MediaTek headset
+/// on a new link answers our OPEN with a REJECT of DISCOVER under the OPEN's
+/// label first, then the OPEN accept: BTstack ended its wait on the reject
+/// and dropped the accept ("initiator_config_state is in wrong state"), so
+/// the media channel never opened and the stream setup timed out. The signal
+/// of the command last sent on each signaling channel is kept here, and a
+/// response for another signal is logged and ignored.
+fn patched_avdtp_initiator(btstack: &Path) -> PathBuf {
+    const FILE: &str = "avdtp_initiator.c";
+    // LF patterns: a checkout with core.autocrlf (CI) has CRLF
+    let mut source = std::fs::read_to_string(btstack.join("src/classic").join(FILE)).unwrap().replace("\r\n", "\n");
+    replace_once(
+        &mut source,
+        FILE,
+        "static bool avdtp_initiator_have_bytes(",
+        "/* BlueCaster: patched by btstack-sys build.rs (patched_avdtp_initiator) */\n\
+         #define BLUECASTER_PENDING_MAX 8\n\
+         static struct { uint16_t cid; uint8_t signal; } bluecaster_pending[BLUECASTER_PENDING_MAX];\n\
+         static void bluecaster_pending_set(uint16_t cid, uint8_t signal){\n\
+         \x20   int slot = -1;\n\
+         \x20   for (int i = 0; i < BLUECASTER_PENDING_MAX; i++){\n\
+         \x20       if (bluecaster_pending[i].cid == cid){ slot = i; break; }\n\
+         \x20       if ((slot < 0) && (bluecaster_pending[i].cid == 0)) slot = i;\n\
+         \x20   }\n\
+         \x20   if (slot < 0) slot = 0;\n\
+         \x20   bluecaster_pending[slot].cid = cid;\n\
+         \x20   bluecaster_pending[slot].signal = signal;\n\
+         }\n\
+         /* The signal of the command last sent on cid, 0 if none */\n\
+         static uint8_t bluecaster_pending_get(uint16_t cid){\n\
+         \x20   for (int i = 0; i < BLUECASTER_PENDING_MAX; i++){\n\
+         \x20       if (bluecaster_pending[i].cid == cid) return bluecaster_pending[i].signal;\n\
+         \x20   }\n\
+         \x20   return 0;\n\
+         }\n\n\
+         static bool avdtp_initiator_have_bytes(",
+    );
+    // The two plain commands, the delay report, and SET_CONFIGURATION /
+    // RECONFIGURE (built in initiator_signaling_packet, maybe fragmented)
+    replace_n(
+        &mut source,
+        FILE,
+        "command[1] = (uint8_t)identifier;",
+        "command[1] = (uint8_t)identifier; bluecaster_pending_set(cid, (uint8_t)identifier);",
+        2,
+    );
+    replace_once(
+        &mut source,
+        FILE,
+        "command[1] = AVDTP_SI_DELAYREPORT;",
+        "command[1] = AVDTP_SI_DELAYREPORT; bluecaster_pending_set(cid, AVDTP_SI_DELAYREPORT);",
+    );
+    replace_n(
+        &mut source,
+        FILE,
+        "l2cap_send_prepared(connection->l2cap_signaling_cid, pos);",
+        "bluecaster_pending_set(connection->l2cap_signaling_cid, (uint8_t)connection->initiator_signaling_packet.signal_identifier);\n\
+         \x20           l2cap_send_prepared(connection->l2cap_signaling_cid, pos);",
+        2,
+    );
+    // Only single and start packets carry a signal; the header read just
+    // overwrote it, so it is put back for the real answer's continuation
+    replace_once(
+        &mut source,
+        FILE,
+        "avdtp_signaling_packet_t * signaling_header = &connection->initiator_signaling_packet;\n",
+        "avdtp_signaling_packet_t * signaling_header = &connection->initiator_signaling_packet;\n\
+         \x20   uint8_t bluecaster_expected = bluecaster_pending_get(connection->l2cap_signaling_cid);\n\
+         \x20   if ((bluecaster_expected != 0) &&\n\
+         \x20       ((signaling_header->packet_type == AVDTP_SINGLE_PACKET) || (signaling_header->packet_type == AVDTP_START_PACKET)) &&\n\
+         \x20       ((uint8_t)signaling_header->signal_identifier != bluecaster_expected)) {\n\
+         \x20       log_error(\"ignoring a response to signal %u while waiting for %u\", (unsigned)signaling_header->signal_identifier, (unsigned)bluecaster_expected);\n\
+         \x20       signaling_header->signal_identifier = (avdtp_signal_identifier_t)bluecaster_expected;\n\
+         \x20       return;\n\
+         \x20   }\n",
+    );
+    let path = PathBuf::from(env::var("OUT_DIR").unwrap()).join(FILE);
+    std::fs::write(&path, source).unwrap();
+    path
 }
 
 /// src/ble/sm.c with Cross-Transport Key Derivation from BR/EDR (issue #86),

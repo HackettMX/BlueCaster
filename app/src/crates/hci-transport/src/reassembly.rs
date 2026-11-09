@@ -50,6 +50,14 @@ impl Reassembler {
         self.buffer.clear();
     }
 
+    /// Drops what is left when it is all zeros: the padding after the last
+    /// packet of a transfer, not the start of another packet
+    pub fn drop_zero_tail(&mut self) {
+        if self.buffer.iter().all(|&b| b == 0) {
+            self.buffer.clear();
+        }
+    }
+
     pub fn pending(&self) -> usize {
         self.buffer.len()
     }
@@ -58,6 +66,23 @@ impl Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_padding_after_an_iso_packet_is_dropped() {
+        let mut r = Reassembler::new(HCI_ISO_DATA_PACKET);
+        let mut data = vec![0x00, 0x04, 0x02, 0x00, 0xAA, 0xBB];
+        data.extend_from_slice(&[0u8; 3]);
+        let mut out = Vec::new();
+        r.push(&data, |p| out.push(p.to_vec()));
+        assert_eq!(out, vec![vec![0x00, 0x04, 0x02, 0x00, 0xAA, 0xBB]]);
+        assert_eq!(r.pending(), 3);
+        r.drop_zero_tail();
+        assert_eq!(r.pending(), 0);
+        // The start of a real packet stays
+        r.push(&[0x00, 0x04], |_| {});
+        r.drop_zero_tail();
+        assert_eq!(r.pending(), 2);
+    }
 
     #[test]
     fn event_split_over_transfers() {

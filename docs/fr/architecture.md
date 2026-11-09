@@ -393,6 +393,19 @@ possède déjà est conservée, et les appareils audio parmi eux sont enregistr�
 noms de Windows. Le mode développeur affiche la clé de liaison d'un appareil et les services
 SDP qu'il annonce.
 
+Les fichiers de clés de `pairing\` (clés de liaison, liaisons LE, ensembles
+coordonnés, clés LE reprises de Windows, clés de Windows remplacées) sont
+chiffrés avec DPAPI pour l'utilisateur Windows (`win-sys::dpapi`) ; les autres
+utilisateurs, et les mêmes fichiers copiés sur un autre PC, ne peuvent pas les
+lire. Les fichiers en clair des versions précédentes sont lus puis réécrits
+chiffrés. Un fichier impossible à déchiffrer est conservé sous
+`<nom>.undecryptable` et ses appareils sont associés de nouveau. BlueCaster
+tient lui-même le TLV LE de BTstack (le `TlvStore` de `btstack-sys`, avec le
+contenu qu'écrivait `btstack_tlv_windows`). `keys_for_windows.json`, que
+l'assistant lancé en administrateur lit pendant une restauration, reste en
+clair (l'assistant peut tourner sous un autre administrateur) et est supprimé
+quand il se termine.
+
 ### Encodeurs audio
 
 | Encodeur | Bibliothèque | Débit | Caractéristiques |
@@ -497,6 +510,7 @@ ci-dessous) :
 | `devices\device_codecs.json` | Ce que chaque appareil classique a proposé lors de sa dernière connexion (et si des écouteurs OPPO se sont vu demander le Hi-Res) |
 | `pairing\link_keys.txt` | Clés de liaison : les casques associés avec la v1 ou la 2.0.x se reconnectent sans nouvelle association |
 | `pairing\le_audio_bonds.tlv`, `pairing\le_audio_csip.txt` | LE Audio (expérimental) : les liaisons LE (avec les valeurs CCC persistantes du serveur GATT) et les ensembles coordonnés |
+| `pairing\windows_le_keys.txt`, `pairing\replaced_windows_keys.json` | Clés LE reprises de Windows, jusqu'à ce qu'une pile avec LE les ajoute ; les clés de Windows que **Restaurer le pilote d'origine** a remplacées |
 | `adapters\adapter_caps.json` | Ce qu'une pile a appris de chaque adaptateur (prise en charge de LE Audio, adresse, version HCI, nom que lui donne Windows) |
 | `adapters\driver\<instance id>.json` | Le pilote précédent de chaque adaptateur auquel WinUSB a été attribué |
 | `firmware\` | Fichiers de firmware (`*.bin`, `*.hcd`, `ibt-*` ; ceux d'Intel aussi dans `firmware\intel\`, selon l'organisation de linux-firmware) ; les fichiers que les versions précédentes gardaient en vrac dans le dossier des paramètres y sont déplacés |

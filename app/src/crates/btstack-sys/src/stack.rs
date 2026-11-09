@@ -537,6 +537,17 @@ impl Stack {
         transport::failed()
     }
 
+    /// A command given whole (opcode, parameter length, parameters), for
+    /// Developer > Debug's vendor command; its answer comes as any other
+    pub fn cmd_raw(&self, packet: &[u8]) -> u8 {
+        let mut copy = packet.to_vec();
+        // SAFETY: on the BTstack thread, after hci_init; the buffer lives for
+        // the call and the transport copies it.
+        let status = unsafe { ffi::hci_send_cmd_packet(copy.as_mut_ptr(), copy.len() as c_int) };
+        tracing::debug!(target: "btstack", "raw command {packet:02X?}: 0x{status:02X}");
+        status
+    }
+
     pub fn cmd_set_afh_classification(&self, map: &[u8; 10]) -> u8 {
         // SAFETY: on the BTstack thread; map has the 10 bytes the shim reads.
         let status = unsafe { ffi::bluecaster_cmd_set_afh_classification(map.as_ptr()) };

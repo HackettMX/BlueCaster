@@ -35,6 +35,7 @@ pub mod api;
 pub mod bap;
 pub mod broadcast;
 pub mod core;
+pub mod gatt_cache;
 pub mod gatt_client;
 pub mod gatt_server;
 pub mod iso_recv;

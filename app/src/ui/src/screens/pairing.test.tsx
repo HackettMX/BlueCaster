@@ -2,7 +2,7 @@
 // and taking over
 // Windows' pairings (Adapter), issue #86
 
-import { cleanup, fireEvent, render, screen, within } from "@solidjs/testing-library";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "../app/App";
 import { ICONS } from "../components/icons";
@@ -44,6 +44,31 @@ describe("device pairing", () => {
     expect(within(dialog).queryByText(t("ui.pairing.key_title"))).toBeNull();
     expect(within(dialog).queryByRole("switch")).toBeNull();
     expect(calls.some((c) => c.method === "device.pairing")).toBe(false);
+  });
+
+  it("lists an LE Audio entry's GATT services, without keys (issue #86)", async () => {
+    location.hash = "#/devices";
+    const calls: { method: string; params: unknown }[] = [];
+    mock = new MockCore({ speed: 0, scenario: "le", onCall: (method, params) => calls.push({ method, params }) });
+    const core = createCore(mock);
+    render(() => <App core={core} />);
+    await screen.findByRole("navigation");
+    await core.request("settings.set", { settings: { ...core.state.snap!.settings, developer_mode: true } });
+    const row = await waitFor(() => {
+      const r = document.querySelector<HTMLElement>('.device-row[data-key$="/le"]');
+      expect(r).not.toBeNull();
+      return r!;
+    });
+    fireEvent.click(within(row).getByRole("button", { name: t("ui.pairing.services") }));
+    const dialog = await screen.findByRole("dialog", { name: t("ui.pairing.services") });
+    const table = await within(dialog).findByRole("table", { name: t("ui.pairing.services") });
+    expect(within(table).getByText("Audio Stream Control")).toBeInTheDocument();
+    expect(within(table).getByText("Published Audio Capabilities")).toBeInTheDocument();
+    expect(within(dialog).getByText(t("ui.pairing.services_last"))).toBeInTheDocument();
+    // LE bonds are not shown as keys here
+    expect(within(dialog).queryByText(t("ui.pairing.key_title"))).toBeNull();
+    const asked = calls.filter((c) => c.method === "device.services").pop()!.params;
+    expect(asked).toEqual({ address: "F4:4E:FD:00:11:22", le_audio: true });
   });
 
   it("lists the keys first, folded, the services as a table below them (issue #86)", async () => {
@@ -100,7 +125,6 @@ describe("device pairing", () => {
     expect(within(dialog).getAllByText(t("ui.pairing.not_available"))).toHaveLength(2);
     // Why, in place of a bare "not available"
     expect(within(dialog).getByText(t("ui.pairing.le_missing.not_asked"))).toBeInTheDocument();
-    expect(within(dialog).queryByText(t("ui.pairing.identity_address"))).toBeNull();
   });
 
   it("says why there are no LE keys (issue #86)", async () => {
@@ -130,10 +154,8 @@ describe("device pairing", () => {
     expect(await within(dialog).findByText("0F0E0D0C0B0A09080706050403020100")).toBeInTheDocument();
     expect(within(dialog).getByText("A0A1A2A3A4A5A6A7A8A9AAABACADAEAF")).toBeInTheDocument();
     expect(within(dialog).getByText(t("ui.pairing.key_size", 16))).toBeInTheDocument();
-    expect(within(dialog).getByText("C0:11:22:33:44:55")).toBeInTheDocument();
-    const keys = within(dialog).getByRole("table", { name: t("ui.pairing.key_title") });
-    expect(within(keys).getByRole("rowheader", { name: t("ui.pairing.identity_address") })).toBeInTheDocument();
-    expect(within(dialog).getByText(t("ui.pairing.random"))).toBeInTheDocument();
+    // No identity address: BlueZ does not need it (issue #86)
+    expect(within(dialog).queryByText("C0:11:22:33:44:55")).toBeNull();
     expect(within(dialog).getAllByRole("button", { name: t("ui.pairing.copy_key") })).toHaveLength(3);
     expect(within(dialog).queryByText(t("ui.pairing.not_available"))).toBeNull();
     expect(within(dialog).queryByText(t("ui.pairing.le_missing.not_asked"))).toBeNull();

@@ -16,10 +16,10 @@ core.py holds the BAP unicast cases (all layouts of emu_le_audio_sink.py),
 mic.py the headset microphone (source ASE) cases.
 """
 
-from . import bas, ccp, core, csip, mcp, mic, privacy, tmap_gmap, vcp
+from . import bas, ccp, core, csip, gatt_cache, mcp, mic, privacy, tmap_gmap, vcp
 from .case import MONO_TONES, STEREO_TONES, Case  # noqa: F401  (for the modules)
 
-MODULES = [core, csip, vcp, mcp, ccp, tmap_gmap, bas, privacy, mic]
+MODULES = [core, csip, vcp, mcp, ccp, tmap_gmap, bas, privacy, mic, gatt_cache]
 
 
 def cases():

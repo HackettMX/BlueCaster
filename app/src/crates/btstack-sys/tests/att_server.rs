@@ -208,9 +208,6 @@ fn att_server_reads_and_writes() {
     let (tx, rx) = mpsc::channel();
     let (rtx, rrx) = mpsc::channel::<(Remote, u16, u16)>();
     let (c2, s2) = (controller.clone(), script.clone());
-    let tlv = std::env::temp_dir().join(format!("bluecaster_att_test_{}.tlv", std::process::id()));
-    let _ = std::fs::remove_file(&tlv);
-    let tlv2 = tlv.clone();
     let thread = std::thread::spawn(move || {
         btstack_sys::run(move |s, remote| {
             assert!(s.set_le_hidden(false));
@@ -218,7 +215,7 @@ fn att_server_reads_and_writes() {
             s.set_link_key_store(None);
             s.l2cap_init();
             s.add_hci_event_handler();
-            s.le_init(tlv2.to_str().unwrap());
+            s.le_init(Box::new(btstack_sys::MemoryTlv::default()));
             s.att_db_init();
             s.att_db_add_service_uuid16(0x1800, true);
             let name = s.att_db_add_characteristic_uuid16(
@@ -328,5 +325,4 @@ fn att_server_reads_and_writes() {
     remote.request_exit();
     thread.join().unwrap();
     assert!(!btstack_sys::poisoned());
-    let _ = std::fs::remove_file(&tlv);
 }

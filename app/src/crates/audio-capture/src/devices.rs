@@ -37,8 +37,9 @@ pub struct DeviceInfo {
     /// Looks like a virtual device (VB-Cable, VoiceMeeter, ...): v1's
     /// heuristic, used to suggest devices for virtual device mode
     pub is_virtual: bool,
-    /// The capture endpoint paired with it ("CABLE Output" for a cable's
-    /// "CABLE Input"), by name: where apps record what is rendered to it
+    /// The capture endpoint paired with a virtual device ("CABLE Output"
+    /// for a cable's "CABLE Input"), by name: where apps record what is
+    /// rendered to it. None for other devices
     pub capture_name: Option<String>,
 }
 
@@ -66,7 +67,10 @@ pub fn render_devices() -> Result<Vec<DeviceInfo>, CaptureError> {
     }
     let ids: Vec<String> = out.iter().map(|d| d.id.clone()).collect();
     match audio_policy::paired_capture_names(&ids) {
-        Ok(names) => out.iter_mut().zip(names).for_each(|(d, n)| d.capture_name = n),
+        // Only a virtual device's recording side is what is rendered to it:
+        // a headset's or a sound card's is its own microphone, line in or
+        // stereo mix (issue #86: a headset listed as "Microphone (...)")
+        Ok(names) => out.iter_mut().zip(names).for_each(|(d, n)| d.capture_name = n.filter(|_| d.is_virtual)),
         Err(e) => tracing::debug!("audio devices: capture sides not read: HRESULT 0x{:08x}", e.code().0 as u32),
     }
     if tracing::enabled!(tracing::Level::DEBUG) {

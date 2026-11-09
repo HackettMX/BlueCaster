@@ -280,7 +280,9 @@ pub fn device_services_file(config: &Path) -> PathBuf {
 
 // ---- pairing\ ----------------------------------------------------------
 
-/// The secrets (link keys, LE bonds, CSIP sets): never in a bundle
+/// The secrets (link keys, LE bonds, CSIP sets): never in a bundle. The
+/// key files are encrypted for the Windows user (win_sys::dpapi), except
+/// keys_for_windows.json, which the elevated helper reads.
 pub fn pairing_dir(config: &Path) -> PathBuf {
     config.join("pairing")
 }
@@ -296,6 +298,17 @@ pub fn le_bonds_file(config: &Path) -> PathBuf {
 /// LE keys taken from Windows until a stack with LE adds them (issue #86)
 pub fn windows_le_keys_file(config: &Path) -> PathBuf {
     pairing_dir(config).join("windows_le_keys.txt")
+}
+
+/// BlueCaster's link keys for the driver helper to write to Windows when an
+/// adapter goes back to it; there only while the helper runs
+pub fn keys_for_windows_file(config: &Path) -> PathBuf {
+    pairing_dir(config).join("keys_for_windows.json")
+}
+
+/// Windows' link keys that BlueCaster's replaced, as they were
+pub fn replaced_windows_keys_file(config: &Path) -> PathBuf {
+    pairing_dir(config).join("replaced_windows_keys.json")
 }
 
 // ---- adapters\ ---------------------------------------------------------

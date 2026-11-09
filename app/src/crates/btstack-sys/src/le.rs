@@ -4,7 +4,7 @@
 //! of [`Stack`]; see the crate docs for the order of the setup calls.
 
 use std::cell::Cell;
-use std::ffi::{CString, c_int};
+use std::ffi::c_int;
 
 use crate::consts::*;
 use crate::events::Characteristic;
@@ -128,24 +128,18 @@ impl Stack {
         transport::controller_iso()
     }
 
-    /// After hci_init (and l2cap_init): LE bonds in the TLV file `tlv_path`
-    /// (le_device_db_tlv + btstack_tlv_windows, the format of v1's
-    /// le_audio_bonds.tlv; the PC's GATT server keeps its bonded clients'
-    /// configurations there too), SM (LE Secure Connections, no input / no
-    /// output, bonding; events to [`crate::Source::Sm`]), the GATT client
-    /// and the ISO handler ([`crate::Source::Iso`]). False when the path
-    /// cannot be used: LE works, but bonds are not kept.
-    pub fn le_init(&self, tlv_path: &str) -> bool {
-        let path = CString::new(tlv_path.replace('\0', "")).unwrap_or_default();
-        // SAFETY: on the BTstack thread after hci_init; the shim copies the
-        // path into its own buffer.
-        let ok = unsafe { ffi::bluecaster_le_init(path.as_ptr()) } != 0;
+    /// After hci_init (and l2cap_init): LE bonds in the TLV `store`
+    /// (le_device_db_tlv; the PC's GATT server keeps its bonded clients'
+    /// configurations there too; held until le_deinit), SM (LE Secure
+    /// Connections, no input / no output, bonding; events to
+    /// [`crate::Source::Sm`]), the GATT client and the ISO handler
+    /// ([`crate::Source::Iso`])
+    pub fn le_init(&self, store: Box<dyn crate::TlvStore>) {
+        crate::TLV.with(|t| *t.borrow_mut() = Some(store));
+        // SAFETY: on the BTstack thread after hci_init; the TLV callbacks
+        // find the store set above.
+        unsafe { ffi::bluecaster_le_init() };
         mark(INIT_LE);
-        tracing::debug!(target: "le", "le_init: bond store {tlv_path}, usable {ok}");
-        if !ok {
-            tracing::warn!(target: "le", "LE Audio: cannot use {tlv_path} for the bonds, keeping none");
-        }
-        ok
     }
 
     pub fn le_initialized(&self) -> bool {
@@ -945,6 +939,7 @@ impl Stack {
         // SAFETY: on the BTstack thread after the run loop stopped; le_init
         // ran in this run.
         unsafe { ffi::bluecaster_le_deinit(att_server_started as c_int) };
+        crate::TLV.with(|t| t.borrow_mut().take());
         reset();
     }
 }

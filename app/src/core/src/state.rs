@@ -352,6 +352,12 @@ fn to_ipc_settings(s: &CoreSettings) -> Settings {
             },
             health_every_interval: s.dev_log.health_every_interval,
         },
+        dev_debug: ipc::DevDebug {
+            mtk_iso_interface: s.dev_debug.mtk_iso_interface,
+            mtk_iso_pad: s.dev_debug.mtk_iso_pad,
+            mtk_command: s.dev_debug.mtk_command.clone(),
+            le_keys_to_windows: s.dev_debug.le_keys_to_windows,
+        },
         bt_chip_pid: s.bt_chip_pid,
         bt_chip_fw_stem: s.bt_chip_fw_stem.clone(),
         afh: s.afh.clone(),
@@ -437,6 +443,12 @@ fn merge_settings(base: &CoreSettings, s: &Settings) -> CoreSettings {
         health_every_interval: s.dev_log.health_every_interval,
     }
     .clamped();
+    c.dev_debug = bluecaster_core::settings::DevDebug {
+        mtk_iso_interface: s.dev_debug.mtk_iso_interface,
+        mtk_iso_pad: s.dev_debug.mtk_iso_pad.min(hci_transport::iso_intr::PAD_MAX as u16),
+        mtk_command: s.dev_debug.mtk_command.trim().to_string(),
+        le_keys_to_windows: s.dev_debug.le_keys_to_windows,
+    };
     c.bt_chip_pid = s.bt_chip_pid;
     c.bt_chip_fw_stem = s.bt_chip_fw_stem.clone();
     c.afh = s.afh.clone();
@@ -1326,6 +1338,32 @@ fn source_changes_in_place(stream: &StreamStatus, before: Option<&CoreProfile>, 
     stream.state == StreamState::Streaming && !saved.le_audio && before.is_some_and(|b| b.only_source_differs(saved))
 }
 
+/// The save named the codec an Auto profile streams with, as a codec card's
+/// "..." dialog does on its first change, its name following the codec, the
+/// rest as before but "Show only options it supports" (issue #86: the first
+/// turn of that switch connected again, the later ones did not). The stream
+/// is already that codec with these values: it goes on.
+fn codec_named_in_place(stream: &StreamStatus, before: Option<&CoreProfile>, saved: &CoreProfile) -> bool {
+    let Some(b) = before else { return false };
+    let Some(info) = stream.info.as_ref() else { return false };
+    if stream.state != StreamState::Streaming
+        || saved.le_audio
+        || b.codec != "auto"
+        || info.requested_codec.is_some()
+        || codec::CodecKind::from_key(&saved.codec).map(|k| k.name()) != Some(info.codec.as_str())
+    {
+        return false;
+    }
+    let as_before = CoreProfile {
+        name: b.name.clone(),
+        codec: b.codec.clone(),
+        codec_forced: b.codec_forced,
+        unlisted_options: b.unlisted_options,
+        ..saved.clone()
+    };
+    as_before == *b
+}
+
 /// A new classic profile left on Auto without a microphone output gets
 /// VB-CABLE's (issue #86), unless its capture source is that cable (the
 /// microphone would loop into the stream). LE Audio takes Auto as On, so
@@ -1939,9 +1977,7 @@ impl CoreState {
         let active = s.active_profile.filter(|a| !gone.contains(a));
         self.save_profiles(&list, active)?;
         self.service.forget_device(address, le_audio);
-        if !le_audio {
-            crate::pairing::forget_services(&dir, address);
-        }
+        crate::pairing::forget_services(&dir, address, le_audio);
         let mut settings = self.service.settings();
         let volume = settings.saved_volumes.remove(&address.to_uppercase()).is_some();
         let last = gone.contains(&settings.last_profile);
@@ -2153,6 +2189,16 @@ impl CoreState {
         tracing::info!("broadcast \"{}\": quality {}, source {}", b.name, b.quality, req.source);
         self.begin_stream(req, None);
         Ok(())
+    }
+
+    /// The stream running goes on under its profile's new name (a save that
+    /// renamed it and kept the stream)
+    fn rename_stream_profile(&self, name: &str) {
+        *self.starting_profile.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_string());
+        let stream = self.with_snapshot(|s| s.stream.clone());
+        if stream.profile.as_deref() != Some(name) {
+            self.publish(Event::Stream(StreamStatus { profile: Some(name.to_string()), ..stream }));
+        }
     }
 
     fn begin_stream(&self, req: StreamRequest, profile: Option<String>) {
@@ -2579,7 +2625,10 @@ impl CoreState {
             }
             Method::StreamSetVolume { volume } => {
                 if let Some(h) = self.service.host() {
-                    h.request_volume(volume.min(127));
+                    // LE Audio: through VCP, not AVRCP (issue #86)
+                    if self.service.le_stream().is_none() || !h.le_request_volume(volume.min(127)) {
+                        h.request_volume(volume.min(127));
+                    }
                 }
                 Ok(Value::Null)
             }
@@ -2633,11 +2682,14 @@ impl CoreState {
                 .await
             }
             Method::DevicePairing { address } => crate::pairing::pairing(self, &address),
-            Method::DeviceServices { address } => {
-                blocking(Box::new(move |me| crate::pairing::services(me, &address))).await
+            Method::DeviceServices { address, le_audio } => {
+                blocking(Box::new(move |me| crate::pairing::services(me, &address, le_audio == Some(true)))).await
             }
             Method::DeviceImportWindowsPairings { adapter, addresses } => {
                 blocking(Box::new(move |me| crate::pairing::import_windows(me, &adapter, addresses.as_deref()))).await
+            }
+            Method::DevCompareWindowsKeys { adapter } => {
+                blocking(Box::new(move |me| crate::driver::compare_windows_keys(me, &adapter))).await
             }
             Method::DeviceForget { address, le_audio } => {
                 blocking(Box::new(move |me| me.forget_device(&address, le_audio == Some(true)))).await
@@ -2755,7 +2807,20 @@ impl CoreState {
                         && !in_place
                         && before.as_ref().is_some_and(|b| b.only_unlisted_differs(&in_order))
                         && self.service.change_unlisted(in_order.unlisted_options);
-                    if unlisted_in_place {
+                    let named_in_place = !bitpools_in_place
+                        && !in_place
+                        && !unlisted_in_place
+                        && codec_named_in_place(&s.stream, before.as_ref(), &in_order)
+                        && (before.as_ref().is_some_and(|b| b.unlisted_options == in_order.unlisted_options)
+                            || self.service.change_unlisted(in_order.unlisted_options));
+                    if named_in_place {
+                        tracing::info!(
+                            "profile {} saved while in use as {}: it names the codec it streams with, the stream stays",
+                            bluecaster_core::diag::quoted(&key),
+                            bluecaster_core::diag::quoted(&profile.name)
+                        );
+                        self.rename_stream_profile(&profile.name);
+                    } else if unlisted_in_place {
                         tracing::info!(
                             "profile {} saved while in use: the stream stays as it is",
                             bluecaster_core::diag::quoted(&key)
@@ -4034,6 +4099,29 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn naming_the_codec_an_auto_profile_streams_keeps_the_stream() {
+        let before = CoreProfile { name: "WH | Auto".into(), codec: "auto".into(), ..CoreProfile::default() };
+        let streaming =
+            StreamStatus { state: StreamState::Streaming, info: Some(sbc_abr_info()), ..StreamStatus::default() };
+        let named =
+            CoreProfile { name: "WH | SBC".into(), codec: "sbc".into(), unlisted_options: true, ..before.clone() };
+        assert!(codec_named_in_place(&streaming, Some(&before), &named));
+        // Another codec than the one streaming, or other values: connect again
+        let aac = CoreProfile { codec: "aac".into(), ..named.clone() };
+        assert!(!codec_named_in_place(&streaming, Some(&before), &aac));
+        let other = CoreProfile { quality: "sq".into(), ..named.clone() };
+        assert!(!codec_named_in_place(&streaming, Some(&before), &other));
+        // A codec already named, a fallback, no stream yet
+        assert!(!codec_named_in_place(&streaming, Some(&named), &named));
+        let mut fell_back = streaming.clone();
+        fell_back.info.as_mut().unwrap().requested_codec = Some("LDAC".into());
+        assert!(!codec_named_in_place(&fell_back, Some(&before), &named));
+        let connecting = StreamStatus { state: StreamState::Connecting, ..streaming.clone() };
+        assert!(!codec_named_in_place(&connecting, Some(&before), &named));
+        assert!(!codec_named_in_place(&streaming, None, &named));
     }
 
     #[test]

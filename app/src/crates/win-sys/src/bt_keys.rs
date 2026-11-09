@@ -13,6 +13,11 @@
 //! administrator gets in with the backup privilege (REG_OPTION_BACKUP_RESTORE),
 //! so the caller runs elevated (bluecaster-driver.exe `windows-keys`).
 //!
+//! `write_link_keys` goes the other way when the adapter goes back to
+//! Windows: BlueCaster's newer keys of the devices Windows paired too
+//! replace Windows' old ones, so those devices connect in Windows without
+//! pairing again. Writing takes the restore privilege as well.
+//!
 //! The key bytes are in the order of HCI's Link Key Notification, the order
 //! BTstack and BlueZ keep them in too. LTK and IRK are least significant
 //! octet first, as SMP carries them (BlueZ' info file takes them as they
@@ -24,11 +29,11 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::{
     AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_BACKUP_NAME, SE_PRIVILEGE_ENABLED,
-    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    SE_RESTORE_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_BINARY, REG_DWORD, REG_OPTION_BACKUP_RESTORE, REG_QWORD, REG_VALUE_TYPE,
-    RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW,
+    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_DWORD, REG_OPTION_BACKUP_RESTORE, REG_QWORD,
+    REG_SZ, REG_VALUE_TYPE, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{HSTRING, PCWSTR};
@@ -65,18 +70,86 @@ pub struct WindowsLeKey {
     pub auth_req: Option<u32>,
 }
 
+/// A value name Windows keeps, with its type and size: what is there, never
+/// what it holds (developer mode's key comparison, issue #86)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueName {
+    pub name: String,
+    /// "binary", "DWORD", "QWORD", "string" or "type N"
+    pub kind: String,
+    /// Bytes of data
+    pub size: u32,
+    /// How many keys have it (LE devices; 1 for the radio's own)
+    pub count: u32,
+}
+
 /// What Windows keeps for one radio
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WindowsKeys {
     pub link_keys: Vec<WindowsLinkKey>,
     pub le_keys: Vec<WindowsLeKey>,
+    /// The radio's own values (not the devices' link keys)
+    pub radio_values: Vec<ValueName>,
+    /// The values of the LE devices' keys, counted over the devices
+    pub le_values: Vec<ValueName>,
+}
+
+fn type_name(ty: REG_VALUE_TYPE) -> String {
+    match ty {
+        REG_BINARY => "binary".into(),
+        REG_DWORD => "DWORD".into(),
+        REG_QWORD => "QWORD".into(),
+        REG_SZ => "string".into(),
+        other => format!("type {}", other.0),
+    }
+}
+
+/// Adds one value to `list`, counting the same name, type and size once
+fn add_value(list: &mut Vec<ValueName>, name: &str, ty: REG_VALUE_TYPE, size: u32) {
+    let kind = type_name(ty);
+    match list.iter_mut().find(|v| v.name == name && v.kind == kind && v.size == size) {
+        Some(v) => v.count += 1,
+        None => list.push(ValueName { name: name.to_string(), kind, size, count: 1 }),
+    }
+}
+
+/// The names, types and sizes of an open key's values (not their data);
+/// `skip` leaves names out
+fn value_names(key: &RegKey, list: &mut Vec<ValueName>, skip: impl Fn(&str) -> bool) {
+    for index in 0.. {
+        let mut name = [0u16; 256];
+        let mut name_len = name.len() as u32;
+        let mut ty = 0u32;
+        let mut size = 0u32;
+        // SAFETY: open key; the name buffer is as long as name_len says; no
+        // data buffer, so only its size is given back.
+        let err = unsafe {
+            RegEnumValueW(
+                key.0,
+                index,
+                Some(windows::core::PWSTR(name.as_mut_ptr())),
+                &mut name_len,
+                None,
+                Some(&mut ty),
+                None,
+                Some(&mut size),
+            )
+        };
+        if err != windows::Win32::Foundation::ERROR_SUCCESS {
+            break;
+        }
+        let name = String::from_utf16_lossy(&name[..name_len as usize]);
+        if !skip(&name) {
+            add_value(list, &name, REG_VALUE_TYPE(ty), size);
+        }
+    }
 }
 
 /// The classic link keys and LE keys Windows keeps for the radio `radio`
 /// (display order). Ok(None): Windows has no keys for that radio (it never
 /// paired a device with it). Needs administrator rights.
 pub fn read_keys(radio: &[u8; 6]) -> windows::core::Result<Option<WindowsKeys>> {
-    enable_backup_privilege()?;
+    enable_privilege(SE_BACKUP_NAME)?;
     let path = format!(r"{KEYS}\{}", hex(radio));
     let mut key = HKEY::default();
     // SAFETY: valid root key, NUL-terminated subkey and out pointer.
@@ -90,7 +163,7 @@ pub fn read_keys(radio: &[u8; 6]) -> windows::core::Result<Option<WindowsKeys>> 
         )
     };
     if err == ERROR_FILE_NOT_FOUND {
-        tracing::info!("bt_keys: Windows has no keys for the radio {}", hex(radio));
+        tracing::info!("bt_keys: Windows has no keys for this radio");
         return Ok(None);
     }
     check(err)?;
@@ -129,13 +202,18 @@ pub fn read_keys(radio: &[u8; 6]) -> windows::core::Result<Option<WindowsKeys>> 
             out.push(k);
         }
     }
-    let le_keys = le_keys(&key);
-    tracing::info!("bt_keys: {} link key(s), {} LE device(s) for the radio {}", out.len(), le_keys.len(), hex(radio));
-    Ok(Some(WindowsKeys { link_keys: out, le_keys }))
+    let mut radio_values = Vec::new();
+    // A device's link key is named by its address: not the radio's own
+    value_names(&key, &mut radio_values, |name| address_from_name(name).is_some());
+    let mut le_values = Vec::new();
+    let le_keys = le_keys(&key, &mut le_values);
+    tracing::info!("bt_keys: {} link key(s), {} LE device(s) for this radio", out.len(), le_keys.len());
+    Ok(Some(WindowsKeys { link_keys: out, le_keys, radio_values, le_values }))
 }
 
-/// The LE devices: the subkeys of the radio's key named by an address
-fn le_keys(radio: &RegKey) -> Vec<WindowsLeKey> {
+/// The LE devices: the subkeys of the radio's key named by an address;
+/// their value names go to `values`
+fn le_keys(radio: &RegKey, values: &mut Vec<ValueName>) -> Vec<WindowsLeKey> {
     let mut out = Vec::new();
     for index in 0.. {
         let mut name = [0u16; 256];
@@ -170,10 +248,11 @@ fn le_keys(radio: &RegKey) -> Vec<WindowsLeKey> {
             )
         };
         if check(err).is_err() {
-            tracing::debug!("bt_keys: LE device {name} not readable");
+            tracing::debug!("bt_keys: an LE device's key is not readable");
             continue;
         }
         let device = RegKey(device);
+        value_names(&device, values, |_| false);
         if let Some(k) = le_key(address, |value| query(&device, value)) {
             out.push(k);
         }
@@ -250,17 +329,196 @@ fn hex(a: &[u8; 6]) -> String {
     a.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// SeBackupPrivilege on this process's token (an administrator has it,
-/// disabled): opening a key with REG_OPTION_BACKUP_RESTORE then skips its
-/// access check
-fn enable_backup_privilege() -> windows::core::Result<()> {
+/// What becomes of one of BlueCaster's keys when written to Windows
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteAction {
+    /// Windows has no key of that device for this radio (never paired it,
+    /// or through another radio): nothing is added
+    NotPaired,
+    /// Windows has this very key already
+    Same,
+    /// Windows' key differs: replaced, the old one is given back
+    Replace([u8; 16]),
+}
+
+/// `now`: the value Windows keeps under the device's name, if any
+fn write_action(now: Option<(REG_VALUE_TYPE, &[u8])>, ours: &[u8; 16]) -> WriteAction {
+    match now {
+        Some((REG_BINARY, data)) => match <[u8; 16]>::try_from(data) {
+            Ok(old) if old == *ours => WriteAction::Same,
+            Ok(old) => WriteAction::Replace(old),
+            Err(_) => WriteAction::NotPaired,
+        },
+        _ => WriteAction::NotPaired,
+    }
+}
+
+/// What `write_keys` did
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WrittenKeys {
+    /// Windows' link keys that were replaced, as they were (for a backup)
+    pub replaced: Vec<WindowsLinkKey>,
+    /// Devices Windows had the same link key of already
+    pub same: Vec<[u8; 6]>,
+    /// Link keys written that read back as written
+    pub verified: usize,
+    /// Windows' LE keys that were replaced, as they were (for a backup)
+    pub le_replaced: Vec<WindowsLeKey>,
+    /// LE devices Windows had the same keys of already
+    pub le_same: Vec<[u8; 6]>,
+    /// LE keys written that read back as written
+    pub le_verified: usize,
+}
+
+/// Whether Windows' LE keys `windows` hold BlueCaster's `ours` already: the
+/// values written (LTK, key length, EDIV, ERand, and the IRK when there is
+/// one of ours)
+fn le_same(windows: &WindowsLeKey, ours: &WindowsLeKey) -> bool {
+    windows.ltk == ours.ltk
+        && windows.key_length.unwrap_or(16) == ours.key_length.unwrap_or(16)
+        && windows.ediv.unwrap_or(0) == ours.ediv.unwrap_or(0)
+        && windows.erand.unwrap_or(0) == ours.erand.unwrap_or(0)
+        && (ours.irk.is_none() || windows.irk == ours.irk)
+}
+
+/// Writes BlueCaster's link keys `keys` and LE keys `le` (empty: none) for
+/// the radio `radio` (display order) where Windows keeps keys of that
+/// device already, so it uses the newer pairing; devices Windows never
+/// paired with that radio are left out. Each value written is read back.
+/// Ok(None): Windows has no keys for that radio. To take effect, it must be
+/// written while Windows' Bluetooth does not run the radio (it reads the
+/// keys when the radio starts). Needs administrator rights. The log gets
+/// numbers only, no address or key.
+pub fn write_keys(
+    radio: &[u8; 6],
+    keys: &[WindowsLinkKey],
+    le: &[WindowsLeKey],
+) -> windows::core::Result<Option<WrittenKeys>> {
+    enable_privilege(SE_BACKUP_NAME)?;
+    enable_privilege(SE_RESTORE_NAME)?;
+    let path = format!(r"{KEYS}\{}", hex(radio));
+    let Some(key) = open_writable(HKEY_LOCAL_MACHINE, &path)? else {
+        tracing::info!("bt_keys: Windows has no keys for this radio; none written");
+        return Ok(None);
+    };
+    let mut out = WrittenKeys::default();
+    for k in keys {
+        let name = hex(&k.address);
+        let now = query(&key, &name);
+        match write_action(now.as_ref().map(|(t, d)| (*t, d.as_slice())), &k.key) {
+            WriteAction::NotPaired => {}
+            WriteAction::Same => out.same.push(k.address),
+            WriteAction::Replace(old) => {
+                set_value(&key, &name, REG_BINARY, &k.key)?;
+                out.replaced.push(WindowsLinkKey { address: k.address, key: old });
+                if matches!(query(&key, &name), Some((REG_BINARY, d)) if d == k.key) {
+                    out.verified += 1;
+                }
+            }
+        }
+    }
+    let mut le_not_paired = 0;
+    for ours in le {
+        match write_le_key(&key, ours)? {
+            None => le_not_paired += 1,
+            Some(LeWrite::Same) => out.le_same.push(ours.address),
+            Some(LeWrite::Replaced { old, verified }) => {
+                out.le_replaced.push(old);
+                out.le_verified += usize::from(verified);
+            }
+        }
+    }
+    tracing::info!(
+        "bt_keys: link keys: {} written ({} read back as written), {} the same already, {} not paired in Windows",
+        out.replaced.len(),
+        out.verified,
+        out.same.len(),
+        keys.len() - out.replaced.len() - out.same.len()
+    );
+    if !le.is_empty() {
+        tracing::info!(
+            "bt_keys: LE keys: {} written ({} read back as written), {} the same already, {} not paired in Windows",
+            out.le_replaced.len(),
+            out.le_verified,
+            out.le_same.len(),
+            le_not_paired
+        );
+    }
+    Ok(Some(out))
+}
+
+/// What became of one device's LE keys
+enum LeWrite {
+    Same,
+    Replaced { old: WindowsLeKey, verified: bool },
+}
+
+/// One LE device's keys under the radio's key `radio`: None when Windows
+/// keeps no LE keys of it
+fn write_le_key(radio: &RegKey, ours: &WindowsLeKey) -> windows::core::Result<Option<LeWrite>> {
+    let Some(device) = open_writable(radio.0, &hex(&ours.address))? else {
+        return Ok(None);
+    };
+    let Some(old) = le_key(ours.address, |value| query(&device, value)) else {
+        return Ok(None);
+    };
+    if le_same(&old, ours) {
+        return Ok(Some(LeWrite::Same));
+    }
+    set_value(&device, "LTK", REG_BINARY, &ours.ltk)?;
+    set_value(&device, "KeyLength", REG_DWORD, &ours.key_length.unwrap_or(16).to_le_bytes())?;
+    set_value(&device, "EDIV", REG_DWORD, &ours.ediv.unwrap_or(0).to_le_bytes())?;
+    // ERand as Windows keeps it there (a QWORD, or 8 bytes of REG_BINARY)
+    let erand_type = match query(&device, "ERand") {
+        Some((REG_BINARY, _)) => REG_BINARY,
+        _ => REG_QWORD,
+    };
+    set_value(&device, "ERand", erand_type, &ours.erand.unwrap_or(0).to_le_bytes())?;
+    if let Some(irk) = ours.irk {
+        set_value(&device, "IRK", REG_BINARY, &irk)?;
+    }
+    let verified = le_key(ours.address, |value| query(&device, value)).is_some_and(|now| le_same(&now, ours));
+    Ok(Some(LeWrite::Replaced { old, verified }))
+}
+
+/// `subkey` of `parent` opened for reading and writing (needs the backup and
+/// restore privileges); None when it is not there
+fn open_writable(parent: HKEY, subkey: &str) -> windows::core::Result<Option<RegKey>> {
+    let mut key = HKEY::default();
+    // SAFETY: valid parent key, NUL-terminated subkey and out pointer. With
+    // both privileges the key opens for reading and writing.
+    let err = unsafe {
+        RegOpenKeyExW(
+            parent,
+            &HSTRING::from(subkey),
+            Some(REG_OPTION_BACKUP_RESTORE.0),
+            KEY_READ | KEY_SET_VALUE,
+            &mut key,
+        )
+    };
+    if err == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    check(err)?;
+    Ok(Some(RegKey(key)))
+}
+
+fn set_value(key: &RegKey, name: &str, ty: REG_VALUE_TYPE, data: &[u8]) -> windows::core::Result<()> {
+    // SAFETY: open key, NUL-terminated name, the data as long as its slice.
+    check(unsafe { RegSetValueExW(key.0, &HSTRING::from(name), None, ty, Some(data)) })
+}
+
+/// A privilege on this process's token (an administrator has the backup
+/// and restore privileges, disabled): opening a key with
+/// REG_OPTION_BACKUP_RESTORE then skips its access check
+fn enable_privilege(name: PCWSTR) -> windows::core::Result<()> {
     let mut token = HANDLE::default();
     // SAFETY: GetCurrentProcess is a pseudo handle; `token` is an out pointer.
     unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) }?;
     let mut luid = LUID::default();
-    // SAFETY: SE_BACKUP_NAME is a static NUL-terminated string; `luid` is an
-    // out pointer.
-    let r = unsafe { LookupPrivilegeValueW(PCWSTR::null(), SE_BACKUP_NAME, &mut luid) }.and_then(|()| {
+    // SAFETY: `name` is one of the static NUL-terminated SE_*_NAME strings;
+    // `luid` is an out pointer.
+    let r = unsafe { LookupPrivilegeValueW(PCWSTR::null(), name, &mut luid) }.and_then(|()| {
         let privileges = TOKEN_PRIVILEGES {
             PrivilegeCount: 1,
             Privileges: [LUID_AND_ATTRIBUTES { Luid: luid, Attributes: SE_PRIVILEGE_ENABLED }],
@@ -329,5 +587,58 @@ mod tests {
         assert!(le_key(addr, |n| if n == "LTK" { None } else { values(n) }).is_none());
         assert!(le_key(addr, |n| if n == "LTK" { Some((REG_BINARY, vec![0; 16])) } else { values(n) }).is_none());
         assert!(address_from_name("MasterIRK").is_none());
+    }
+
+    #[test]
+    fn only_keys_windows_has_are_replaced() {
+        let ours = [0x11u8; 16];
+        let old = [0x22u8; 16];
+        assert_eq!(write_action(Some((REG_BINARY, &old)), &ours), WriteAction::Replace(old));
+        assert_eq!(write_action(Some((REG_BINARY, &ours)), &ours), WriteAction::Same);
+        // Never paired with this radio in Windows: nothing is added
+        assert_eq!(write_action(None, &ours), WriteAction::NotPaired);
+        // Not a link key: left as it is
+        assert_eq!(write_action(Some((REG_BINARY, &old[..8])), &ours), WriteAction::NotPaired);
+        assert_eq!(write_action(Some((REG_DWORD, &old[..4])), &ours), WriteAction::NotPaired);
+    }
+
+    #[test]
+    fn value_names_are_counted_by_name_type_and_size() {
+        let mut list = Vec::new();
+        add_value(&mut list, "LTK", REG_BINARY, 16);
+        add_value(&mut list, "LTK", REG_BINARY, 16);
+        add_value(&mut list, "ERand", REG_QWORD, 8);
+        add_value(&mut list, "ERand", REG_BINARY, 8);
+        assert_eq!(list.len(), 3);
+        assert_eq!(
+            (list[0].name.as_str(), list[0].kind.as_str(), list[0].size, list[0].count),
+            ("LTK", "binary", 16, 2)
+        );
+        assert_eq!(list[2].kind, "binary");
+        assert_eq!(type_name(REG_VALUE_TYPE(7)), "type 7");
+    }
+
+    #[test]
+    fn le_keys_compare_by_what_is_written() {
+        let ours = WindowsLeKey {
+            address: [0xC0, 1, 2, 3, 4, 5],
+            address_type: Some(0),
+            ltk: [0x11; 16],
+            key_length: Some(16),
+            ediv: Some(0),
+            erand: Some(0),
+            irk: Some([0x22; 16]),
+            auth_req: Some(0x2D),
+        };
+        assert!(le_same(&ours, &ours));
+        // Values Windows did not write count as their defaults
+        assert!(le_same(&WindowsLeKey { key_length: None, ediv: None, erand: None, ..ours }, &ours));
+        // AuthReq and the address type are not written
+        assert!(le_same(&WindowsLeKey { auth_req: Some(0x09), address_type: None, ..ours }, &ours));
+        assert!(!le_same(&WindowsLeKey { ltk: [0x33; 16], ..ours }, &ours));
+        assert!(!le_same(&WindowsLeKey { erand: Some(7), ..ours }, &ours));
+        assert!(!le_same(&WindowsLeKey { irk: None, ..ours }, &ours));
+        // No IRK of ours: Windows' stays
+        assert!(le_same(&ours, &WindowsLeKey { irk: None, ..ours }));
     }
 }

@@ -160,6 +160,19 @@ fn le_scan_entries(results: &[LeScanResult], saved_le: &[SavedDevice], own: &[St
     (out, found)
 }
 
+/// LE entries whose advertising carries no name (issue #86: an EarFun's LE
+/// side listed by its address) take the name of a device with the same
+/// address in `known` (address and name: the scan's classic devices and the
+/// saved ones), the classic side of the same earbuds
+fn fill_le_names(entries: &mut [ScannedDevice], known: &[(String, String)]) {
+    for e in entries.iter_mut().filter(|e| e.name.trim().is_empty()) {
+        if let Some((_, name)) = known.iter().find(|(a, n)| a.eq_ignore_ascii_case(&e.address) && !n.trim().is_empty())
+        {
+            e.name = name.clone();
+        }
+    }
+}
+
 /// The advertisers without LE Audio that look like the LE side of a classic
 /// device (`known`: address and name of the scan's and the saved ones): the
 /// same address, or the same name. For the log only: such a device is not
@@ -358,6 +371,11 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
+    /// An event for the state machine (the LE stream's headset volume)
+    pub(crate) fn send_event(&self, e: ServiceEvent) {
+        let _ = self.events.lock().unwrap_or_else(|e| e.into_inner()).send(e);
+    }
+
     pub fn stop_requested(&self) -> bool {
         self.stop.load(Ordering::Acquire)
     }
@@ -942,6 +960,17 @@ fn apply_dev_overrides(settings: &Settings) {
     codec::dev::set_overrides(if settings.debug_mode { settings.dev_overrides } else { Default::default() });
     crate::vendor::set_overrides(if settings.debug_mode { settings.dev_vendors.clone() } else { Default::default() });
     crate::health::set_every_interval(settings.log().health_every_interval);
+    // Developer > Debug, read when the adapter opens next
+    let debug = if settings.debug_mode { settings.dev_debug.clone() } else { Default::default() };
+    hci_transport::iso_intr::set_config(hci_transport::iso_intr::IsoInterfaceConfig {
+        enabled: debug.mtk_iso_interface,
+        pad_to: debug.mtk_iso_pad.into(),
+    });
+    let command = bt_host::debug_command::parse(&debug.mtk_command).unwrap_or_else(|e| {
+        tracing::warn!("Developer > Debug: command not sent: {e}");
+        None
+    });
+    bt_host::debug_command::set(command);
 }
 
 impl Service {
@@ -1640,7 +1669,14 @@ impl Service {
         let classic = host.scan_with(seconds, &mut |found| {
             let mut list: Vec<ScannedDevice> = found.iter().map(ScannedDevice::classic).collect();
             if le_scan {
-                list.extend(le_scan_entries(&host.le_scan_results(), &saved_le, &own).0);
+                let mut le = le_scan_entries(&host.le_scan_results(), &saved_le, &own).0;
+                let known: Vec<(String, String)> = list
+                    .iter()
+                    .map(|d| (d.address.clone(), d.name.clone()))
+                    .chain(saved_le.iter().map(|d| (d.address.clone(), d.name.clone())))
+                    .collect();
+                fill_le_names(&mut le, &known);
+                list.extend(le);
             }
             on_found(&list);
         });
@@ -1676,7 +1712,7 @@ impl Service {
                     r.uuids16
                 );
             }
-            let (entries, found) = le_scan_entries(&results, &saved_le, &own);
+            let (mut entries, found) = le_scan_entries(&results, &saved_le, &own);
             tracing::info!(
                 "LE scan: {} advertiser(s) in {:.1} s, {found} LE Audio, {} listed",
                 results.len(),
@@ -1690,7 +1726,9 @@ impl Service {
                 .iter()
                 .map(|d| (d.address.clone(), d.name.clone()))
                 .chain(saved.into_iter().map(|d| (d.address, d.name)))
+                .chain(saved_le.iter().map(|d| (d.address.clone(), d.name.clone())))
                 .collect();
+            fill_le_names(&mut entries, &known);
             for r in classic_le_sides(&results, &known) {
                 tracing::info!(
                     "LE scan: {} {} advertises over LE without an LE Audio service (type {}, connectable {}, \
@@ -2203,6 +2241,17 @@ mod tests {
         let (le_list, _) = le_scan_entries(&[le("00:A2:D0:00:00:12", "Buds", None)], &[], &[]);
         assert_eq!(le_list[0].address, c.address);
         assert!(le_list[0].le_audio);
+    }
+
+    #[test]
+    fn an_unnamed_le_entry_takes_its_classic_name() {
+        let (mut list, _) =
+            le_scan_entries(&[le("00:A2:D0:00:00:12", "", None), le("00:A2:D0:00:00:13", "", None)], &[], &[]);
+        let known = vec![("00:a2:d0:00:00:12".to_string(), "Buds".to_string())];
+        fill_le_names(&mut list, &known);
+        assert_eq!(list[0].name, "Buds");
+        // No device with its address: still unnamed (the UI shows the address)
+        assert_eq!(list[1].name, "");
     }
 
     #[test]

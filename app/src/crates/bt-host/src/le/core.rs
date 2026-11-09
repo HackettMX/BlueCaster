@@ -51,6 +51,13 @@ pub const CON_HANDLE_INVALID: u16 = 0xFFFF;
 const RPA_FRESH_MS: u32 = 5 * 60 * 1000;
 const RPA_CACHE_MAX: usize = 512;
 
+/// A device's identity address (upper case) and type, once SM learned it
+/// (bonded): what its kept services are filed under
+fn d_identity(ctx: &LeCtx<'_>, id: LeDeviceId) -> Option<(String, u8)> {
+    let d = ctx.device(id)?;
+    d.identity_known.then(|| (crate::events::addr_str(&d.addr.addr).to_uppercase(), d.addr.addr_type))
+}
+
 /// One LE Audio peer (e.g. a headset, or one earbud of a pair), owned by
 /// the core, only touched on the BTstack thread (v1 LeAudioDevice). Profile
 /// modules read it and keep their own state keyed by `id`.
@@ -291,6 +298,9 @@ pub struct LeCore {
     next_timer: u32,
     timers_changed: bool,
     gatt_retry: Option<LeTimerId>,
+    /// `<bond_dir>\le_gatt_cache.txt` (crate::le::gatt_cache); None: no
+    /// bond folder, every connection discovers
+    gatt_cache_file: Option<PathBuf>,
     /// Sink PAC records per characteristic (con, value handle): a device may
     /// have several
     pub(crate) sink_pacs_by_char: BTreeMap<(u16, u16), Vec<PacRecord>>,
@@ -1029,6 +1039,48 @@ impl<'a> LeCtx<'a> {
         let con = d.acl;
         tracing::debug!("LE Audio: device {} secured, GATT discovery on 0x{con:04X}", id.0);
         self.each_module(|m, ctx| m.on_encrypted(ctx, id));
+        // Kept services, when the device's Database Hash says they are
+        // still its services (crate::le::gatt_cache)
+        let cached = self.core.gatt_cache_file.clone().zip(d_identity(self, id)).and_then(|(file, (addr, kind))| {
+            let db = super::gatt_cache::load(&file, &addr)?;
+            (db.address_type == kind && db.hash.is_some()).then_some((file, db))
+        });
+        match cached.and_then(|(file, db)| super::gatt_cache::hash_handle(&db.services).map(|h| (file, db, h))) {
+            Some((file, db, handle)) => {
+                tracing::debug!("LE Audio: device {} has kept services, reading its Database Hash", id.0);
+                self.core.gatt.read(
+                    con,
+                    handle,
+                    Box::new(move |ctx, status, value| {
+                        if ctx.device_on(id, con).is_none() {
+                            return;
+                        }
+                        if status == 0 && db.hash.is_some_and(|h| value == h) {
+                            tracing::info!(
+                                "LE Audio: {}: services unchanged (Database Hash), discovery skipped",
+                                db.address
+                            );
+                            ctx.services_known(id, con, db.services, None);
+                        } else {
+                            tracing::info!(
+                                "LE Audio: {}: Database Hash {} (0x{status:02x}), discovering the services",
+                                db.address,
+                                if status == 0 { "changed" } else { "not read" }
+                            );
+                            ctx.discover(id, con, Some(file));
+                        }
+                    }),
+                );
+            }
+            None => {
+                let file = self.core.gatt_cache_file.clone();
+                self.discover(id, con, file);
+            }
+        }
+    }
+
+    /// GATT discovery, then the services kept (`file`) and the setup goes on
+    fn discover(&mut self, id: LeDeviceId, con: u16, file: Option<PathBuf>) {
         self.core.gatt.discover_all(
             con,
             Box::new(move |ctx, status, services| {
@@ -1046,7 +1098,11 @@ impl<'a> LeCtx<'a> {
                         if s.primary { "primary" } else { "secondary" },
                         s.start_handle,
                         s.end_handle,
-                        if s.included_by != 0 { format!(" (included by 0x{:04X})", s.included_by) } else { String::new() },
+                        if s.included_by != 0 {
+                            format!(" (included by 0x{:04X})", s.included_by)
+                        } else {
+                            String::new()
+                        },
                         s.chars
                             .iter()
                             .map(|c| format!("0x{:04X}@0x{:04X}", c.uuid16, c.value_handle))
@@ -1054,31 +1110,64 @@ impl<'a> LeCtx<'a> {
                             .join(" ")
                     );
                 }
-                let Some(d) = ctx.device_on_mut(id, con) else { return };
-                d.services = services;
-                let chars: usize = d.services.iter().map(|s| s.chars.len()).sum();
-                tracing::info!("LE Audio: {}: {} services, {chars} characteristics", d.addr, d.services.len());
-                bap::read_device(
-                    ctx,
-                    id,
-                    Box::new(move |ctx, _| {
-                        let Some(d) = ctx.device_on_mut(id, con) else { return };
-                        tracing::debug!(
-                            "LE Audio: device {} GATT ready: pacs {}, ascs {}, {} sink PAC(s), {} ASE(s), locations 0x{:08X}",
-                            id.0,
-                            d.has_pacs,
-                            d.has_ascs,
-                            d.sink_pacs.len(),
-                            d.ases.len(),
-                            d.sink_locations
-                        );
-                        d.gatt_ready = true;
-                        ctx.each_module(|m, ctx| m.on_gatt_ready(ctx, id));
-                        let Some(d) = ctx.device_on_mut(id, con) else { return };
-                        d.ready = true;
-                        ctx.finish_connect(id, true);
+                ctx.services_known(id, con, services, file);
+            }),
+        );
+    }
+
+    /// The device's services known (discovered, or kept and unchanged):
+    /// kept for later connections when `file` is set (its Database Hash
+    /// read first, if it has one), then PACS / ASCS and the modules
+    fn services_known(&mut self, id: LeDeviceId, con: u16, services: Vec<GattService>, file: Option<PathBuf>) {
+        if let (Some(file), Some((address, address_type))) = (file, d_identity(self, id)) {
+            let db = super::gatt_cache::CachedDb { address, address_type, hash: None, services: services.clone() };
+            match super::gatt_cache::hash_handle(&services) {
+                Some(handle) => self.core.gatt.read(
+                    con,
+                    handle,
+                    Box::new(move |_, status, value| {
+                        let hash = <[u8; 16]>::try_from(value).ok().filter(|_| status == 0);
+                        match hash {
+                            Some(_) => {
+                                tracing::info!("LE Audio: {}: services kept with their Database Hash", db.address)
+                            }
+                            None => tracing::info!(
+                                "LE Audio: {}: Database Hash not read (0x{status:02x}): discovered on every connection",
+                                db.address
+                            ),
+                        }
+                        super::gatt_cache::store(&file, super::gatt_cache::CachedDb { hash, ..db });
                     }),
+                ),
+                None => {
+                    tracing::info!("LE Audio: {}: no Database Hash: discovered on every connection", db.address);
+                    super::gatt_cache::store(&file, db);
+                }
+            }
+        }
+        let Some(d) = self.device_on_mut(id, con) else { return };
+        d.services = services;
+        let chars: usize = d.services.iter().map(|s| s.chars.len()).sum();
+        tracing::info!("LE Audio: {}: {} services, {chars} characteristics", d.addr, d.services.len());
+        bap::read_device(
+            self,
+            id,
+            Box::new(move |ctx, _| {
+                let Some(d) = ctx.device_on_mut(id, con) else { return };
+                tracing::debug!(
+                    "LE Audio: device {} GATT ready: pacs {}, ascs {}, {} sink PAC(s), {} ASE(s), locations 0x{:08X}",
+                    id.0,
+                    d.has_pacs,
+                    d.has_ascs,
+                    d.sink_pacs.len(),
+                    d.ases.len(),
+                    d.sink_locations
                 );
+                d.gatt_ready = true;
+                ctx.each_module(|m, ctx| m.on_gatt_ready(ctx, id));
+                let Some(d) = ctx.device_on_mut(id, con) else { return };
+                d.ready = true;
+                ctx.finish_connect(id, true);
             }),
         );
     }
@@ -1777,6 +1866,7 @@ impl LeCore {
             next_timer: 1,
             timers_changed: false,
             gatt_retry: None,
+            gatt_cache_file: None,
             sink_pacs_by_char: BTreeMap::new(),
             source_pacs_by_char: BTreeMap::new(),
             rx_producer: None,
@@ -1811,17 +1901,14 @@ impl LeCore {
             .as_ref()
             .and_then(|c| c.bonds_file.clone())
             .unwrap_or_else(|| std::env::temp_dir().join("le_audio_bonds.tlv"));
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        stack.le_init(&path.to_string_lossy());
-        tracing::info!("LE Audio: bonds in {}", path.display());
+        stack.le_init(Box::new(crate::le_bond_file::TlvFile::open(&path)));
         if let Some(imported) = self.config.as_ref().and_then(|c| c.imported_bonds_file.as_deref()) {
             crate::le_import::apply(stack, imported);
         }
 
         // The modules (once per BtHost)
         if let Some(cfg) = self.config.take() {
+            self.gatt_cache_file = cfg.bond_dir.as_ref().map(|d| d.join(super::gatt_cache::FILE_NAME));
             let mut setup = LeModuleSetup {
                 bond_dir: cfg.bond_dir,
                 media: cfg.media,

@@ -8,22 +8,61 @@
 // logs: retention, the daily size cap, verbose logging that stays on, the
 // stream health line every interval (issue #84) and marker lines.
 
-import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  on,
+  Show,
+} from "solid-js";
 import { unwrap } from "solid-js/store";
-import { useApp } from "../app/context";
+import { errorText, useApp } from "../app/context";
 import { saveSettings } from "../app/settings";
-import { Banner, Button, Field, Section, Select, TabBar, Toggle } from "../components/controls";
+import {
+  Banner,
+  Button,
+  Field,
+  Section,
+  Select,
+  TabBar,
+  Toggle,
+} from "../components/controls";
 import type { IconName } from "../components/icons";
 import { t } from "../i18n";
-import type { DevLog, DevOverrides, LogLevel, VendorInfo, VendorMode, VendorOverride } from "../ipc/types";
+import type {
+  DevDebug,
+  DevLog,
+  KeyCounts,
+  KeysComparison,
+  WindowsValueName,
+  DevOverrides,
+  LogLevel,
+  VendorInfo,
+  VendorMode,
+  VendorOverride,
+} from "../ipc/types";
 import { PACKET_DEFAULT, PACKET_MAX, PACKET_MIN } from "../lib/codecs";
-import { audioEntries, entryByKey, normalizeProfile, profilesOf } from "../lib/profile";
+import {
+  audioEntries,
+  entryByKey,
+  normalizeProfile,
+  profilesOf,
+} from "../lib/profile";
 import { Auracast } from "./Auracast";
 import { ChipTools } from "./ChipTools";
 import { ReceiverTest } from "./ReceiverTest";
 
 // The app's own settings apart from the codec and media path (issue #86)
-type Tab = "app" | "receiver" | "auracast" | "overrides" | "vendors" | "logging" | "chip";
+type Tab =
+  | "app"
+  | "receiver"
+  | "auracast"
+  | "overrides"
+  | "vendors"
+  | "logging"
+  | "chip"
+  | "debug";
 
 const NO_OVERRIDES: DevOverrides = {
   rtp_marker: false,
@@ -40,6 +79,14 @@ const NO_OVERRIDES: DevOverrides = {
   encode_at_send: false,
 };
 
+/** Developer > Debug: experiments for one adapter's transport (issue #86) */
+export const NO_DEBUG: DevDebug = {
+  mtk_iso_interface: false,
+  mtk_iso_pad: 0,
+  mtk_command: "",
+  le_keys_to_windows: false,
+};
+
 export function Developer() {
   const app = useApp();
   const { core } = app;
@@ -52,7 +99,8 @@ export function Developer() {
       !s.volume_mixer &&
       JSON.stringify(s.dev_overrides) === JSON.stringify(NO_OVERRIDES) &&
       !vendorsActive(s.dev_vendors) &&
-      JSON.stringify(s.dev_log) === JSON.stringify(DEFAULT_LOG)
+      JSON.stringify(s.dev_log) === JSON.stringify(DEFAULT_LOG) &&
+      JSON.stringify(s.dev_debug) === JSON.stringify(NO_DEBUG)
     );
   };
   const resetAll = () =>
@@ -61,6 +109,7 @@ export function Developer() {
       dev_overrides: { ...NO_OVERRIDES },
       dev_vendors: {},
       dev_log: { ...DEFAULT_LOG },
+      dev_debug: { ...NO_DEBUG },
     });
   const tabs = (): { id: Tab; label: string; icon: IconName }[] => [
     { id: "app", label: t("ui.dev.app_settings"), icon: "settings" },
@@ -70,6 +119,7 @@ export function Developer() {
     { id: "receiver", label: t("receiver.title"), icon: "beaker" },
     { id: "auracast", label: t("ui.dev.auracast"), icon: "pulse" },
     { id: "chip", label: t("ui.dev.chip"), icon: "usb_stick" },
+    { id: "debug", label: t("ui.dev.debug"), icon: "layer" },
   ];
 
   return (
@@ -77,8 +127,18 @@ export function Developer() {
       <header class="page-head">
         <h1>{t("ui.nav.developer")}</h1>
       </header>
-      <TabBar label={t("ui.nav.developer")} tabs={tabs()} current={tab()} onSelect={setTab} />
-      <div class="tab-panel" role="tabpanel" id={`panel-${tab()}`} aria-labelledby={`tab-${tab()}`}>
+      <TabBar
+        label={t("ui.nav.developer")}
+        tabs={tabs()}
+        current={tab()}
+        onSelect={setTab}
+      />
+      <div
+        class="tab-panel"
+        role="tabpanel"
+        id={`panel-${tab()}`}
+        aria-labelledby={`tab-${tab()}`}
+      >
         <Show when={tab() === "app"}>
           <Section title={t("ui.nav.mixer")}>
             <Toggle
@@ -96,13 +156,20 @@ export function Developer() {
             />
           </Section>
           <div>
-            <Button icon="arrow_reset" disabled={allDefault()} onClick={resetAll}>
+            <Button
+              icon="arrow_reset"
+              disabled={allDefault()}
+              onClick={resetAll}
+            >
               {t("ui.dev.reset_all")}
             </Button>
           </div>
         </Show>
         <Show when={tab() === "overrides"}>
-          <Overrides value={settings().dev_overrides} save={(dev_overrides) => saveSettings(app, { dev_overrides })} />
+          <Overrides
+            value={settings().dev_overrides}
+            save={(dev_overrides) => saveSettings(app, { dev_overrides })}
+          />
         </Show>
         <Show when={tab() === "vendors"}>
           <Vendors
@@ -112,7 +179,10 @@ export function Developer() {
           />
         </Show>
         <Show when={tab() === "logging"}>
-          <Logging value={settings().dev_log} save={(dev_log) => saveSettings(app, { dev_log })} />
+          <Logging
+            value={settings().dev_log}
+            save={(dev_log) => saveSettings(app, { dev_log })}
+          />
         </Show>
         <Show when={tab() === "receiver"}>
           <ReceiverTest />
@@ -123,6 +193,12 @@ export function Developer() {
         <Show when={tab() === "chip"}>
           <ChipTools />
         </Show>
+        <Show when={tab() === "debug"}>
+          <Debug
+            value={settings().dev_debug}
+            save={(dev_debug) => saveSettings(app, { dev_debug })}
+          />
+        </Show>
       </div>
     </div>
   );
@@ -132,8 +208,12 @@ const NO_VENDOR: VendorOverride = { mode: "auto", options: [] };
 const VENDOR_MODES: VendorMode[] = ["auto", "always", "never"];
 
 /** Whether vendor overrides are on (defaults left in the map count as off) */
-export function vendorsActive(value: Partial<Record<string, VendorOverride>>): boolean {
-  return Object.values(value).some((o) => !!o && (o.mode !== "auto" || o.options.length > 0));
+export function vendorsActive(
+  value: Partial<Record<string, VendorOverride>>,
+): boolean {
+  return Object.values(value).some(
+    (o) => !!o && (o.mode !== "auto" || o.options.length > 0),
+  );
 }
 
 /** Each vendor's protocol: by the device's name, always or never, and its
@@ -153,7 +233,10 @@ function Vendors(props: {
   const active = () => vendorsActive(props.value);
   return (
     <div>
-      <Banner kind={active() ? "warn" : "info"} title={active() ? t("ui.dev.active") : t("ui.dev.vendors_intro")} />
+      <Banner
+        kind={active() ? "warn" : "info"}
+        title={active() ? t("ui.dev.active") : t("ui.dev.vendors_intro")}
+      />
       <For each={props.vendors}>
         {(v) => (
           <Section title={v.name}>
@@ -162,7 +245,10 @@ function Vendors(props: {
                 <Select
                   id={id}
                   value={of(v.id).mode}
-                  options={VENDOR_MODES.map((m) => ({ value: m, label: t(`ui.dev.vendor_mode.${m}`) }))}
+                  options={VENDOR_MODES.map((m) => ({
+                    value: m,
+                    label: t(`ui.dev.vendor_mode.${m}`),
+                  }))}
                   onChange={(mode) => set(v.id, { mode })}
                 />
               )}
@@ -173,7 +259,11 @@ function Vendors(props: {
                   label={t(`ui.dev.vendor_option.${v.id}.${o}`)}
                   checked={of(v.id).options.includes(o)}
                   onChange={(on) =>
-                    set(v.id, { options: on ? [...of(v.id).options, o] : of(v.id).options.filter((x) => x !== o) })
+                    set(v.id, {
+                      options: on
+                        ? [...of(v.id).options, o]
+                        : of(v.id).options.filter((x) => x !== o),
+                    })
                   }
                 />
               )}
@@ -182,7 +272,11 @@ function Vendors(props: {
         )}
       </For>
       <div>
-        <Button icon="arrow_reset" disabled={!active()} onClick={() => void props.save({})}>
+        <Button
+          icon="arrow_reset"
+          disabled={!active()}
+          onClick={() => void props.save({})}
+        >
           {t("ui.dev.reset")}
         </Button>
       </div>
@@ -190,22 +284,36 @@ function Vendors(props: {
   );
 }
 
-function Overrides(props: { value: DevOverrides; save: (v: DevOverrides) => Promise<boolean> }) {
-  const set = (patch: Partial<DevOverrides>) => void props.save({ ...props.value, ...patch });
-  const active = () => JSON.stringify(props.value) !== JSON.stringify(NO_OVERRIDES);
+function Overrides(props: {
+  value: DevOverrides;
+  save: (v: DevOverrides) => Promise<boolean>;
+}) {
+  const set = (patch: Partial<DevOverrides>) =>
+    void props.save({ ...props.value, ...patch });
+  const active = () =>
+    JSON.stringify(props.value) !== JSON.stringify(NO_OVERRIDES);
   // The bit rate commits when the field is left, so typing does not restart anything
   const commitBitrate = (text: string) => {
     const n = Math.round(Number(text));
-    set({ aac_bitrate_kbps: Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 32), 512) : 0 });
+    set({
+      aac_bitrate_kbps:
+        Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 32), 512) : 0,
+    });
   };
   // The send queue limit too; empty = the default
   const commitQueueWait = (text: string) => {
     const n = Math.round(Number(text));
-    set({ queue_max_wait_ms: Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 50), 2000) : 0 });
+    set({
+      queue_max_wait_ms:
+        Number.isFinite(n) && n > 0 ? Math.min(Math.max(n, 50), 2000) : 0,
+    });
   };
   return (
     <div>
-      <Banner kind={active() ? "warn" : "info"} title={active() ? t("ui.dev.active") : t("ui.dev.intro")} />
+      <Banner
+        kind={active() ? "warn" : "info"}
+        title={active() ? t("ui.dev.active") : t("ui.dev.intro")}
+      />
       <Section title={t("ui.nav.codecs")}>
         <Toggle
           label={t("ui.dev.auto_codec_settings")}
@@ -237,7 +345,10 @@ function Overrides(props: { value: DevOverrides; save: (v: DevOverrides) => Prom
           checked={props.value.packet_dump}
           onChange={(v) => set({ packet_dump: v })}
         />
-        <Field label={t("ui.dev.queue_wait")} hint={t("ui.dev.queue_wait_hint")}>
+        <Field
+          label={t("ui.dev.queue_wait")}
+          hint={t("ui.dev.queue_wait_hint")}
+        >
           {(id, describedBy) => (
             <input
               id={id}
@@ -274,7 +385,10 @@ function Overrides(props: { value: DevOverrides; save: (v: DevOverrides) => Prom
           checked={props.value.aac_config_bitrate0}
           onChange={(v) => set({ aac_config_bitrate0: v })}
         />
-        <Field label={t("ui.dev.aac_bitrate")} hint={t("ui.dev.aac_bitrate_hint")}>
+        <Field
+          label={t("ui.dev.aac_bitrate")}
+          hint={t("ui.dev.aac_bitrate_hint")}
+        >
           {(id, describedBy) => (
             <input
               id={id}
@@ -305,6 +419,173 @@ function Overrides(props: { value: DevOverrides; save: (v: DevOverrides) => Prom
   );
 }
 
+/** Experiments for one adapter: MediaTek LE Audio over the adapter's
+ *  interrupt interface, with optional padding, and one HCI command sent
+ *  after start-up (read when the adapter opens next) */
+function Debug(props: {
+  value: DevDebug;
+  save: (v: DevDebug) => Promise<boolean>;
+}) {
+  const set = (patch: Partial<DevDebug>) =>
+    void props.save({ ...props.value, ...patch });
+  const active = () => JSON.stringify(props.value) !== JSON.stringify(NO_DEBUG);
+  const commitPad = (text: string) =>
+    set({ mtk_iso_pad: clampInt(text, 0, 4096, 0) });
+  return (
+    <div>
+      <Banner
+        kind={active() ? "warn" : "info"}
+        title={active() ? t("ui.dev.active") : t("ui.dev.debug_intro")}
+      />
+      <Section title={t("ui.dev.mtk_section")}>
+        <Toggle
+          label={t("ui.dev.mtk_iso_interface")}
+          checked={props.value.mtk_iso_interface}
+          onChange={(v) => set({ mtk_iso_interface: v })}
+        />
+        <Field label={t("ui.dev.mtk_iso_pad")}>
+          {(id, describedBy) => (
+            <input
+              id={id}
+              class="input"
+              type="number"
+              min="0"
+              max="4096"
+              step="1"
+              aria-describedby={describedBy}
+              disabled={!props.value.mtk_iso_interface}
+              value={props.value.mtk_iso_pad || ""}
+              placeholder={t("ui.dev.off")}
+              onChange={(e) => commitPad(e.currentTarget.value)}
+            />
+          )}
+        </Field>
+        <Field
+          label={t("ui.dev.mtk_command")}
+          hint={t("ui.dev.mtk_command_hint")}
+        >
+          {(id, describedBy) => (
+            <input
+              id={id}
+              class="input mono"
+              type="text"
+              spellcheck={false}
+              autocomplete="off"
+              aria-describedby={describedBy}
+              value={props.value.mtk_command}
+              onChange={(e) =>
+                set({ mtk_command: e.currentTarget.value.trim().toUpperCase() })
+              }
+            />
+          )}
+        </Field>
+      </Section>
+      <Section title={t("ui.dev.keys_section")}>
+        <Toggle
+          label={t("ui.dev.le_keys_to_windows")}
+          checked={props.value.le_keys_to_windows}
+          onChange={(v) => set({ le_keys_to_windows: v })}
+        />
+        <KeysCompare />
+      </Section>
+    </div>
+  );
+}
+
+/** BlueCaster's pairing keys against Windows' for one adapter (issue #86):
+ *  numbers only, so the result can be shared without addresses or keys */
+function KeysCompare() {
+  const app = useApp();
+  const adapters = () =>
+    (app.core.state.snap?.adapter.adapters ?? []).filter((a) => a.address);
+  const [chosen, setChosen] = createSignal<string | null>(null);
+  const adapter = () =>
+    adapters().find((a) => a.address === chosen())?.address ??
+    adapters()[0]?.address ??
+    null;
+  const [busy, setBusy] = createSignal(false);
+  const [result, setResult] = createSignal<KeysComparison | null>(null);
+  const compare = async () => {
+    const a = adapter();
+    if (!a) return;
+    setBusy(true);
+    try {
+      setResult(await app.core.request("dev.compare_windows_keys", { adapter: a }));
+    } catch (e) {
+      app.notify(errorText(e), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const counts = (key: string, c: KeyCounts) =>
+    t(key, c.same, c.differ, c.only_bluecaster, c.only_windows);
+  const names = (list: WindowsValueName[]) =>
+    list
+      .map(
+        (v) =>
+          `${v.name} (${v.kind}, ${v.size} B${v.count > 1 ? `, ×${v.count}` : ""})`,
+      )
+      .join(", ");
+  return (
+    <>
+      <Show when={adapters().length > 1}>
+        <Field label={t("ui.dev.keys_adapter")}>
+          {(id, describedBy) => (
+            <Select
+              id={id}
+              describedBy={describedBy}
+              value={adapter() ?? ""}
+              options={adapters().map((a) => ({
+                value: a.address ?? "",
+                label: a.display_name,
+              }))}
+              onChange={(v) => {
+                setChosen(v);
+                setResult(null);
+              }}
+            />
+          )}
+        </Field>
+      </Show>
+      <div class="row">
+        <Button
+          icon="shield"
+          busy={busy()}
+          disabled={!adapter()}
+          onClick={() => void compare()}
+        >
+          {t("ui.dev.keys_compare")}
+        </Button>
+      </div>
+      <Show when={result()}>
+        {(r) => (
+          <Show
+            when={r().adapter_found}
+            fallback={<p class="muted">{t("ui.dev.keys_no_windows")}</p>}
+          >
+            <p>{counts("ui.dev.keys_link", r().classic)}</p>
+            <p>
+              {r().le
+                ? counts("ui.dev.keys_le", r().le!)
+                : t("ui.dev.keys_le_unreadable")}
+            </p>
+            <Show when={r().le_values.length > 0}>
+              <p class="muted mono">
+                {t("ui.dev.keys_le_values", names(r().le_values))}
+              </p>
+            </Show>
+            <Show when={r().radio_values.length > 0}>
+              <p class="muted mono">
+                {t("ui.dev.keys_radio_values", names(r().radio_values))}
+              </p>
+            </Show>
+          </Show>
+        )}
+      </Show>
+    </>
+  );
+}
+
 /**
  * The max media packet size of each saved device (issue #86: not one for
  * end users, so here and not in the device's settings). Kept in the
@@ -314,20 +595,36 @@ function Overrides(props: { value: DevOverrides; save: (v: DevOverrides) => Prom
 function PacketSizes() {
   const app = useApp();
   const snap = () => app.core.state.snap!;
-  const entries = () => audioEntries(snap()).filter((e) => !e.le_audio && e.profile);
+  const entries = () =>
+    audioEntries(snap()).filter((e) => !e.le_audio && e.profile);
   // Keyed by the entry, so a field keeps what is typed across updates
   const keys = createMemo(() => entries().map((e) => e.key));
   const save = async (address: string, v: number) => {
     for (const p of profilesOf(snap().profiles, address)) {
       if (p.le_audio || p.max_media_payload === v) continue;
-      const profile = normalizeProfile({ ...structuredClone(unwrap(p)), max_media_payload: v });
-      if (!(await app.run(() => app.core.request("profile.save", { profile, original_name: p.name })))) break;
+      const profile = normalizeProfile({
+        ...structuredClone(unwrap(p)),
+        max_media_payload: v,
+      });
+      if (
+        !(await app.run(() =>
+          app.core.request("profile.save", { profile, original_name: p.name }),
+        ))
+      )
+        break;
     }
   };
   return (
     <Show when={keys().length > 0}>
       <Section title={t("advanced.max_packet")}>
-        <p class="hint">{t("advanced.max_packet_help", PACKET_MIN, PACKET_MAX, PACKET_DEFAULT)}</p>
+        <p class="hint">
+          {t(
+            "advanced.max_packet_help",
+            PACKET_MIN,
+            PACKET_MAX,
+            PACKET_DEFAULT,
+          )}
+        </p>
         <For each={keys()}>
           {(key) => {
             const e = entryByKey(entries, key);
@@ -347,9 +644,19 @@ function PacketSizes() {
 
 /** One device's max media packet size: saved when a valid value is left or
  *  the recommended one chosen */
-function PacketSize(props: { label: string; value: number; onChange: (v: number) => void }) {
+function PacketSize(props: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+}) {
   const [text, setText] = createSignal<string | null>(null);
-  createEffect(on(() => props.value, () => setText(null), { defer: true }));
+  createEffect(
+    on(
+      () => props.value,
+      () => setText(null),
+      { defer: true },
+    ),
+  );
   const shown = () => text() ?? String(props.value);
   const valid = (s: string) => {
     const n = Number(s);
@@ -361,7 +668,14 @@ function PacketSize(props: { label: string; value: number; onChange: (v: number)
     if (Number(s) !== props.value) props.onChange(Number(s));
   };
   return (
-    <Field label={props.label} error={text() !== null && !valid(text()!) ? t("ui.profile.err_packet", PACKET_MIN, PACKET_MAX) : null}>
+    <Field
+      label={props.label}
+      error={
+        text() !== null && !valid(text()!)
+          ? t("ui.profile.err_packet", PACKET_MIN, PACKET_MAX)
+          : null
+      }
+    >
       {(id, described) => (
         <div class="inline">
           <input
@@ -374,12 +688,18 @@ function PacketSize(props: { label: string; value: number; onChange: (v: number)
             step="1"
             value={shown()}
             aria-describedby={described}
-            aria-invalid={text() !== null && !valid(text()!) ? "true" : undefined}
+            aria-invalid={
+              text() !== null && !valid(text()!) ? "true" : undefined
+            }
             onInput={(e) => setText(e.currentTarget.value)}
             onChange={commit}
             onKeyDown={(e) => e.key === "Enter" && commit()}
           />
-          <Button kind="subtle" disabled={props.value === PACKET_DEFAULT && text() === null} onClick={() => props.onChange(PACKET_DEFAULT)}>
+          <Button
+            kind="subtle"
+            disabled={props.value === PACKET_DEFAULT && text() === null}
+            onClick={() => props.onChange(PACKET_DEFAULT)}
+          >
             {t("advanced.max_packet_recommended", PACKET_DEFAULT)}
           </Button>
         </div>
@@ -388,18 +708,35 @@ function PacketSize(props: { label: string; value: number; onChange: (v: number)
   );
 }
 
-const DEFAULT_LOG: DevLog ={ keep_days: 7, day_cap_mb: 100, always_verbose: null, health_every_interval: false };
+const DEFAULT_LOG: DevLog = {
+  keep_days: 7,
+  day_cap_mb: 100,
+  always_verbose: null,
+  health_every_interval: false,
+};
 
 /** A whole number in min..=max from a field; the fallback when it is not one */
-function clampInt(text: string, min: number, max: number, fallback: number): number {
+function clampInt(
+  text: string,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
   const n = Math.round(Number(text));
-  return text.trim() !== "" && Number.isFinite(n) ? Math.min(Math.max(n, min), max) : fallback;
+  return text.trim() !== "" && Number.isFinite(n)
+    ? Math.min(Math.max(n, min), max)
+    : fallback;
 }
 
-function Logging(props: { value: DevLog; save: (v: DevLog) => Promise<boolean> }) {
+function Logging(props: {
+  value: DevLog;
+  save: (v: DevLog) => Promise<boolean>;
+}) {
   const { core } = useApp();
-  const set = (patch: Partial<DevLog>) => void props.save({ ...props.value, ...patch });
-  const changed = () => JSON.stringify(props.value) !== JSON.stringify(DEFAULT_LOG);
+  const set = (patch: Partial<DevLog>) =>
+    void props.save({ ...props.value, ...patch });
+  const changed = () =>
+    JSON.stringify(props.value) !== JSON.stringify(DEFAULT_LOG);
   const logDir = () => core.state.snap!.log_dir;
   const [note, setNote] = createSignal("");
   const [marked, setMarked] = createSignal<number | null>(null);
@@ -424,13 +761,20 @@ function Logging(props: { value: DevLog; save: (v: DevLog) => Promise<boolean> }
             >
               {t("ui.diag.open_logs")}
             </Button>
-            <Button icon="arrow_reset" disabled={!changed()} onClick={() => void props.save({ ...DEFAULT_LOG })}>
+            <Button
+              icon="arrow_reset"
+              disabled={!changed()}
+              onClick={() => void props.save({ ...DEFAULT_LOG })}
+            >
               {t("ui.dev.log_reset")}
             </Button>
           </>
         }
       >
-        <Field label={t("ui.dev.log_keep_days")} hint={t("ui.dev.log_keep_days_hint")}>
+        <Field
+          label={t("ui.dev.log_keep_days")}
+          hint={t("ui.dev.log_keep_days_hint")}
+        >
           {(id, describedBy) => (
             <input
               id={id}
@@ -442,14 +786,22 @@ function Logging(props: { value: DevLog; save: (v: DevLog) => Promise<boolean> }
               aria-describedby={describedBy}
               value={props.value.keep_days}
               onChange={(e) => {
-                const v = clampInt(e.currentTarget.value, 1, 365, props.value.keep_days);
+                const v = clampInt(
+                  e.currentTarget.value,
+                  1,
+                  365,
+                  props.value.keep_days,
+                );
                 e.currentTarget.value = String(v);
                 set({ keep_days: v });
               }}
             />
           )}
         </Field>
-        <Field label={t("ui.dev.log_day_cap")} hint={t("ui.dev.log_day_cap_hint")}>
+        <Field
+          label={t("ui.dev.log_day_cap")}
+          hint={t("ui.dev.log_day_cap_hint")}
+        >
           {(id, describedBy) => (
             <input
               id={id}
@@ -461,7 +813,12 @@ function Logging(props: { value: DevLog; save: (v: DevLog) => Promise<boolean> }
               aria-describedby={describedBy}
               value={props.value.day_cap_mb}
               onChange={(e) => {
-                const v = clampInt(e.currentTarget.value, 10, 10240, props.value.day_cap_mb);
+                const v = clampInt(
+                  e.currentTarget.value,
+                  10,
+                  10240,
+                  props.value.day_cap_mb,
+                );
                 e.currentTarget.value = String(v);
                 set({ day_cap_mb: v });
               }}
@@ -470,7 +827,10 @@ function Logging(props: { value: DevLog; save: (v: DevLog) => Promise<boolean> }
         </Field>
       </Section>
       <Section title={t("ui.dev.log_detail")}>
-        <Field label={t("ui.dev.log_always")} hint={t("ui.dev.log_always_hint")}>
+        <Field
+          label={t("ui.dev.log_always")}
+          hint={t("ui.dev.log_always_hint")}
+        >
           {(id, describedBy) => (
             <Select<"" | LogLevel>
               id={id}
@@ -496,7 +856,11 @@ function Logging(props: { value: DevLog; save: (v: DevLog) => Promise<boolean> }
         />
       </Section>
       <Section title={t("ui.dev.mark")}>
-        <Field label={t("ui.dev.mark_note")} hint={t("ui.dev.mark_hint")} stacked>
+        <Field
+          label={t("ui.dev.mark_note")}
+          hint={t("ui.dev.mark_hint")}
+          stacked
+        >
           {(id, describedBy) => (
             <input
               id={id}

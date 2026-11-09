@@ -393,6 +393,19 @@ schon hat, bleibt erhalten, und die Audiogeräte darunter werden mit den Namen v
 Windows gespeichert. Der Entwicklermodus zeigt den Link Key eines Geräts und die SDP-Dienste,
 die es aufführt.
 
+Die Schlüsseldateien in `pairing\` (Link Keys, LE-Bonds, koordinierte Sets,
+von Windows übernommene LE-Schlüssel, ersetzte Schlüssel von Windows) sind mit
+DPAPI für den Windows-Benutzer verschlüsselt (`win-sys::dpapi`); andere
+Benutzer und auf einen anderen PC kopierte Dateien können sie nicht lesen.
+Klartextdateien früherer Versionen werden gelesen und verschlüsselt neu
+geschrieben. Eine Datei, die sich nicht entschlüsseln lässt, bleibt als
+`<Name>.undecryptable` erhalten, und ihre Geräte werden neu gekoppelt. Den
+LE-TLV von BTstack hält BlueCaster selbst (der `TlvStore` von `btstack-sys`,
+mit dem Inhalt, den `btstack_tlv_windows` schrieb). `keys_for_windows.json`,
+das der Helfer mit Administratorrechten beim Wiederherstellen liest, bleibt
+Klartext (der Helfer kann als anderer Administrator laufen) und wird gelöscht,
+wenn er endet.
+
 ### Audio-Encoder
 
 | Encoder | Bibliothek | Bitrate | Merkmale |
@@ -497,6 +510,7 @@ unten genannten Ordner):
 | `devices\device_codecs.json` | Was jedes klassische Gerät bei seiner letzten Verbindung angeboten hat (und ob OPPO-Ohrhörer nach Hi-Res gefragt wurden) |
 | `pairing\link_keys.txt` | Link Keys: Mit v1 oder 2.0.x gekoppelte Kopfhörer verbinden sich ohne erneute Kopplung wieder |
 | `pairing\le_audio_bonds.tlv`, `pairing\le_audio_csip.txt` | LE Audio (experimentell): LE-Bonds (mit den dauerhaften CCC-Werten des GATT-Servers) und koordinierte Sets |
+| `pairing\windows_le_keys.txt`, `pairing\replaced_windows_keys.json` | Von Windows übernommene LE-Schlüssel, bis ein Stack mit LE sie aufnimmt; die Schlüssel von Windows, die **Originaltreiber wiederherstellen** ersetzt hat |
 | `adapters\adapter_caps.json` | Was ein Stack über jeden Adapter erfahren hat (Unterstützung für LE Audio, Adresse, HCI-Version, sein Name in Windows) |
 | `adapters\driver\<instance id>.json` | Der vorherige Treiber jedes Adapters, dem WinUSB zugewiesen wurde |
 | `firmware\` | Firmware-Dateien (`*.bin`, `*.hcd`, `ibt-*`; die von Intel auch in `firmware\intel\`, wie linux-firmware sie anordnet); Dateien, die frühere Versionen lose im Einstellungsordner abgelegt haben, werden dorthin verschoben |

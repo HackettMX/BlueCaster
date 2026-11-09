@@ -589,11 +589,43 @@ def start_sink(port, capture, log_path, script='emu_sink.py', extra=()):
     raise RuntimeError(f'virtual sink did not start, see {log_path}')
 
 
+def read_secret(path):
+    """A file of the pairing folder: encrypted for the Windows user
+    (win-sys dpapi.rs: "BCDPAPI1" + a DPAPI blob), or plain text as older
+    builds wrote it"""
+    import ctypes
+    from ctypes import wintypes
+
+    class Blob(ctypes.Structure):
+        _fields_ = [('cbData', wintypes.DWORD), ('pbData', ctypes.POINTER(ctypes.c_char))]
+
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except FileNotFoundError:
+        return b''
+    magic = b'BCDPAPI1'
+    if not data.startswith(magic):
+        return data
+    blob = data[len(magic):]
+    entropy = b'BlueCaster pairing keys'
+    src = Blob(len(blob), ctypes.cast(ctypes.create_string_buffer(blob, len(blob)), ctypes.POINTER(ctypes.c_char)))
+    ent = Blob(len(entropy), ctypes.cast(ctypes.create_string_buffer(entropy, len(entropy)),
+                                         ctypes.POINTER(ctypes.c_char)))
+    out = Blob()
+    if not ctypes.windll.crypt32.CryptUnprotectData(ctypes.byref(src), None, ctypes.byref(ent), None, None, 1,
+                                                    ctypes.byref(out)):
+        raise OSError(f'{path}: cannot be decrypted')
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(out.pbData)
+
+
 def read_tlv(path):
-    """BTstack's TLV file (btstack_tlv_windows): tag -> value, the last write
-    of each tag (an empty one deletes it)"""
-    with open(path, 'rb') as f:
-        data = f.read()
+    """BlueCaster's LE TLV file (the format btstack_tlv_windows wrote):
+    tag -> value, the last write of each tag (an empty one deletes it)"""
+    data = read_secret(path)
     if not data.startswith(b'BTstack'):
         return {}
     tags, i = {}, 8
@@ -620,7 +652,8 @@ def ctkd_check(out):
     ltk, irk, identity = m.groups()
     # No link key of the identity address (BTstack would store one, see
     # btstack-sys build.rs patched_sm)
-    keys = [line.split()[0] for line in read_text(os.path.join(out, 'config', 'pairing', 'link_keys.txt')).splitlines()
+    keys = [line.split()[0] for line
+            in read_secret(os.path.join(out, 'config', 'pairing', 'link_keys.txt')).decode().splitlines()
             if line.strip() and not line.startswith('#')]
     if keys != [SINK_ADDRESS.replace(':', '-')]:
         return [f'link_keys.txt holds {keys}']
@@ -1013,6 +1046,14 @@ LINK_CASES = {
     'delay-report': (['--delay-report', '187.5'], ['--duration', '3'], [
         ('bluecaster.log', r'supports delay reporting.*device delay report: 187\.5 ms', True),
         ('sink.log', r'delay report sent \(187\.5 ms\)', True),
+    ]),
+    # A headset that answers OPEN with a stray REJECT of DISCOVER under the
+    # OPEN's label first: BTstack waits on for the OPEN accept
+    'stray-reject': (['--stray-reject'], ['--duration', '3'], [
+        ('sink.log', r'stray reject: REJECT DISCOVER', True),
+        ('bluecaster.log', r'ignoring a response to signal 1 while waiting for 6', True),
+        ('bluecaster.log', r'streaming started', True),
+        ('bluecaster.log', r'stream configuration timed out', False),
     ]),
 }
 LOG_TIME =re.compile(r'(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3})')

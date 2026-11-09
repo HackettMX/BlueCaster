@@ -13,6 +13,7 @@ pub mod com;
 pub mod computer;
 pub mod console;
 pub mod crash;
+pub mod dpapi;
 pub mod driver;
 pub mod elevation;
 pub mod locale;

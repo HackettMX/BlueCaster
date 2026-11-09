@@ -3677,30 +3677,60 @@ html.win-flyout body {
 .import-pairings > .btn {
   flex-shrink: 0;
 }
-/* Its list of Windows' pairings, each ticked to import it */
+/* Its list of Windows' pairings, each ticked to import it: one bordered
+   box, a row per device (icon, name over address), the ticked ones tinted
+   with the accent (issue #86) */
 .import-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--surface-2);
+  overflow: hidden;
+  min-width: min(22rem, 100%);
+}
+.import-list > li + li {
+  border-top: 1px solid var(--border);
 }
 .check-item {
   display: flex;
   align-items: center;
-  gap: var(--s2);
+  gap: var(--s3);
   min-width: 0;
-  padding: var(--s1) 0;
+  padding: var(--s2) var(--s3);
   cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.check-item:hover {
+  background: var(--surface-3);
+}
+.check-item:has(input:checked) {
+  background: color-mix(in srgb, var(--accent-fill) 10%, transparent);
+}
+.check-item:has(input:checked):hover {
+  background: color-mix(in srgb, var(--accent-fill) 16%, transparent);
 }
 .check-item input {
   flex-shrink: 0;
   margin: 0;
 }
-.check-item .mono {
-  margin-left: auto;
+.check-item > .icon {
   flex-shrink: 0;
+  color: var(--text-2);
+}
+.check-item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+.check-item-text > .ellipsis {
+  font-weight: 600;
+}
+.check-item-text > .mono {
   font-size: var(--fs-12);
 }
 

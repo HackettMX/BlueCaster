@@ -521,6 +521,9 @@ struct Opened {
     threads: Vec<JoinHandle<()>>,
     /// Interface 1 (SCO), when the adapter has it and it could be claimed
     sco: Option<Sco>,
+    /// Developer > Debug: ISO data over a MediaTek adapter's interrupt
+    /// interface (crate::iso_intr); None normally
+    iso: Option<crate::iso_intr::IsoInterface>,
 }
 
 /// What `send` and the SCO thread share
@@ -1323,6 +1326,7 @@ impl HciBackend for UsbTransport {
         }
         // Interface 1 only when the stack offers voice
         let sco = if self.sco { Sco::claim(&device) } else { None };
+        let iso = crate::iso_intr::IsoInterface::open(&device, vid, &upstream);
         STATS.take();
         tracing::info!(
             target: "hci",
@@ -1391,6 +1395,7 @@ impl HciBackend for UsbTransport {
             bootloader,
             threads,
             sco,
+            iso,
         });
         Ok(())
     }
@@ -1403,6 +1408,9 @@ impl HciBackend for UsbTransport {
         // SCO transfers have come back
         if let Some(sco) = opened.sco.as_mut() {
             sco.stop();
+        }
+        if let Some(iso) = opened.iso.as_mut() {
+            iso.stop();
         }
         opened.stop.store(true, Ordering::Release);
         // The command writer finishes the command it has (bounded by its
@@ -1547,6 +1555,13 @@ impl HciBackend for UsbTransport {
                     return false;
                 }
                 true
+            }
+            Some(1) if packet_type == HCI_ISO_DATA_PACKET && o.iso.is_some() => {
+                let sent = o.iso.as_ref().is_some_and(|iso| iso.send(packet));
+                if sent {
+                    o.upstream.packet_sent();
+                }
+                sent
             }
             Some(1) => {
                 tracing::trace!(
