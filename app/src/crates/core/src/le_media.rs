@@ -68,7 +68,7 @@ fn name_from_aumid(aumid: &str) -> String {
     if let Some((_, file)) = s.rsplit_once(['\\', '/']) {
         s = file;
     }
-    if s.len() > 4 && s[s.len() - 4..].eq_ignore_ascii_case(".exe") {
+    if s.len() > 4 && s.is_char_boundary(s.len() - 4) && s[s.len() - 4..].eq_ignore_ascii_case(".exe") {
         s = &s[..s.len() - 4];
     }
     if s.is_empty() { "Windows".into() } else { s.into() }
@@ -549,6 +549,11 @@ mod tests {
         assert_eq!(name_from_aumid("Spotify.exe"), "Spotify");
         assert_eq!(name_from_aumid("chrome"), "chrome");
         assert_eq!(name_from_aumid(""), "Windows");
+        // A CJK name is never sliced inside a character (byte 8 of "音乐"
+        // used to land in the middle of '音' and panic)
+        assert_eq!(name_from_aumid("音乐"), "音乐");
+        assert_eq!(name_from_aumid("音乐.EXE"), "音乐");
+        assert_eq!(name_from_aumid(r"C:\应用\播放器.exe"), "播放器");
     }
 
     #[test]
