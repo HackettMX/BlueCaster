@@ -331,11 +331,19 @@ pub fn codec_details(
 ) -> CodecDetails {
     let e = encoder.details();
     let raw = pipeline::packetizer::max_raw(kind, mtu, sample_rate) as u32;
-    let frames_per_packet = e.frame_bytes.filter(|&b| b > 0).map(|b| {
-        let n = raw / b;
-        // SBC counts frames in 4 bits
-        if kind.media_header_len() == 1 { n.min(15) } else { n }
-    });
+    // L2HC sends one 10 ms frame per encoder output and splits a frame
+    // larger than the MTU over several packets, so "frames per packet"
+    // (whole frames merged into one packet) does not describe its packets;
+    // raw / frame_bytes would be 0 at 960 kbps on a 679-byte MTU.
+    let frames_per_packet = if kind == CodecKind::L2hc {
+        None
+    } else {
+        e.frame_bytes.filter(|&b| b > 0).map(|b| {
+            let n = raw / b;
+            // SBC counts frames in 4 bits
+            if kind.media_header_len() == 1 { n.min(15) } else { n }
+        })
+    };
     let sbc = e.sbc.map(|c| SbcDetails {
         channel_mode: channel_mode_key(c.channel_mode),
         blocks: c.blocks.into(),
@@ -1146,12 +1154,14 @@ fn peer_params(remote: &RemoteCaps, kind: CodecKind, channels: u32, req: &Stream
     // bitpool); the SET_CONFIGURATION still echoes the sink's (issue #237)
     let ignore_max = codec::dev::overrides().ignore_sink_max;
     let mut lhdcv5_bitrate_limits = remote.lhdcv5_bitrate_limits();
+    let mut l2hc_bitrates = remote.l2hc_bitrates();
     let mut sbc_max_bitpool = remote.sbc_max_bitpool();
     let mut aac_max_bitrate = if kind == CodecKind::Aac { remote.aac_max_bitrate() } else { 0 };
     let mut opus_max_bitrate = opus_max_bitrate;
     if ignore_max {
         let listed = match kind {
             CodecKind::LhdcV5 => lhdcv5_bitrate_limits & 0x30 != 0,
+            CodecKind::L2hc => l2hc_bitrates != 0,
             CodecKind::Sbc | CodecKind::SbcXq => sbc_max_bitpool >= 2,
             CodecKind::Aac => aac_max_bitrate != 0,
             CodecKind::Opus05 => opus_max_bitrate != 0,
@@ -1167,9 +1177,11 @@ fn peer_params(remote: &RemoteCaps, kind: CodecKind, channels: u32, req: &Stream
         }
         aac_max_bitrate = 0;
         opus_max_bitrate = 0;
+        l2hc_bitrates = 0;
     }
     PeerParams {
         lhdcv5_bitrate_limits,
+        l2hc_bitrates,
         sbc_min_bitpool: remote.sbc_min_bitpool(),
         sbc_max_bitpool,
         sbc_bitpool: match kind {
@@ -1723,14 +1735,15 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         );
         preferred = kind.max_sample_rate();
     }
-    // aptX family, AAC: 44.1 / 48 kHz as the sink lists them; LHDC V5, LDAC:
-    // their rates;
+    // aptX family, AAC: 44.1 / 48 kHz as the sink lists them; LHDC V5, LDAC,
+    // L2HC: their rates (L2HC has 48 / 96 kHz only);
     // Opus, Opus 05: 48 kHz only; aptX Adaptive: 48 kHz, 96 kHz when the
     // profile asks for it (HQ, an R2 sink that lists it). WASAPI resamples
     // to the requested rate.
     let picked = match kind {
         CodecKind::Aptx | CodecKind::AptxHd | CodecKind::AptxLl => remote.pick_aptx_sample_rate(kind, preferred),
         CodecKind::LhdcV5 => remote.pick_lhdcv5_sample_rate(preferred),
+        CodecKind::L2hc => remote.pick_l2hc_sample_rate(preferred),
         CodecKind::Ldac => remote.pick_ldac_sample_rate(preferred),
         CodecKind::FastStream => remote.pick_faststream_sample_rate(preferred),
         CodecKind::AptxAdaptive => remote.pick_aptxad_sample_rate(preferred, req.quality.for_codec(kind)),
@@ -1780,7 +1793,7 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
     );
 
     // LDAC, aptX HD and LHDC V5 carry 24-bit unless the profile says 16
-    // (LHDC V5 only when the sink has 24-bit); aptX Adaptive always
+    // (LHDC V5 / L2HC only when the sink has 24-bit); aptX Adaptive always
     let source_16bit = req.bit_depth.is_none() && mix.is_some_and(|m| m.bits <= 16);
     let bits: u8 = match (kind, req.bit_depth) {
         (CodecKind::AptxAdaptive, _) => 24,
@@ -1789,6 +1802,8 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         _ if source_16bit => 16,
         (CodecKind::Ldac | CodecKind::AptxHd, _) => 24,
         (CodecKind::LhdcV5, _) if remote.lhdcv5_24bit() => 24,
+        // A sink that lists 24-bit only would reject a 16-bit configuration
+        (CodecKind::L2hc, _) if remote.listed_bit_depths(kind).contains(&24) => 24,
         _ => 16,
     };
 
@@ -1899,7 +1914,7 @@ pub(crate) fn run(inner: &Arc<Inner>, req: StreamRequest) {
         bits_per_sample: bits,
         // For AAC: variable bit rate, where the sink lists it
         abr: req.abr
-            && (matches!(kind, CodecKind::Ldac | CodecKind::LhdcV5 | CodecKind::AptxAdaptive)
+            && (matches!(kind, CodecKind::Ldac | CodecKind::LhdcV5 | CodecKind::L2hc | CodecKind::AptxAdaptive)
                 || (kind == CodecKind::Aac && vbr))
             || sbc_abr(&req, kind),
         peer: peer_params(&remote, kind, channels, &req),

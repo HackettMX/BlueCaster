@@ -11,6 +11,7 @@ Bluetooth audio transmitter for Windows. It turns an ordinary Bluetooth adapter,
 | Codec | Bitrate | Sample rate | Bit depth | Windows built-in | BlueCaster |
 |-------|---------|-------------|-----------|:----------------:|:------:|
 | LHDC V5 | 400–1000 kbps, ABR 160–400 | 44.1–192 kHz | 16/24 bit | ❌ | ✅ |
+| L2HC (Huawei) | 320/480/640/960 kbps, ABR | 48/96 kHz | 16/24 bit | ❌ | 🧪 |
 | LDAC | 330/660/990 kbps | 44.1–96 kHz | 16/24/32 bit | ❌ | ✅ |
 | aptX Adaptive | 265/427 kbps (96 kHz: 646) | 48/96 kHz | 24 bit | ❌ | ✅ |
 | Opus (Android) | 256 kbps | 48 kHz | 16 bit | ❌ | 🧪 |
@@ -25,6 +26,8 @@ Bluetooth audio transmitter for Windows. It turns an ordinary Bluetooth adapter,
 | LC3 (LE Audio) | 32–124 kbps per channel | 16–48 kHz | 16 bit | Windows 11 | 🧪 |
 
 ✅ supported · 🧪 experimental: works against a virtual Bluetooth sink, not yet confirmed with real headphones ([reports welcome](https://github.com/SeiyaFunaokaJP/BlueCaster/issues/11)) · 🔧 developer mode only · ❌ not supported
+
+L2HC is Huawei's vendor-specific A2DP codec. Its encoder here is a clean-room C99 port of [L2HC-native-linux](https://github.com/darakcheeff/L2HC-native-linux) (MIT), 10 ms frames with MTU fragmentation. Huawei earbuds advertise the L2HC endpoint only after **Smart HD Audio / L2HC** is enabled in the AI Life app; Auto-select never picks L2HC, choose it on its codec card.
 
 ## Requirements
 
@@ -48,7 +51,7 @@ See the [Setup guide](https://seiyafunaokajp.github.io/BlueCaster/setup) and the
 
 ## Features
 
-- **Codec choice**: picks the best codec the headphones support, or the one you choose; ABR on LHDC V5, LDAC and aptX Adaptive
+- **Codec choice**: picks the best codec the headphones support, or the one you choose; ABR on LHDC V5, LDAC, L2HC and aptX Adaptive
 - **LE Audio (experimental)**: LC3 to LE Audio headphones and earbuds with a Bluetooth 5.2 adapter; tested only against the Bluetooth emulator ([details](https://seiyafunaokajp.github.io/BlueCaster/usage#le-audio))
 - **Capture**: all system audio, a virtual audio device (e.g. VB-CABLE), or one application
 - **Runs in the tray**: keeps streaming with the window closed, reconnects after a lost link and after sleep
@@ -80,4 +83,4 @@ The BlueCaster source code is dual-licensed under the **Apache License 2.0** ([L
 
 > **Important:** The distributed programs include [BTstack](https://github.com/bluekitchen/btstack), whose license allows use and redistribution only for **personal, non-commercial purposes** ("solely for personal benefit and not for any commercial purpose or for monetary gain"). Commercial licenses are available from BlueKitchen GmbH.
 
-Third-party libraries (BTstack, libldac, libopenaptx, fdk-aac, the LHDC V5 encoder, libopus, Tauri, SolidJS and others) are used under their own licenses: see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+Third-party libraries (BTstack, libldac, libopenaptx, fdk-aac, the LHDC V5 encoder, the L2HC encoder, libopus, Tauri, SolidJS and others) are used under their own licenses: see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

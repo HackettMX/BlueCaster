@@ -440,7 +440,7 @@ aptX、aptX HD 和 aptX LL 只支持 44.1 kHz 和 48 kHz（aptX Adaptive 为 48 
 remote supports aptX (SEID ..., [...])
 remote supports aptX Adaptive (SEID ..., [...])
 remote vendor codec 0x........./0x.... (SEID ...) - unsupported
-capability discovery complete (LDAC=false aptX HD=false aptX LL=false aptX=true aptX Adaptive=true SBC=true SBC XQ=true AAC=true LHDC V5=false Opus=false Opus 05=false FastStream=false)
+capability discovery complete (LDAC=false aptX HD=false aptX LL=false aptX=true aptX Adaptive=true SBC=true SBC XQ=true AAC=true LHDC V5=false L2HC=false Opus=false Opus 05=false FastStream=false)
 ```
 
 - `aptX=true`——可以使用经典 aptX（即使同时有 `aptX Adaptive=true`）；“自动”会使用它。

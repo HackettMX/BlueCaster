@@ -83,6 +83,40 @@ const LHDCV5_VERSION_MASK: u8 = 0x0F;
 const LHDCV5_FRAME_5MS: u8 = 0x10;
 const LHDCV5_CAPS_P8: u8 = LHDCV5_VERSION_1 | LHDCV5_FRAME_5MS;
 
+// L2HC (Huawei): vendor 0x0000027D / codec 0x4C35, from the reference
+// project's DKMS build (l2hc-builder.sh) rather than its prose docs, which
+// disagree. Codec information is 10 bytes: the 6-byte vendor header then
+//   6: bits per sample 0x01 16, 0x02 24, 0x04 32
+//   7: rates 0x02 44.1k, 0x04 48k, 0x08 88.2k, 0x10 96k, 0x20 192k
+//   8: bit rates 0x01 320k, 0x02 480k, 0x04 640k, 0x08 960k
+//   9: bits 7..4 low bit rates (96 / 128 / 192 / 256k), bits 2..0 frame
+//      length (0 = 10 ms, 1 = 7.5 ms, 2 = 5 ms)
+pub const L2HC_VENDOR_ID: u32 = 0x0000_027D;
+pub const L2HC_CODEC_ID: u16 = 0x4C35;
+/// Some Huawei devices list 0x3500; accept both and echo back what they sent
+pub const L2HC_CODEC_ID_ALT: u16 = 0x3500;
+const L2HC_INFO_LEN: usize = 10;
+const L2HC_BITS_16: u8 = 0x01;
+const L2HC_BITS_24: u8 = 0x02;
+const L2HC_SR_48000: u8 = 0x04;
+const L2HC_SR_96000: u8 = 0x10;
+/// The encoder's MDCT windows and band tables exist for N=480 and N=960
+/// only: a 44.1 / 88.2 / 192 kHz frame would read the wrong table.
+const L2HC_SR_USABLE: u8 = L2HC_SR_48000 | L2HC_SR_96000;
+const L2HC_BITRATE_320K: u8 = 0x01;
+const L2HC_BITRATE_480K: u8 = 0x02;
+const L2HC_BITRATE_640K: u8 = 0x04;
+const L2HC_BITRATE_960K: u8 = 0x08;
+const L2HC_BITRATE_MASK: u8 = L2HC_BITRATE_320K | L2HC_BITRATE_480K | L2HC_BITRATE_640K | L2HC_BITRATE_960K;
+const L2HC_FRAME_10MS: u8 = 0x00;
+/// L2HC bit rate bits, highest first (bps)
+const L2HC_RATES: [(u8, u32); 4] = [
+    (L2HC_BITRATE_960K, 960_000),
+    (L2HC_BITRATE_640K, 640_000),
+    (L2HC_BITRATE_480K, 480_000),
+    (L2HC_BITRATE_320K, 320_000),
+];
+
 // Opus (Android a2dp_vendor_opus_constants.h; PipeWire OPUS_G_*): one byte,
 //   bits 2..0 channel mode 0x01 mono 0x02 stereo 0x04 dual mono,
 //   bits 4..3 frame duration 0x08 10 ms 0x10 20 ms, bit 7 0x80 48 kHz
@@ -487,6 +521,19 @@ pub fn local_endpoints() -> Vec<LocalEndpoint> {
             &[LHDCV5_SR_48000, LHDCV5_BITS_24, LHDCV5_CAPS_P8],
         ));
     }
+    if CodecKind::L2hc.available() {
+        // 16 / 24-bit, 48 / 96 kHz, all four bit rates, 10 ms frames. The
+        // encoder only has MDCT tables for 480 and 960 sample frames, so the
+        // other rates the codec defines are not offered.
+        eps.push(vendor(
+            CodecKind::L2hc,
+            L2HC_VENDOR_ID,
+            L2HC_CODEC_ID,
+            L2HC_INFO_LEN,
+            &[L2HC_BITS_16 | L2HC_BITS_24, L2HC_SR_USABLE, L2HC_BITRATE_MASK, L2HC_FRAME_10MS],
+            &[L2HC_BITS_24, L2HC_SR_48000, L2HC_BITRATE_960K, L2HC_FRAME_10MS],
+        ));
+    }
     // FastStream: music to the sink at 44.1 / 48 kHz, no voice backchannel
     eps.push(vendor(
         CodecKind::FastStream,
@@ -556,6 +603,7 @@ pub struct RemoteCaps {
     pub aptx_hd: Option<RemoteSep>,
     pub aptx_ll: Option<RemoteSep>,
     pub lhdcv5: Option<RemoteSep>,
+    pub l2hc: Option<RemoteSep>,
     pub opus: Option<RemoteSep>,
     pub opus05: Option<RemoteSep>,
     pub faststream: Option<RemoteSep>,
@@ -576,6 +624,10 @@ pub struct RemoteCaps {
     pub aptxad_info: Vec<u8>,
     /// LHDC V5 codec information (11 bytes) when usable
     pub lhdcv5_info: [u8; LHDCV5_INFO_LEN],
+    /// L2HC codec information (10 bytes) and the codec ID the sink listed
+    /// (0x4C35 or 0x3500), echoed back in SET_CONFIGURATION
+    pub l2hc_info: [u8; L2HC_INFO_LEN],
+    pub l2hc_codec_id: u16,
     /// Opus codec information byte 6 (channel modes, frame durations, rate)
     pub opus_caps: u8,
     /// Opus 05: the main direction's channels, frame durations and bit rate
@@ -628,6 +680,7 @@ impl RemoteCaps {
             CodecKind::AptxHd => self.aptx_hd,
             CodecKind::AptxLl => self.aptx_ll,
             CodecKind::LhdcV5 => self.lhdcv5,
+            CodecKind::L2hc => self.l2hc,
             CodecKind::Opus => self.opus,
             CodecKind::Opus05 => self.opus05,
             CodecKind::FastStream => self.faststream,
@@ -849,6 +902,23 @@ impl RemoteCaps {
             }
             return VendorCapability::Taken(CodecKind::LhdcV5);
         }
+        if vid == L2HC_VENDOR_ID && (cid == L2HC_CODEC_ID || cid == L2HC_CODEC_ID_ALT) {
+            // Like the reference SPA plugin's select_config: do not require
+            // the sink's frame-length bits, we always configure 10 ms.
+            let usable = info.len() >= L2HC_INFO_LEN
+                && info[6] & (L2HC_BITS_16 | L2HC_BITS_24) != 0
+                && info[7] & L2HC_SR_USABLE != 0
+                && info[8] & L2HC_BITRATE_MASK != 0;
+            if !usable || !CodecKind::L2hc.available() {
+                return VendorCapability::Ignored(CodecKind::L2hc, "no 48 / 96 kHz, 16 / 24-bit or 320+ kbps");
+            }
+            if self.l2hc.is_none() {
+                self.l2hc = Some(RemoteSep { seid });
+                self.l2hc_info.copy_from_slice(&info[..L2HC_INFO_LEN]);
+                self.l2hc_codec_id = cid;
+            }
+            return VendorCapability::Taken(CodecKind::L2hc);
+        }
         if vid == OPUS_VENDOR_ID && cid == OPUS_CODEC_ID {
             // 48 kHz, a frame duration, and mono or stereo (dual mono, two
             // independent channels, is not sent)
@@ -923,6 +993,33 @@ impl RemoteCaps {
         self.lhdcv5_info[7] & LHDCV5_BITRATE_LIMITS_MASK
     }
 
+    /// L2HC: the 48 / 96 kHz bits the sink lists (only those the encoder has
+    /// MDCT tables for)
+    pub fn l2hc_rates(&self) -> u8 {
+        self.l2hc_info[7] & L2HC_SR_USABLE
+    }
+
+    /// L2HC: the 16 / 24-bit bits the sink lists
+    pub fn l2hc_bit_depths(&self) -> u8 {
+        self.l2hc_info[6] & (L2HC_BITS_16 | L2HC_BITS_24)
+    }
+
+    /// L2HC: the sink's bit rate bits (codec info byte 8; 0 = not reported)
+    pub fn l2hc_bitrates(&self) -> u8 {
+        self.l2hc_info[8] & L2HC_BITRATE_MASK
+    }
+
+    /// L2HC: highest bit rate the sink lists, in bps
+    pub fn l2hc_max_bitrate(&self) -> u32 {
+        L2HC_RATES.iter().find(|&&(bit, _)| self.l2hc_bitrates() & bit != 0).map(|&(_, bps)| bps).unwrap_or(0)
+    }
+
+    /// The codec ID to send in SET_CONFIGURATION: the one the sink listed,
+    /// or our own when it was forced (no SEP of its own)
+    pub fn l2hc_codec_id(&self) -> u16 {
+        if self.l2hc_codec_id == 0 { L2HC_CODEC_ID } else { self.l2hc_codec_id }
+    }
+
     /// The sample rates the sink lists for `kind`, lowest first, as the
     /// codec settings offer them (issue #86); empty when it said none.
     /// aptX Adaptive lists 96 kHz only when the sink can take it
@@ -953,6 +1050,7 @@ impl RemoteCaps {
                 ],
                 self.lhdcv5_rates(),
             ),
+            CodecKind::L2hc => from_bits(&[(L2HC_SR_48000, 48000), (L2HC_SR_96000, 96000)], self.l2hc_rates()),
             CodecKind::Aptx => aptx(self.aptx_caps),
             CodecKind::AptxHd => aptx(self.aptxhd_caps),
             CodecKind::AptxLl => aptx(self.aptxll_caps),
@@ -977,18 +1075,31 @@ impl RemoteCaps {
         nearest_rate(&self.listed_sample_rates(kind), source)
     }
 
-    /// The bit depths the sink lists for `kind` (LHDC V5 only; empty for
-    /// the others: no choice, or the sink does not say)
+    /// The bit depths the sink lists for `kind` (LHDC V5 and L2HC only;
+    /// empty for the others: no choice, or the sink does not say)
     pub fn listed_bit_depths(&self, kind: CodecKind) -> Vec<u32> {
-        if kind != CodecKind::LhdcV5 || !self.has(kind) {
+        if !self.has(kind) {
             return Vec::new();
         }
-        let bits = self.lhdcv5_info[7] & LHDCV5_BITS_MASK;
-        [(LHDCV5_BITS_16, 16), (LHDCV5_BITS_24, 24)]
-            .into_iter()
-            .filter(|&(b, _)| bits & b != 0)
-            .map(|(_, d)| d)
-            .collect()
+        match kind {
+            CodecKind::LhdcV5 => {
+                let bits = self.lhdcv5_info[7] & LHDCV5_BITS_MASK;
+                [(LHDCV5_BITS_16, 16), (LHDCV5_BITS_24, 24)]
+                    .into_iter()
+                    .filter(|&(b, _)| bits & b != 0)
+                    .map(|(_, d)| d)
+                    .collect()
+            }
+            CodecKind::L2hc => {
+                let bits = self.l2hc_bit_depths();
+                [(L2HC_BITS_16, 16), (L2HC_BITS_24, 24)]
+                    .into_iter()
+                    .filter(|&(b, _)| bits & b != 0)
+                    .map(|(_, d)| d)
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// The largest bit rate (bps) the sink lists for `kind`: AAC's bit rate
@@ -1003,6 +1114,7 @@ impl RemoteCaps {
                 0x30 => 900_000,
                 _ => 0,
             },
+            CodecKind::L2hc => self.l2hc_max_bitrate(),
             _ => 0,
         }
     }
@@ -1139,6 +1251,11 @@ impl RemoteCaps {
                 caps.lhdcv5_info[6] |= LHDCV5_SR_MASK;
                 caps.lhdcv5_info[7] = (caps.lhdcv5_info[7] | LHDCV5_BITS_16 | LHDCV5_BITS_24) & !0x30;
             }
+            CodecKind::L2hc => {
+                caps.l2hc_info[6] |= L2HC_BITS_16 | L2HC_BITS_24;
+                caps.l2hc_info[7] |= L2HC_SR_USABLE;
+                caps.l2hc_info[8] |= L2HC_BITRATE_MASK;
+            }
             CodecKind::Opus05 => caps.opus05_bitrate = 0,
             CodecKind::AptxAdaptive | CodecKind::Opus => {}
         }
@@ -1210,6 +1327,7 @@ impl RemoteCaps {
             self.aptx_ll,
             self.aptxad,
             self.lhdcv5,
+            self.l2hc,
             self.opus,
             self.opus05,
             self.faststream,
@@ -1312,6 +1430,27 @@ impl RemoteCaps {
             }
         }
         wanted
+    }
+
+    /// Capture rate for L2HC: 48 / 96 kHz as the sink lists them, preferring
+    /// `wanted`. Other rates have no MDCT window in the encoder.
+    pub fn pick_l2hc_sample_rate(&self, wanted: u32) -> u32 {
+        let rates = self.l2hc_rates();
+        let rate = match wanted {
+            96000 if rates & L2HC_SR_96000 != 0 => 96000,
+            48000 if rates & L2HC_SR_48000 != 0 => 48000,
+            _ => {
+                if rates & L2HC_SR_48000 != 0 {
+                    48000
+                } else if rates & L2HC_SR_96000 != 0 {
+                    96000
+                } else {
+                    wanted.min(96000)
+                }
+            }
+        };
+        tracing::debug!("caps: L2HC rate {wanted} -> {rate} (rates 0x{rates:02x})");
+        rate
     }
 
     /// The SET_CONFIGURATION for a stream of `kind`
@@ -1498,6 +1637,33 @@ impl RemoteCaps {
                 let mut info = vendor_header(LHDCV5_VENDOR_ID, LHDCV5_CODEC_ID);
                 info.extend_from_slice(&[freq, bits | self.lhdcv5_bitrate_limits(), LHDCV5_CAPS_P8]);
                 info.resize(LHDCV5_INFO_LEN, 0);
+                ConfigRequest::Vendor(info)
+            }
+            CodecKind::L2hc => {
+                let freq = match sample_rate {
+                    48000 => L2HC_SR_48000,
+                    96000 => L2HC_SR_96000,
+                    _ => 0,
+                };
+                if freq & self.l2hc_rates() == 0 {
+                    return Err(ConfigError::SampleRate(kind, sample_rate));
+                }
+                let bits = if bits_per_sample == 24 { L2HC_BITS_24 } else { L2HC_BITS_16 };
+                if bits & self.l2hc_bit_depths() == 0 {
+                    return Err(ConfigError::BitDepth(kind, bits_per_sample));
+                }
+                // The highest bit rate both sides support. The sink rebuilds
+                // a frame from the media payload's first-fragment flag
+                // (0x01 / 0x00), so quality modes and ABR may send shorter
+                // frames over this configuration, as the reference SPA
+                // plugin's Auto / TXQ profiles do.
+                let rate = L2HC_RATES
+                    .iter()
+                    .find(|&&(bit, _)| self.l2hc_bitrates() & bit != 0)
+                    .map(|&(bit, _)| bit)
+                    .unwrap_or(L2HC_BITRATE_960K);
+                let mut info = vendor_header(L2HC_VENDOR_ID, self.l2hc_codec_id());
+                info.extend_from_slice(&[bits, freq, rate, L2HC_FRAME_10MS]);
                 ConfigRequest::Vendor(info)
             }
             CodecKind::Opus => {
@@ -2597,7 +2763,7 @@ mod tests {
         assert_eq!(ep.caps, vec![0xE0, 0, 0, 0, 0x01, 0x00, 0x9B]);
         assert_eq!(ep.config, vec![0xE0, 0, 0, 0, 0x01, 0x00, 0x92]);
         // BTstack's static endpoint pool (MAX_NR_AVDTP_STREAM_ENDPOINTS)
-        assert!(eps.len() <= 11);
+        assert!(eps.len() <= 12);
     }
 
     /// PipeWire's opus_05 sink SEP (codec_fill_caps): stereo at front left +
@@ -2700,7 +2866,7 @@ mod tests {
         config.resize(24, 0);
         assert_eq!(ep.config, config);
         // BTstack's static endpoint pool (MAX_NR_AVDTP_STREAM_ENDPOINTS)
-        assert!(eps.len() <= 11);
+        assert!(eps.len() <= 12);
     }
 
     #[test]
@@ -2892,7 +3058,7 @@ mod tests {
     fn experimental_codecs_off_are_never_used() {
         use CodecKind::*;
         let experimental: Vec<_> = CodecKind::ALL.into_iter().filter(|k| k.experimental()).collect();
-        assert_eq!(experimental, [AptxHd, AptxLl, Opus, Opus05, FastStream]);
+        assert_eq!(experimental, [AptxHd, AptxLl, Opus, Opus05, FastStream, L2hc]);
         if !Opus.available() {
             return;
         }
@@ -2936,7 +3102,56 @@ mod tests {
         assert_eq!(ep.config.len(), 40);
         // BTstack's endpoint pool and the shim's buffers (btstack_config.h,
         // shim.c) hold them all
-        assert!(eps.len() <= 11);
+        assert!(eps.len() <= 12);
         assert!(eps.iter().all(|e| e.caps.len() <= 40 && e.config.len() <= 40));
+    }
+
+    /// L2HC: the 10-byte codec information, capability parsing and
+    /// SET_CONFIGURATION (vendor 0x027D / codec 0x4C35, or 0x3500)
+    #[test]
+    fn l2hc_endpoint_caps_and_configuration() {
+        if !CodecKind::L2hc.available() {
+            return;
+        }
+        let eps = local_endpoints();
+        let ep = eps.iter().find(|e| e.kind == CodecKind::L2hc).unwrap();
+        assert_eq!(ep.codec_type, CODEC_TYPE_VENDOR);
+        assert_eq!(ep.caps, vec![0x7D, 0x02, 0, 0, 0x35, 0x4C, 0x03, 0x14, 0x0F, 0x00]);
+        assert_eq!(ep.config, vec![0x7D, 0x02, 0, 0, 0x35, 0x4C, 0x02, 0x04, 0x08, 0x00]);
+
+        // A FreeBuds-style sink listing 24-bit, 48 / 96 kHz, all four rates
+        let mut caps = RemoteCaps::default();
+        let info = [0x7D, 0x02, 0, 0, 0x35, 0x4C, 0x02, 0x14, 0x0F, 0x00];
+        assert_eq!(caps.add_vendor(1, &info), VendorCapability::Taken(CodecKind::L2hc));
+        assert!(caps.has(CodecKind::L2hc));
+        assert_eq!(caps.listed_sample_rates(CodecKind::L2hc), vec![48000, 96000]);
+        assert_eq!(caps.listed_bit_depths(CodecKind::L2hc), vec![24]);
+        assert_eq!(caps.listed_max_bitrate(CodecKind::L2hc), 960_000);
+        assert_eq!(caps.pick_l2hc_sample_rate(96000), 96000);
+        assert_eq!(caps.pick_l2hc_sample_rate(88200), 48000);
+
+        let c = caps.configuration(CodecKind::L2hc, 96000, 2, 24).unwrap();
+        assert_eq!(c.remote_seid, 1);
+        let ConfigRequest::Vendor(bytes) = c.request else { panic!("vendor configuration") };
+        assert_eq!(bytes, vec![0x7D, 0x02, 0, 0, 0x35, 0x4C, 0x02, 0x10, 0x08, 0x00]);
+        assert!(caps.configuration(CodecKind::L2hc, 44100, 2, 24).is_err());
+        assert!(caps.configuration(CodecKind::L2hc, 48000, 2, 16).is_err());
+
+        // Huawei devices that list the alternate codec ID: accept and echo it
+        let mut alt = RemoteCaps::default();
+        let mut alt_info = info;
+        alt_info[4..6].copy_from_slice(&L2HC_CODEC_ID_ALT.to_le_bytes());
+        assert_eq!(alt.add_vendor(7, &alt_info), VendorCapability::Taken(CodecKind::L2hc));
+        let c = alt.configuration(CodecKind::L2hc, 48000, 2, 24).unwrap();
+        let ConfigRequest::Vendor(bytes) = c.request else { panic!("vendor configuration") };
+        assert_eq!(&bytes[4..6], &L2HC_CODEC_ID_ALT.to_le_bytes());
+
+        // A sink with only 320 kbps / 48 kHz / 16-bit: configure that rate
+        let mut low = RemoteCaps::default();
+        low.add_vendor(3, &[0x7D, 0x02, 0, 0, 0x35, 0x4C, 0x01, 0x04, 0x01, 0x00]);
+        let c = low.configuration(CodecKind::L2hc, 48000, 2, 16).unwrap();
+        let ConfigRequest::Vendor(bytes) = c.request else { panic!("vendor configuration") };
+        assert_eq!(bytes[8], 0x01);
+        assert_eq!(low.listed_max_bitrate(CodecKind::L2hc), 320_000);
     }
 }

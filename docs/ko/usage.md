@@ -440,7 +440,7 @@ aptX, aptX HD, aptX LL은 44.1 kHz와 48 kHz만 지원합니다(aptX Adaptive는
 remote supports aptX (SEID ..., [...])
 remote supports aptX Adaptive (SEID ..., [...])
 remote vendor codec 0x........./0x.... (SEID ...) - unsupported
-capability discovery complete (LDAC=false aptX HD=false aptX LL=false aptX=true aptX Adaptive=true SBC=true SBC XQ=true AAC=true LHDC V5=false Opus=false Opus 05=false FastStream=false)
+capability discovery complete (LDAC=false aptX HD=false aptX LL=false aptX=true aptX Adaptive=true SBC=true SBC XQ=true AAC=true LHDC V5=false L2HC=false Opus=false Opus 05=false FastStream=false)
 ```
 
 - `aptX=true` -- 기본 aptX를 사용할 수 있습니다(`aptX Adaptive=true`이어도 마찬가지). 자동은 이를 사용합니다.

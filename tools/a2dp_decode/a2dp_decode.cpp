@@ -14,6 +14,8 @@
  *   Opus 05           libopus (PipeWire's A2DP Opus, vendor 0x000005F1 / 0x1005;
  *                     one stream: a plain Opus packet)
  *   LDAC, LHDC V5     no open-source decoder: frame headers are validated only
+ *   L2HC              no open-source decoder: frames are reassembled from
+ *                     their fragments and their length / sync byte checked
  *   aptX Adaptive     no decoder here either: its own RTP header (sample
  *                     count timestamp, latency mode SSRC) and the codec
  *                     packet header are validated only
@@ -68,7 +70,7 @@ static uint32_t be32(const uint8_t *p) {
 /* Codec configuration (AVDTP Media Codec capability)                       */
 /* ------------------------------------------------------------------------ */
 
-enum class Codec { Unknown, SBC, AAC, Aptx, AptxHD, AptxLL, LDAC, LHDCV5, FastStream, Opus, Opus05, AptxAdaptive };
+enum class Codec { Unknown, SBC, AAC, Aptx, AptxHD, AptxLL, LDAC, LHDCV5, L2HC, FastStream, Opus, Opus05, AptxAdaptive };
 
 static const char *codec_name(Codec c) {
     switch (c) {
@@ -79,6 +81,7 @@ static const char *codec_name(Codec c) {
     case Codec::AptxLL: return "aptX LL";
     case Codec::LDAC:   return "LDAC";
     case Codec::LHDCV5: return "LHDC V5";
+    case Codec::L2HC:   return "L2HC";
     case Codec::FastStream: return "FastStream";
     case Codec::Opus:   return "Opus";
     case Codec::Opus05: return "Opus 05";
@@ -96,6 +99,7 @@ static const char *codec_file_tag(Codec c) {
     case Codec::AptxLL: return "aptxll";
     case Codec::LDAC:   return "ldac";
     case Codec::LHDCV5: return "lhdcv5";
+    case Codec::L2HC:   return "l2hc";
     case Codec::FastStream: return "faststream";
     case Codec::Opus:   return "opus";
     case Codec::Opus05: return "opus05";
@@ -104,8 +108,10 @@ static const char *codec_file_tag(Codec c) {
     }
 }
 
-/* LDAC, LHDC V5 and aptX Adaptive have no decoder here: frame headers are validated only */
-static bool headers_only(Codec c) { return c == Codec::LDAC || c == Codec::LHDCV5 || c == Codec::AptxAdaptive; }
+/* LDAC, LHDC V5, L2HC and aptX Adaptive have no decoder here: frame headers are validated only */
+static bool headers_only(Codec c) {
+    return c == Codec::LDAC || c == Codec::LHDCV5 || c == Codec::L2HC || c == Codec::AptxAdaptive;
+}
 
 struct CodecConfig {
     Codec codec = Codec::Unknown;
@@ -121,6 +127,10 @@ struct CodecConfig {
     /* LHDC V5: samples per 5 ms frame (240 / 480 / 960) and bit depth */
     uint32_t lhdc_frame_samples = 0;
     int lhdc_bits = 0;
+    /* L2HC: samples per 10 ms frame (480 / 960), bit depth and configured
+     * bit rate (kbps); the encoder's frame is bitrate * 10 / 8 bytes */
+    uint32_t l2hc_frame_samples = 0;
+    int l2hc_bits = 0, l2hc_kbps = 0;
     /* Opus: samples per frame at 48 kHz (480 / 960) */
     uint32_t opus_frame_samples = 0;
     /* aptX Adaptive: an R2 sink (capability extension), so frame type 3
@@ -261,6 +271,31 @@ static CodecConfig parse_media_codec(const uint8_t *p, size_t n) {
                 c.sample_rate, c.lhdc_bits, v[1] & 0xF0, v[3], v[4]);
             if (c.sample_rate == 0 || c.lhdc_bits == 0 || !ver1 || !f5ms)
                 c.desc += " (INVALID: not exactly one option per field, or not V5 ver.1 / 5 ms)";
+            return c;
+        }
+        if (vendor == 0x27D && (vcodec == 0x4C35 || vcodec == 0x3500) && vlen >= 4) {
+            /* Huawei L2HC (a2dp_l2hc_t): P6 bit depth (0x01 16, 0x02 24,
+             * 0x04 32), P7 sample rate (0x04 48k, 0x10 96k), P8 bit rate
+             * (0x01 320 .. 0x08 960 kbps, 0x10.. low rates), P9 frame
+             * length (0x00 = 10 ms). BlueCaster offers 48 / 96 kHz and
+             * 16 / 24-bit only; stereo on the wire. Some sinks list codec
+             * ID 0x3500 instead of 0x4C35: both are the same codec. */
+            c.codec = Codec::L2HC;
+            c.channels = 2;
+            uint8_t bits = v[0] & 0x07;
+            c.l2hc_bits = bits == 0x01 ? 16 : bits == 0x02 ? 24 : bits == 0x04 ? 32 : 0;
+            uint8_t sr = v[1] & 0x3F;
+            c.sample_rate = sr == 0x04 ? 48000 : sr == 0x10 ? 96000 : 0;
+            c.l2hc_frame_samples = c.sample_rate / 100;
+            static const int kbps[4] = {320, 480, 640, 960};
+            static const int low_kbps[4] = {96, 128, 192, 256};
+            int rate = single_bit_index(v[2] & 0x0F, 4);
+            int low_rate = single_bit_index((v[2] >> 4) & 0x0F, 4);
+            c.l2hc_kbps = rate >= 0 ? kbps[rate] : (low_rate >= 0 ? low_kbps[low_rate] : 0);
+            c.desc = strf("L2HC %u Hz, %d-bit, stereo, %d kbps, %s frames, codec ID 0x%04X",
+                c.sample_rate, c.l2hc_bits, c.l2hc_kbps, v[3] == 0x00 ? "10 ms" : "?", vcodec);
+            if (c.sample_rate == 0 || c.l2hc_bits == 0 || c.l2hc_kbps == 0 || v[3] != 0x00)
+                c.desc += " (INVALID: not exactly one option per field, or not 10 ms frames)";
             return c;
         }
         if (vendor == 0xE0 && vcodec == 0x0001 && vlen >= 1) {
@@ -489,6 +524,7 @@ public:
         case Codec::AptxHD: decode_aptx(pl, pn); break;
         case Codec::LDAC:   check_ldac(pl, pn); break;
         case Codec::LHDCV5: check_lhdcv5(pl, pn); break;
+        case Codec::L2HC:   check_l2hc(pl, pn); break;
         case Codec::Opus:
         case Codec::Opus05: decode_opus(pl, pn); break;
         default: break;
@@ -496,6 +532,7 @@ public:
     }
 
     void finish() {
+        if (cfg_.codec == Codec::L2HC) finish_l2hc_frame();
         if (aptx_) {
             size_t left = aptx_decode_sync_finish(aptx_);
             if (left) issue("aptX: undecoded bytes left at end of stream");
@@ -555,6 +592,12 @@ public:
                        (unsigned long long)ldac_min_fpp_, (unsigned long long)ldac_max_fpp_,
                        (unsigned long long)lhdc_seq_gaps_);
             }
+            if (cfg_.codec == Codec::L2HC && frames_ > 0) {
+                printf("  L2HC frames   : %llu-%llu bytes, %llu-%llu packet(s) per frame, sync byte 0x%02X\n",
+                       (unsigned long long)ldac_min_frame_, (unsigned long long)ldac_max_frame_,
+                       (unsigned long long)ldac_min_fpp_, (unsigned long long)ldac_max_fpp_,
+                       cfg_.sample_rate == 96000 ? 0x7E : 0x5C);
+            }
             if (!wav_.path().empty() && samples_ > 0)
                 printf("  WAV           : %s\n", wav_.path().c_str());
         }
@@ -597,7 +640,11 @@ private:
             /* samples_ already includes the previous packet (skipped while a
              * decoder is still producing no audio, e.g. AAC before sync) */
             uint64_t prev_samples = samples_ - samples_at_last_ts_;
-            if (prev_samples > 0 && (uint32_t)(ts - last_ts_) != (uint32_t)prev_samples)
+            /* L2HC counts a frame's samples when its last fragment arrives,
+             * not at every packet (a frame may span several packets sharing
+             * one timestamp), so the per-packet step does not apply. */
+            if (prev_samples > 0 && cfg_.codec != Codec::L2HC
+                && (uint32_t)(ts - last_ts_) != (uint32_t)prev_samples)
                 issue("RTP: timestamp step differs from the samples in the previous packet");
             if ((p[1] & 0x7F) != rtp_pt_) issue("RTP: payload type changed");
         }
@@ -807,6 +854,58 @@ private:
         wav_.write(pcm.data(), (size_t)got * cfg_.channels * sizeof(opus_int16), 48000, (uint16_t)cfg_.channels, 16);
     }
 
+    /* L2HC (Huawei Fluoride / L2HC-native-linux): one 10 ms frame per
+     * encoder output, split over several media packets when it is larger
+     * than the MTU. The 1-byte media payload header is 0x01 on the first
+     * fragment and 0x00 on continuations; every fragment of a frame keeps
+     * the frame's RTP timestamp. A frame is 320/480/640/960 kbps * 10 ms /
+     * 8 = 400/600/800/1200 bytes, with a 0x5C (48 kHz) or 0x7E (96 kHz)
+     * sync byte. A frame is complete when the next first fragment arrives
+     * (or at the end of the stream), not when a particular length is
+     * reached: 400 bytes can also be the first fragment of a longer frame
+     * on a small MTU. */
+    void finish_l2hc_frame() {
+        if (!l2hc_have_frame_) return;
+        l2hc_have_frame_ = false;
+        size_t len = l2hc_frame_.size();
+        bool size_ok = len == 400 || len == 600 || len == 800 || len == 1200;
+        if (!size_ok)
+            issue(strf("L2HC: frame of %zu bytes is not one of 400/600/800/1200", len));
+        uint8_t sync = cfg_.sample_rate == 96000 ? 0x7E : 0x5C;
+        if (len && l2hc_frame_[0] != sync)
+            issue(strf("L2HC: frame sync byte 0x%02X, expected 0x%02X", l2hc_frame_[0], sync));
+        if (size_ok) {
+            frames_++;
+            samples_ += cfg_.l2hc_frame_samples;
+            ldac_frame_bytes_ += len;
+            if (ldac_min_frame_ == 0 || len < ldac_min_frame_) ldac_min_frame_ = len;
+            if (len > ldac_max_frame_) ldac_max_frame_ = len;
+            if (ldac_min_fpp_ == 0 || l2hc_fragments_ < ldac_min_fpp_) ldac_min_fpp_ = l2hc_fragments_;
+            if (l2hc_fragments_ > ldac_max_fpp_) ldac_max_fpp_ = l2hc_fragments_;
+        }
+        l2hc_frame_.clear();
+    }
+
+    void check_l2hc(const uint8_t *p, size_t n) {
+        if (n < 1) { issue("L2HC: empty media payload"); return; }
+        uint8_t flag = p[0];
+        if (flag > 1) { issue("L2HC: fragment flag is neither 0x01 nor 0x00"); return; }
+        if (flag == 0x01) {
+            finish_l2hc_frame();
+            l2hc_have_frame_ = true;
+            l2hc_first_ts_ = last_ts_;
+            l2hc_fragments_ = 1;
+        } else {
+            if (!l2hc_have_frame_) { issue("L2HC: continuation without a first fragment"); return; }
+            l2hc_fragments_++;
+            if (last_ts_ != l2hc_first_ts_)
+                issue("L2HC: fragments of one frame carry different RTP timestamps");
+        }
+        l2hc_frame_.insert(l2hc_frame_.end(), p + 1, p + n);
+        if (l2hc_frame_.size() > 1200)
+            issue("L2HC: frame grew past the largest L2HC frame (1200 bytes)");
+    }
+
     /* LHDC V5 (BlueCaster / Android a2dp_vendor_lhdcv5_encoder.cc): 2-byte media
      * payload header [frames << 2 | latency] [sequence], then frames each
      * starting with a 2-byte LE header whose low 10 bits are the encoded
@@ -898,6 +997,11 @@ private:
     bool lhdc_have_seq_ = false;
     uint8_t lhdc_last_seq_ = 0;
     uint64_t lhdc_seq_gaps_ = 0;
+    /* L2HC's frame being reassembled from fragments */
+    bool l2hc_have_frame_ = false;
+    std::vector<uint8_t> l2hc_frame_;
+    uint32_t l2hc_first_ts_ = 0;
+    uint64_t l2hc_fragments_ = 0;
 
     uint64_t packets_ = 0, payload_bytes_ = 0, frames_ = 0, samples_ = 0;
     double first_t_ = 0, last_t_ = 0, max_gap_ = 0;

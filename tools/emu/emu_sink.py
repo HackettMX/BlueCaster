@@ -331,7 +331,7 @@ class PacketLoggerSnooper(Snooper):
 
 
 # Codec of each sink_codec_capabilities() entry, in order (for --in-use)
-CODEC_NAMES = ['sbc', 'aac', 'aptx', 'aptxhd', 'aptxll', 'ldac', 'lhdcv5', 'faststream', 'opus', 'opus05', 'aptxad']
+CODEC_NAMES = ['sbc', 'aac', 'aptx', 'aptxhd', 'aptxll', 'ldac', 'lhdcv5', 'l2hc', 'faststream', 'opus', 'opus05', 'aptxad']
 
 # aptX Adaptive as the B&W Px7 S2e lists it (AKS-Logic/aptx-adaptive-linux
 # spec/px7s2e-a2dp-caps.md), after the vendor header: an R1 sink, 48 + 44.1
@@ -411,6 +411,10 @@ def sink_codec_capabilities(sbc_dual=True, sbc_max_bitpool=53, aptxad_r2=False, 
         # (limited: 44.1 / 48 kHz and at most 400 kbps, as issue #237's earbuds)
         vendor(0x0000053A, 0x4C35, [0x30, 0x16, 0x11, 0x40, 0x00] if lhdcv5_limited
                else [0x35, 0x06, 0x11, 0x40, 0x00]),
+        # L2HC (Huawei a2dp_l2hc_t): 16 / 24-bit, 48 / 96 kHz, all four
+        # 320..960 kbps rates, 10 ms frames. Vendor 0x0000027D, codec 0x4C35
+        # (some sinks list 0x3500 instead; BlueCaster echoes either one)
+        vendor(0x0000027D, 0x4C35, [0x03, 0x14, 0x0F, 0x00]),
         # FastStream (PipeWire a2dp_faststream_t) as a CSR headset lists it:
         # music (sink) and voice (source) directions, music at 44.1 / 48 kHz,
         # voice at 16 kHz
@@ -702,9 +706,10 @@ async def main(args):
             if args.codecs and name not in args.codecs and not (name == 'ldac' and huawei and huawei.ldac):
                 continue
             # BTstack 1.8.1 keeps at most 10 discovered SEPs (a2dp.c
-            # AVDTP_MAX_SEP_NUM) and overflows its array beyond that: aptX
-            # Adaptive, the 11th, only when asked for with --codecs
-            if not args.codecs and name == 'aptxad':
+            # AVDTP_MAX_SEP_NUM) and overflows its array beyond that: L2HC
+            # and aptX Adaptive, the 11th and 12th, only when asked for
+            # with --codecs (L2HC is experimental, as aptX Adaptive is)
+            if not args.codecs and name in ('l2hc', 'aptxad'):
                 continue
             sink = server.add_sink(capabilities)
             sink.on('configuration', lambda sink=sink, name=name: remember_configuration(name, sink))

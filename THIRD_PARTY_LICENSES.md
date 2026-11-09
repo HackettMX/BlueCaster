@@ -31,6 +31,7 @@ repository. The Rust crates are pinned in `Cargo.lock`, the JavaScript packages 
 | liblc3 (lc3-google, bundled in BTstack) | as in BTstack `5bc5cbdbe` (`3rd-party/lc3-google/`) | Apache-2.0 | Google LLC | LC3 encoding for the experimental LE Audio support (decoding in `bluecaster_decode`, §14), §17 | `bluecaster-core.exe` |
 | micro-ecc (bundled in BTstack) | as in BTstack `5bc5cbdbe` (`3rd-party/micro-ecc/`) | BSD-2-Clause | Kenneth MacKay | P-256 for LE Secure Connections (experimental LE Audio), §18 | `bluecaster-core.exe` |
 | LHDC-V5-Encoder (C port of the AOSP LHDC V5 encoder) | commit `3f9d198` | Apache-2.0; `src/lhdcv5_fft.c` BSD-3-Clause | The Android Open Source Project; Mark Borgerding (KISS FFT) | LHDC V5 audio encoding, §8 | `bluecaster-core.exe` |
+| L2HC native encoder (clean-room C99, vendored) | v1.1.1 (commit `d702e2d`) | MIT | Copyright (c) 2026 darakcheeff | L2HC audio encoding (experimental), §22 | `bluecaster-core.exe` |
 | libopus | 1.5.2 (tag `v1.5.2`, commit `ddbe483`) | BSD-3-Clause | Xiph.Org, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo, Mozilla, Amazon | Opus audio encoding (decoding in `bluecaster_decode`, §14), §16 | `bluecaster-core.exe` |
 | aptx-adaptive (AKS-Logic/aptx-adaptive-linux, vendored) | upstream commit `25099004b2d3` (2026-10-22), crate 0.1.0 | MIT | Prateek Mittal (AKS-Logic) | aptX Adaptive encoding (experimental), §19 | `bluecaster-core.exe` |
 | HFreebuds (protocol description, packet cutting and test vectors) | commit `dab1f7e` | MIT | N2K02 | Huawei earbuds' sound quality mode (`app/src/crates/core/src/vendor/huawei.rs`), §20 | `bluecaster-core.exe` |
@@ -71,6 +72,7 @@ The installer (`BlueCaster-<version>-win64-setup.exe`) installs, and the portabl
 | `licenses/third-party/fdk-aac-NOTICE.txt` | Fraunhofer FDK AAC Codec Library license (`extern/fdk-aac/NOTICE`) |
 | `licenses/third-party/libopenaptx-LGPL-2.1.txt` | GNU LGPL 2.1 text for libopenaptx (`extern/libopenaptx/COPYING`) |
 | `licenses/third-party/lhdcv5-enc-LICENSE.txt` | LHDC V5 encoder license (Apache-2.0 text, `extern/lhdcv5-enc/LICENSE`); its KISS FFT notice is in §8 of this document |
+| `licenses/third-party/l2hc-native-LICENSE.txt` | L2HC encoder MIT license (`app/src/crates/l2hc-sys/csrc/LICENSE`), §22 |
 | `licenses/third-party/opus-COPYING.txt` | libopus license (BSD-3-Clause, `extern/opus/COPYING`) |
 | `licenses/third-party/aptx-adaptive-LICENSE.txt` | aptX Adaptive encoder MIT license (`app/src/crates/aptx-adaptive/LICENSE`) |
 | `licenses/third-party/fluentui-system-icons.txt` | Fluent UI System Icons MIT license (`app/src/ui/LICENSES/fluentui-system-icons.txt`) |
@@ -977,6 +979,65 @@ SOFTWARE.
 
 ---
 
+## 22. L2HC native encoder (clean-room C99)
+
+- **Source**: <https://github.com/darakcheeff/L2HC-native-linux>
+- **Version**: v1.1.1 (commit `d702e2d`), the `src/l2hc_native.c`,
+  `src/l2hc_native.h` and `src/l2hc_tables.h` of that release
+- **Path in project**: `app/src/crates/l2hc-sys/csrc/` (the three C files and
+  `LICENSE`), built into `bluecaster-core.exe` by the `l2hc-sys` crate's
+  `build.rs`; `app/src/crates/l2hc-sys/src/lib.rs` is the Rust FFI and safe
+  wrapper, `app/src/crates/codec/src/l2hc.rs` implements BlueCaster's
+  `Encoder` trait. The A2DP vendor capability bits, SET_CONFIGURATION and
+  media fragmentation follow the project's documentation and its PipeWire
+  SPA plugin; only the MIT-licensed native encoder sources were copied
+- **Changes to the vendored files**: MSVC compatibility macros in
+  `l2hc_native.h` (`__attribute__((packed))` / `aligned`) and a guarded
+  `#pragma GCC unroll 8` in `l2hc_native.c`. The DSP tables are unchanged
+- **License**: MIT
+- **Copyright**: Copyright (c) 2026 darakcheeff
+- **Usage**: Huawei L2HC audio encoding (experimental). The encoder is a
+  clean-room implementation; no Huawei proprietary code, library or binary
+  is included. L2HC itself may be covered by third-party patents; this
+  license grants no patent rights, as with the other codecs in this document
+
+### License Text (verbatim, `app/src/crates/l2hc-sys/csrc/LICENSE`)
+
+```text
+MIT License
+
+Copyright (c) 2026 darakcheeff
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### Obligations
+
+The copyright notice and permission notice above must accompany copies or
+substantial portions of the software. The installer and the portable zip
+ship them as `licenses/third-party/l2hc-native-LICENSE.txt`; the vendored
+source carries `app/src/crates/l2hc-sys/csrc/LICENSE`, and this document
+reproduces it. **Settings > About BlueCaster** links to the third-party
+licenses.
+
+---
+
 ## License Compatibility Matrix
 
 | Component | License | Compatible with Apache-2.0 / MIT? | Notes |
@@ -986,6 +1047,7 @@ SOFTWARE.
 | LHDC-V5-Encoder | Apache-2.0 AND BSD-3-Clause | Yes | Permissive; KISS FFT notice reproduced in §8 |
 | libopus | BSD-3-Clause | Yes | Permissive; notice shipped as `licenses/third-party/opus-COPYING.txt` (§16) |
 | aptx-adaptive | MIT | Yes | Permissive; notice shipped as `licenses/third-party/aptx-adaptive-LICENSE.txt` (§19) |
+| L2HC native encoder | MIT | Yes | Permissive; notice shipped as `licenses/third-party/l2hc-native-LICENSE.txt` (§22) |
 | Bluedroid SBC encoder (Rust port) | Apache-2.0 | Yes | Permissive |
 | Bluedroid SBC encoder and decoder (C, mSBC voice) | Apache-2.0 | Yes | Permissive |
 | libopenaptx | LGPL-2.1+ | Yes (with care) | Must allow library replacement / relinking. Apache-2.0 is compatible with (L)GPL v3, which "or later" permits |

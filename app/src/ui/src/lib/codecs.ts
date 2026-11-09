@@ -1,11 +1,13 @@
 // The codecs a profile can ask for and what each allows, as v1's profile
 // dialog (wx_profile_dialog.cpp on the develop branch, update_codec_dependent): quality
 // modes with their bitrates (since issue #86 High / Medium / Low for LDAC
-// and LHDC V5, LHDC V5's Medium-High too (issue #203), High / Low Latency for aptX Adaptive, only High, the highest
+// and LHDC V5, LHDC V5's Medium-High too (issue #203), L2HC's four rates
+// 960 / 640 / 480 / 320 too, High / Low Latency for aptX Adaptive, only High, the highest
 // bit rate the device takes, for the others; core: Quality::for_codec),
-// ABR only for LDAC / LHDC V5 (and Auto, which may
+// ABR only for LDAC / LHDC V5 / L2HC (and Auto, which may
 // pick them; v2 adds SBC / SBC XQ's adaptive bitpool), 24-bit and 88.2 / 96 kHz only for LDAC and LHDC V5, 192 kHz and
-// "mhq" only for LHDC V5, no quality choice for the aptX family (but aptX
+// "mhq" only for LHDC V5, 48 / 96 kHz and 16 / 24-bit for L2HC,
+// no quality choice for the aptX family (but aptX
 // Adaptive) or under LHDC V5 ABR, 48 kHz only for Opus and Opus 05, 48 / 96
 // kHz for aptX Adaptive, whose "ll" quality is its low latency mode.
 // aptX HD and aptX Adaptive always carry 24-bit (no choice).
@@ -21,6 +23,7 @@ export type CodecId =
   | "aptx"
   | "aptxad"
   | "lhdcv5"
+  | "l2hc"
   | "opus"
   | "aac"
   | "sbcxq"
@@ -115,6 +118,28 @@ export const CODECS: CodecSpec[] = [
     hiRes: true,
     // No 88.2 kHz: the device lists 44.1, 48, 96 and 192 kHz only (issue #86)
     rates: [0, 44100, 48000, 96000, 192000],
+  },
+  {
+    // Huawei L2HC: 10 ms frames at 320 / 480 / 640 / 960 kbps, 48 / 96 kHz,
+    // 16 / 24-bit. The sink's listed rates cap the quality (the core keeps
+    // the highest one both sides share). ABR follows Huawei's TXQ: it steps
+    // down on a backed-up send queue and recovers after ~100 ms.
+    // Experimental: the encoder is a clean-room C99 port, not yet confirmed
+    // with real Huawei earbuds. Auto never picks it (CodecKind::experimental).
+    id: "l2hc",
+    label: "codec.l2hc",
+    bars: { quality: 5, latency: 3, stability: 2 },
+    qualities: [
+      { id: "hq", label: HQ, kbps: "960" },
+      { id: "mhq", label: MEDIUM_HIGH, kbps: "640" },
+      { id: "sq", label: MEDIUM, kbps: "480" },
+      { id: "mq", label: LOW, kbps: "320" },
+    ],
+    abr: true,
+    hiRes: true,
+    // Only 48 / 96 kHz: the encoder has MDCT windows for 480 / 960 samples
+    rates: [0, 48000, 96000],
+    experimental: true,
   },
   {
     id: "aptxhd",
@@ -256,6 +281,7 @@ export function codecLabelKey(name: string): string {
     faststream: "codec.faststream",
     lhdcv5: "codec.lhdc_v5",
     lhdc: "codec.lhdc_v5",
+    l2hc: "codec.l2hc",
     opus: "codec.opus",
     opus05: "codec.opus05",
     // LE Audio (StreamInfo.le)
@@ -347,11 +373,12 @@ export function autoOrder(keys: readonly string[] = []): CodecId[] {
 
 /**
  * The default order of a device's codec cards: AUTO_ORDER, with Opus 05
- * beside Opus and FastStream last (Auto and the fallback never take those
- * two)
+ * beside Opus, L2HC beside LHDC V5 and FastStream last (Auto and the
+ * fallback never take those three: L2HC is experimental)
  */
 export const CARD_ORDER: readonly CodecId[] = [
   "lhdcv5",
+  "l2hc",
   "ldac",
   "aptxad",
   "opus",
@@ -507,10 +534,11 @@ export function autoSampleRate(codec: string, caps: CodecCaps | null): number {
 }
 
 /** The bit depth Auto streams `codec` with (stream.rs): 24-bit for LDAC,
- *  aptX HD and aptX Adaptive, LHDC V5 when the device lists it, else 16 */
+ *  aptX HD and aptX Adaptive, LHDC V5 / L2HC when the device lists it,
+ *  else 16 */
 export function autoBitDepth(codec: string, caps: CodecCaps | null): number {
   if (codec === "ldac" || codec === "aptxhd" || codec === "aptxad") return 24;
-  if (codec === "lhdcv5") {
+  if (codec === "lhdcv5" || codec === "l2hc") {
     const listed = caps?.bit_depths ?? [];
     return listed.length === 0 || listed.includes(24) ? 24 : 16;
   }

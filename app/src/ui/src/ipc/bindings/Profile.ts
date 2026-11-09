@@ -6,11 +6,11 @@ import type { CodecValues } from "./CodecValues";
  */
 export type Profile = { name: string, device_address: string, device_name: string, 
 /**
- * auto, ldac, aptxhd, aptxll, aptx, aptxad, sbcxq, sbc, aac, lhdcv5, opus, opus05, faststream
+ * auto, ldac, aptxhd, aptxll, aptx, aptxad, sbcxq, sbc, aac, lhdcv5, l2hc, opus, opus05, faststream
  */
 codec: string, 
 /**
- * hq, sq, mq; mhq for LHDC V5; ll for aptX Adaptive
+ * hq, sq, mq; mhq for LHDC V5 and L2HC; ll for aptX Adaptive
  */
 quality: string, abr: boolean, codec_fallback: boolean, 
 /**

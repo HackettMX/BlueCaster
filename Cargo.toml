@@ -6,6 +6,7 @@ members = [
     "app/src/crates/openaptx-sys",
     "app/src/crates/fdkaac-sys",
     "app/src/crates/lhdcv5-sys",
+    "app/src/crates/l2hc-sys",
     "app/src/crates/opus-sys",
     "app/src/crates/lc3-sys",
     "app/src/crates/win-sys",

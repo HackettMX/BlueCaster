@@ -271,9 +271,10 @@ impl Drop for Pipeline {
 }
 
 /// How often ABR looks at the queue: LDAC every 100 ms (v1); LHDC V5 once
-/// per packet sent, with the queue depth seen before the round (Android)
+/// per packet sent (Android) and L2HC once per packet (Huawei TXQ), with
+/// the queue depth seen before the round
 fn abr_per_packet(kind: CodecKind) -> bool {
-    kind == CodecKind::LhdcV5
+    matches!(kind, CodecKind::LhdcV5 | CodecKind::L2hc)
 }
 
 const ABR_INTERVAL: Duration = Duration::from_millis(100);

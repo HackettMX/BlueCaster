@@ -109,7 +109,7 @@ if not os.path.exists(VENV_PYTHON) and sys.prefix != sys.base_prefix:
 SINK_ADDRESS = '00:A2:D0:00:00:02'
 BASE_PORT = 9101  # A2DP cases; LE Audio cases use BASE_PORT + 100
 
-CODECS = ['sbc', 'sbcxq', 'aac', 'aptx', 'aptxhd', 'aptxll', 'ldac', 'lhdcv5', 'faststream', 'opus', 'opus05']
+CODECS = ['sbc', 'sbcxq', 'aac', 'aptx', 'aptxhd', 'aptxll', 'ldac', 'lhdcv5', 'l2hc', 'faststream', 'opus', 'opus05']
 CONFIG_PATTERN = {  # bluecaster_decode's "Configuration :" line
     'sbc': r'SBC \d+ Hz, joint stereo, 16 blocks, 8 subbands, loudness, bitpool 2-53$',
     # SBC XQ: dual channel up to bitpool 47 (44.1 kHz) / 43 (48 kHz)
@@ -127,6 +127,10 @@ CONFIG_PATTERN = {  # bluecaster_decode's "Configuration :" line
     'sbc-stereo-12b': r'SBC 44100 Hz, stereo, 12 blocks, 8 subbands, loudness, bitpool 2-53$',
     'aac': r'AAC ', 'aptx': r'aptX \d', 'aptxhd': r'aptX HD \d',
     'aptxll': r'aptX LL \d', 'ldac': r'LDAC \d', 'lhdcv5': r'LHDC V5 \d',
+    # L2HC's SET_CONFIGURATION always asks for the highest rate both sides
+    # list (960 kbps here), whatever the quality mode streams
+    'l2hc': r'L2HC 48000 Hz, 24-bit, stereo, 960 kbps, 10 ms frames',
+    'l2hc-96k': r'L2HC 96000 Hz, 24-bit, stereo, 960 kbps, 10 ms frames',
     'ldac-96k': r'LDAC 96000',
     'ldac-48k': r'LDAC 48000',
     'faststream': r'FastStream \d+ Hz, direction 0x01 \(music\)',   # no voice backchannel
@@ -144,9 +148,12 @@ CONFIG_PATTERN = {  # bluecaster_decode's "Configuration :" line
 }
 # Frame headers are validated, audio is not decoded (aptX Adaptive: its RTP
 # header, packet sizes and frame types)
-NO_DECODER = {'ldac', 'ldac-96k', 'ldac-48k', 'lhdcv5', 'aptxad', 'aptxad-r2', 'aptxad-r2-96k'}
+NO_DECODER = {'ldac', 'ldac-96k', 'ldac-48k', 'lhdcv5', 'l2hc', 'l2hc-96k',
+              'aptxad', 'aptxad-r2', 'aptxad-r2-96k'}
 # Cases run with the developer override on
 APTXAD_SINK = ['--codecs', 'sbc', 'aac', 'aptx', 'aptxad']
+# L2HC is experimental: the sink lists it only when named (emu_sink.py)
+L2HC_SINK = ['--codecs', 'sbc', 'aac', 'l2hc']
 # The name they give tells the vendor (issue #237); LOG_CHECKS read the sink's log
 HUAWEI_SINK = ['--codecs', 'sbc', 'aac', '--log-level', 'INFO', '--name', 'HUAWEI FreeBuds Pro 4']
 HUAWEI_NAME = ['--device-name', 'HUAWEI FreeBuds Pro 4']
@@ -216,6 +223,18 @@ NEGOTIATION = {
     # Opus 05: 48 kHz from a 44.1 kHz request; Auto never takes it (AAC here)
     'opus05-from-44k': ('opus05', [], 'opus05', ['--rate', '44100']),
     'auto-not-opus05': ('auto', ['--codecs', 'sbc', 'aac', 'opus05'], 'aac', []),
+    # L2HC (experimental, Huawei): 10 ms frames. At the default 679-byte
+    # MTU a 960 kbps frame (1200 bytes) is split over two media packets,
+    # which bluecaster_decode reassembles. 96 kHz when asked for; Mobile's
+    # 320 kbps frame fits one packet; ABR keeps its ceiling on a clean
+    # emulated link; Auto and --no-experimental leave it out (AAC instead)
+    'l2hc': ('l2hc', L2HC_SINK, 'l2hc', []),
+    'l2hc-96k': ('l2hc', L2HC_SINK, 'l2hc-96k', ['--rate', '96000']),
+    'l2hc-from-44k': ('l2hc', L2HC_SINK, 'l2hc', ['--rate', '44100']),
+    'l2hc-mq': ('l2hc', L2HC_SINK, 'l2hc', ['-q', 'mq']),
+    'l2hc-abr': ('l2hc', L2HC_SINK, 'l2hc', ['-a']),
+    'auto-not-l2hc': ('auto', L2HC_SINK, 'aac', []),
+    'noexp-l2hc-to-aac': ('l2hc', L2HC_SINK, 'aac', ['--fallback', '--no-experimental']),
     # Codecs > Enable experimental codecs off (issue #86): Auto passes over
     # Opus, and a chosen aptX HD falls back past aptX LL (experimental too)
     'auto-no-experimental': ('auto', ['--codecs', 'sbc', 'aac', 'opus'], 'aac', ['--no-experimental']),

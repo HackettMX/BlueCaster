@@ -1826,7 +1826,7 @@ impl HostApp {
                 let c = &self.caps;
                 tracing::info!(
                     "capability discovery complete (LDAC={} aptX HD={} aptX LL={} aptX={} aptX Adaptive={}{} \
-                     SBC={} SBC XQ={} AAC={} LHDC V5={} Opus={} Opus 05={} FastStream={}{})",
+                     SBC={} SBC XQ={} AAC={} LHDC V5={} L2HC={} Opus={} Opus 05={} FastStream={}{})",
                     c.ldac.is_some(),
                     c.aptx_hd.is_some(),
                     c.aptx_ll.is_some(),
@@ -1837,6 +1837,7 @@ impl HostApp {
                     c.has(CodecKind::SbcXq),
                     c.aac.is_some(),
                     c.lhdcv5.is_some(),
+                    c.l2hc.is_some(),
                     c.opus.is_some(),
                     c.opus05.is_some(),
                     c.faststream.is_some(),

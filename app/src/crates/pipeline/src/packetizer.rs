@@ -9,7 +9,10 @@
 //! own. FastStream packets are always three padded SBC frames (PipeWire), so
 //! a round does not flush a partly filled one ([`Packetizer::end_round`]).
 //! aptX Adaptive's encoder outputs whole media packets, its own RTP header
-//! included: each goes out as is.
+//! included: each goes out as is. L2HC emits one 10 ms frame per output and
+//! splits a frame larger than the MTU into several packets: the 1-byte media
+//! payload header is 0x01 on the first fragment and 0x00 on continuations,
+//! all of them carrying the frame's RTP timestamp (Huawei Fluoride).
 
 use bt_host::media::{MAX_MEDIA_PACKET_SIZE, MediaPacket, RTP_HEADER_SIZE};
 use codec::CodecKind;
@@ -34,6 +37,8 @@ pub struct Packetizer {
     frames: u32,
     first_ts: u32,
     lhdc_seq: u8,
+    /// L2HC: this packet is the first fragment of a frame
+    l2hc_first: bool,
 }
 
 /// Codec data that fits one media payload of `mtu` bytes (RTP header
@@ -41,7 +46,10 @@ pub struct Packetizer {
 pub fn max_raw(kind: CodecKind, mtu: u16, sample_rate: u32) -> usize {
     let mtu = mtu as usize;
     match kind {
-        CodecKind::Sbc | CodecKind::SbcXq | CodecKind::Ldac | CodecKind::Opus | CodecKind::Opus05 => mtu - 1,
+        // The 1-byte fragment flag leaves the rest of the MTU for L2HC data
+        CodecKind::Sbc | CodecKind::SbcXq | CodecKind::Ldac | CodecKind::Opus | CodecKind::Opus05 | CodecKind::L2hc => {
+            mtu - 1
+        }
         CodecKind::LhdcV5 => mtu - 2,
         // The encoder's RTP header and one codec packet
         CodecKind::AptxAdaptive => (mtu + RTP_HEADER_SIZE).min(MAX_MEDIA_PACKET_SIZE),
@@ -83,6 +91,7 @@ impl Packetizer {
             frames: 0,
             first_ts: 0,
             lhdc_seq: 0,
+            l2hc_first: true,
         }
     }
 
@@ -90,6 +99,7 @@ impl Packetizer {
         self.packet.len = self.header as u16;
         self.frames = 0;
         self.lhdc_seq = 0;
+        self.l2hc_first = true;
     }
 
     fn raw_len(&self) -> usize {
@@ -99,6 +109,9 @@ impl Packetizer {
     /// Adds one encoder output (`frames` codec frames whose first sample has
     /// RTP timestamp `timestamp`); returns the packets sent through `send`
     pub fn push(&mut self, data: &[u8], frames: u32, timestamp: u32, send: &mut dyn FnMut(&MediaPacket)) -> u32 {
+        if self.kind == CodecKind::L2hc {
+            return self.push_l2hc(data, frames, timestamp, send);
+        }
         let mut sent = 0;
         // SBC and LDAC count frames in 4 bits: a packet holds at most 15
         let count_full = self.header == 1 && self.frames + frames > 15;
@@ -122,6 +135,29 @@ impl Packetizer {
         }
         if one_output_per_packet(self.kind) {
             sent += self.flush(send);
+        }
+        sent
+    }
+
+    /// L2HC: one 10 ms frame per encoder output, split over as many media
+    /// packets as the MTU needs. The sink reconstructs the frame from the
+    /// first-fragment flag; every fragment keeps the frame's RTP timestamp.
+    fn push_l2hc(&mut self, data: &[u8], frames: u32, timestamp: u32, send: &mut dyn FnMut(&MediaPacket)) -> u32 {
+        if data.is_empty() || self.max_raw == 0 {
+            return 0;
+        }
+        let mut sent = 0;
+        let mut offset = 0usize;
+        while offset < data.len() {
+            let n = (data.len() - offset).min(self.max_raw);
+            let at = self.header;
+            self.packet.data[at..at + n].copy_from_slice(&data[offset..offset + n]);
+            self.packet.len = (at + n) as u16;
+            self.frames = frames.max(1);
+            self.first_ts = timestamp;
+            self.l2hc_first = offset == 0;
+            sent += self.flush(send);
+            offset += n;
         }
         sent
     }
@@ -152,6 +188,9 @@ impl Packetizer {
                 self.packet.data[1] = self.lhdc_seq;
                 self.lhdc_seq = self.lhdc_seq.wrapping_add(1);
             }
+            // L2hcConstructMtuOrganizedBtBufferRecords: layer_specific 1 on
+            // the first fragment, 0 on continuations of the same frame
+            CodecKind::L2hc => self.packet.data[0] = u8::from(self.l2hc_first),
             _ => {}
         }
         self.packet.timestamp = self.first_ts;
@@ -334,5 +373,32 @@ mod tests {
         assert_eq!(max_raw(CodecKind::Aptx, 1023, 48000), 1032);
         assert_eq!(max_raw(CodecKind::Aptx, 1679, 48000), 1688);
         assert!(!CodecKind::Aptx.uses_rtp());
+    }
+
+    #[test]
+    fn l2hc_fragments_mark_the_first_and_keep_the_timestamp() {
+        assert_eq!(max_raw(CodecKind::L2hc, 679, 48000), 678);
+        let mut p = Packetizer::new(CodecKind::L2hc, 679, 48000);
+        let mut out = Vec::new();
+        // A 960 kbps frame: 1200 bytes, two packets at a 679-byte MTU
+        p.push(&vec![0x5Cu8; 1200], 1, 1000, &mut |pk| out.push((pk.payload().to_vec(), pk.timestamp, pk.rtp)));
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0[0], 0x01);
+        assert_eq!(out[0].0.len(), 679);
+        assert_eq!(out[1].0[0], 0x00);
+        assert_eq!(out[1].0.len(), 1 + 1200 - 678);
+        assert_eq!(out[0].1, 1000);
+        assert_eq!(out[1].1, 1000);
+        assert!(out[0].2 && out[1].2);
+        // Everything was sent as the frame was encoded
+        assert_eq!(p.end_round(&mut |_| {}), 0);
+
+        // A 320 kbps frame fits in one packet, with the first-fragment flag
+        let mut one = Vec::new();
+        p.push(&vec![0x5Cu8; 400], 1, 1480, &mut |pk| one.push((pk.payload().to_vec(), pk.timestamp)));
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].0[0], 0x01);
+        assert_eq!(one[0].0.len(), 401);
+        assert_eq!(one[0].1, 1480);
     }
 }

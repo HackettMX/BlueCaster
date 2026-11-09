@@ -3,8 +3,8 @@
 //! - [`Encoder`]: what the encode thread drives. One call encodes
 //!   [`Encoder::pcm_frames_per_encode`] PCM frames.
 //! - [`sbc`]: the SBC encoder, ported from Bluedroid to Rust (bit-exact).
-//! - LDAC, aptX family, AAC, LHDC V5, Opus (Android's and PipeWire's Opus
-//!   05): safe wrappers of the C encoders
+//! - LDAC, aptX family, AAC, LHDC V5, L2HC, Opus (Android's and PipeWire's
+//!   Opus 05): safe wrappers of the C encoders
 //!   (crates `*-sys`), behind cargo features.
 //! - [`aptx_adaptive`]: aptX Adaptive, a pure-Rust encoder (crate
 //!   `aptx-adaptive`), behind a cargo feature too.
@@ -25,6 +25,8 @@ pub mod aac;
 pub mod aptx;
 #[cfg(feature = "aptx-adaptive")]
 pub mod aptx_adaptive;
+#[cfg(feature = "l2hc")]
+pub mod l2hc;
 #[cfg(feature = "lc3")]
 pub mod lc3;
 #[cfg(feature = "ldac")]
@@ -60,6 +62,11 @@ pub enum CodecKind {
     /// stereo, HQ or low latency ([`Quality::LowLatency`]); Auto's choice
     /// after LHDC V5 and LDAC (issue #86, confirmed on an EarFun Air Pro 4+)
     AptxAdaptive,
+    /// Huawei L2HC (vendor 0x0000027D / codec 0x4C35), 48 / 96 kHz,
+    /// 320 - 960 kbps in 10 ms frames. Experimental: built from the clean-
+    /// room encoder, not yet confirmed with real FreeBuds. Not in Auto's
+    /// priority list until it is: choose it on its codec card.
+    L2hc,
 }
 
 /// A device's codec order (its profile's `codec_order`, issue #86 round 8):
@@ -106,7 +113,8 @@ impl AutoOrder {
         let at = |k: CodecKind| self.0.iter().position(|&c| c == k).unwrap_or(0);
         match kind {
             CodecKind::Opus05 => at(CodecKind::Opus),
-            CodecKind::FastStream => self.0.len(),
+            // Neither is in Auto's list: they rank below it
+            CodecKind::FastStream | CodecKind::L2hc => self.0.len(),
             k => at(k),
         }
     }
@@ -118,7 +126,7 @@ impl AutoOrder {
 }
 
 impl CodecKind {
-    pub const ALL: [CodecKind; 12] = [
+    pub const ALL: [CodecKind; 13] = [
         CodecKind::Ldac,
         CodecKind::AptxHd,
         CodecKind::AptxLl,
@@ -131,6 +139,7 @@ impl CodecKind {
         CodecKind::Opus05,
         CodecKind::FastStream,
         CodecKind::AptxAdaptive,
+        CodecKind::L2hc,
     ];
 
     /// The choice of "Auto", highest sound quality first (issue #86): LHDC
@@ -179,6 +188,7 @@ impl CodecKind {
             CodecKind::Opus05 => "Opus 05",
             CodecKind::FastStream => "FastStream",
             CodecKind::AptxAdaptive => "aptX Adaptive",
+            CodecKind::L2hc => "L2HC",
         }
     }
 
@@ -197,6 +207,7 @@ impl CodecKind {
             CodecKind::Opus05 => "opus05",
             CodecKind::FastStream => "faststream",
             CodecKind::AptxAdaptive => "aptxad",
+            CodecKind::L2hc => "l2hc",
         }
     }
 
@@ -206,10 +217,17 @@ impl CodecKind {
 
     /// Bytes of the A2DP media payload header in front of the codec frames:
     /// SBC (XQ too), LDAC and Opus (both) 1 (frame count), LHDC V5 2 (frame
-    /// count, sequence), the others none
+    /// count, sequence), L2HC 1 (fragment flag), the others none
     pub fn media_header_len(self) -> usize {
         match self {
-            CodecKind::Sbc | CodecKind::SbcXq | CodecKind::Ldac | CodecKind::Opus | CodecKind::Opus05 => 1,
+            // L2HC: one byte of "layer specific" (0x01 first fragment,
+            // 0x00 continuation), as Huawei Fluoride / the reference SPA plugin
+            CodecKind::Sbc
+            | CodecKind::SbcXq
+            | CodecKind::Ldac
+            | CodecKind::Opus
+            | CodecKind::Opus05
+            | CodecKind::L2hc => 1,
             CodecKind::LhdcV5 => 2,
             _ => 0,
         }
@@ -233,7 +251,7 @@ impl CodecKind {
     /// Highest capture sample rate the codec takes
     pub fn max_sample_rate(self) -> u32 {
         match self {
-            CodecKind::Ldac | CodecKind::AptxAdaptive => 96000,
+            CodecKind::Ldac | CodecKind::AptxAdaptive | CodecKind::L2hc => 96000,
             CodecKind::LhdcV5 => 192000,
             _ => 48000,
         }
@@ -246,7 +264,12 @@ impl CodecKind {
     pub fn experimental(self) -> bool {
         matches!(
             self,
-            CodecKind::AptxHd | CodecKind::AptxLl | CodecKind::FastStream | CodecKind::Opus | CodecKind::Opus05
+            CodecKind::AptxHd
+                | CodecKind::AptxLl
+                | CodecKind::FastStream
+                | CodecKind::Opus
+                | CodecKind::Opus05
+                | CodecKind::L2hc
         )
     }
 
@@ -266,6 +289,7 @@ impl CodecKind {
             CodecKind::Aptx | CodecKind::AptxHd | CodecKind::AptxLl => cfg!(feature = "aptx"),
             CodecKind::Ldac => cfg!(feature = "ldac"),
             CodecKind::LhdcV5 => cfg!(feature = "lhdcv5"),
+            CodecKind::L2hc => cfg!(feature = "l2hc"),
             CodecKind::Opus | CodecKind::Opus05 => cfg!(feature = "opus"),
             CodecKind::AptxAdaptive => cfg!(feature = "aptx-adaptive"),
         }
@@ -321,7 +345,9 @@ impl Quality {
     pub fn for_codec(self, kind: CodecKind) -> Quality {
         match (kind, self) {
             (CodecKind::Ldac | CodecKind::LhdcV5, Quality::Standard | Quality::Mobile) => self,
-            (CodecKind::LhdcV5, Quality::MediumHigh) => self,
+            (CodecKind::LhdcV5 | CodecKind::L2hc, Quality::MediumHigh) => self,
+            // L2HC: High 960, Medium-High 640, Standard 480, Mobile 320 kbps
+            (CodecKind::L2hc, Quality::Standard | Quality::Mobile) => self,
             (CodecKind::AptxAdaptive, Quality::LowLatency) => self,
             _ => Quality::High,
         }
@@ -377,6 +403,8 @@ impl Pcm<'_> {
 pub struct PeerParams {
     /// LHDC V5: the sink's bit rate limits (codec info byte 7, bits 7..4)
     pub lhdcv5_bitrate_limits: u8,
+    /// L2HC: the sink's bit rate bits (codec info byte 8; 0 = not known)
+    pub l2hc_bitrates: u8,
     /// SBC / SBC XQ: the sink's SBC bitpool range (0 = not known); the
     /// encoder keeps its bitpool within it
     pub sbc_min_bitpool: u8,
@@ -552,6 +580,8 @@ fn create_inner(kind: CodecKind, config: &EncoderConfig) -> Result<Box<dyn Encod
         CodecKind::Ldac => Ok(Box::new(ldac::LdacEncoder::new(config)?)),
         #[cfg(feature = "lhdcv5")]
         CodecKind::LhdcV5 => Ok(Box::new(lhdcv5::LhdcV5Encoder::new(config)?)),
+        #[cfg(feature = "l2hc")]
+        CodecKind::L2hc => Ok(Box::new(l2hc::L2hcEncoder::new(config)?)),
         #[cfg(feature = "opus")]
         CodecKind::Opus | CodecKind::Opus05 => Ok(Box::new(opus::OpusEncoder::new(kind, config)?)),
         #[cfg(feature = "aptx-adaptive")]
@@ -584,5 +614,11 @@ mod tests {
                 assert_eq!(q.for_codec(kind), High, "{kind:?} {q:?}");
             }
         }
+        // L2HC's four bit rate steps
+        assert_eq!(High.for_codec(CodecKind::L2hc), High);
+        assert_eq!(MediumHigh.for_codec(CodecKind::L2hc), MediumHigh);
+        assert_eq!(Standard.for_codec(CodecKind::L2hc), Standard);
+        assert_eq!(Mobile.for_codec(CodecKind::L2hc), Mobile);
+        assert_eq!(LowLatency.for_codec(CodecKind::L2hc), High);
     }
 }

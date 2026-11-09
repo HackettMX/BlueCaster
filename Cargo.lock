@@ -661,6 +661,7 @@ dependencies = [
  "aptx-adaptive",
  "btstack-sys",
  "fdkaac-sys",
+ "l2hc-sys",
  "lc3-sys",
  "ldac-sys",
  "lhdcv5-sys",
@@ -2246,6 +2247,13 @@ checksum = "0fbe853b403ae61a04233030ae8a79d94975281ed9770a1f9e246732b534b28d"
 dependencies = [
  "bitflags 2.13.2",
  "serde",
+]
+
+[[package]]
+name = "l2hc-sys"
+version = "3.0.0-beta.3.alpha.3"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

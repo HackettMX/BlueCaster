@@ -63,16 +63,17 @@ Usage: bluecaster-core --cli [-d XX:XX:XX:XX:XX:XX] [options]
   -u <adapter>          USB Bluetooth adapter to use when several have WinUSB:
                         instance ID (USB\\VID_0BDA&PID_8771\\...), device path
                         (\\\\?\\usb#vid_0bda&pid_8771#...) or VID:PID (0bda:8771)
-  -c <codec>           ldac, aptxhd, aptxll, aptx, aptxad, sbcxq, sbc, aac, lhdcv5, opus, opus05, faststream, auto (default)
-  -q <quality>          hq (default); sq, mq for LDAC and LHDC V5; mhq for LHDC V5; ll (low latency)
-                        for aptX Adaptive (other codecs: hq, their highest bit rate)
-  -a                    adaptive bit rate (LDAC, LHDC V5, aptX Adaptive; SBC / SBC XQ: bitpool)
+  -c <codec>           ldac, aptxhd, aptxll, aptx, aptxad, sbcxq, sbc, aac, lhdcv5, l2hc, opus, opus05, faststream, auto (default)
+  -q <quality>          hq (default); sq, mq for LDAC, LHDC V5 and L2HC; mhq for
+                        LHDC V5 and L2HC; ll (low latency) for aptX Adaptive
+                        (other codecs: hq, their highest bit rate)
+  -a                    adaptive bit rate (LDAC, LHDC V5, L2HC, aptX Adaptive; SBC / SBC XQ: bitpool)
   --fallback            a codec -c the device does not offer falls back to the
                         best one it offers (as the app does), instead of an error
   --force-codec         a codec -c the device does not offer is asked for anyway
   --unlisted-options    the codec's settings beyond what the device lists
   --no-experimental     never use the experimental codecs (aptX HD, aptX LL, Opus,
-                        Opus 05, FastStream: experimental in the README)
+                        Opus 05, FastStream, L2HC: experimental in the README)
   -m <mode>             capture: loopback (default), virtual, app
   --audio-device <id>   render device for -m virtual
   --app <exe>           executable for -m app
@@ -313,7 +314,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     None
                 } else {
                     Some(CodecKind::from_key(&c).ok_or_else(|| {
-                        format!("Unknown codec '{c}'. Use: ldac, aptxhd, aptxll, aptx, aptxad, sbcxq, sbc, aac, lhdcv5, opus, opus05, faststream, auto")
+                        format!("Unknown codec '{c}'. Use: ldac, aptxhd, aptxll, aptx, aptxad, sbcxq, sbc, aac, lhdcv5, l2hc, opus, opus05, faststream, auto")
                     })?)
                 };
             }

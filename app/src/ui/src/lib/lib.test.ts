@@ -304,6 +304,53 @@ describe("profiles", () => {
     for (const c of ["aptx", "aptxhd", "aptxll", "faststream"]) expect(ids(c)).toEqual([]);
   });
 
+  it("L2HC: 48 / 96 kHz, 16 / 24-bit and the four fixed bit rates", () => {
+    const ids = (codec: string) => CODECS.find((c) => c.id === codec)!.qualities.map((q) => q.id);
+    expect(ids("l2hc")).toEqual(["hq", "mhq", "sq", "mq"]);
+    expect(sampleRates("l2hc")).toEqual([0, 48000, 96000]);
+    expect(bitDepths("l2hc")).toEqual([0, 16, 24]);
+    expect(offeredQualities("l2hc", 48000).map((q) => [q.id, q.kbps])).toEqual([
+      ["hq", "960"],
+      ["mhq", "640"],
+      ["sq", "480"],
+      ["mq", "320"],
+    ]);
+    // 10 ms frames of a fixed length at either rate: no 44.1 / 96 kHz table
+    expect(qualityKbps("l2hc", "hq", 96000)).toBe("960");
+    expect(codecLabelKey("L2HC")).toBe("codec.l2hc");
+    // Experimental: Auto must never pick it (core: CodecKind::AUTO_PRIORITY)
+    expect(isExperimental("l2hc")).toBe(true);
+    expect(AUTO_ORDER).not.toContain("l2hc");
+    expect(autoPick(["sbc", "l2hc"])).toBe("sbc");
+  });
+
+  it("L2HC caps the quality at the device's largest bit rate", () => {
+    // 640 kbps sink: High becomes 640, so Medium-High is left out
+    expect(offeredQualities("l2hc", 48000, 640000).map((q) => [q.id, q.kbps])).toEqual([
+      ["hq", "640"],
+      ["sq", "480"],
+      ["mq", "320"],
+    ]);
+  });
+
+  it("L2HC offers only the rates and bit depths the device lists", () => {
+    const l2hc = (rates: number[], depths: number[]) => ({ codec: "l2hc", sample_rates: rates, bit_depths: depths, max_bitrate: 0 });
+    expect(offeredSampleRates("l2hc", l2hc([48000], [16, 24]))).toEqual([0, 48000]);
+    expect(offeredBitDepths("l2hc", l2hc([48000, 96000], [16]))).toEqual([0, 16]);
+    expect(autoBitDepth("l2hc", l2hc([48000, 96000], [24]))).toBe(24);
+    expect(autoBitDepth("l2hc", l2hc([48000, 96000], [16]))).toBe(16);
+    // Not known yet: everything, as the core's unlisted caps
+    expect(offeredSampleRates("l2hc", null)).toEqual([0, 48000, 96000]);
+    expect(offeredBitDepths("l2hc", null)).toEqual([0, 16, 24]);
+  });
+
+  it("L2HC takes ABR, but its quality stays live under ABR", () => {
+    expect(CODECS.find((c) => c.id === "l2hc")!.abr).toBe(true);
+    expect(abrCarries("ldac", "l2hc")).toBe(true);
+    expect(abrCarries("sbc", "l2hc")).toBe(false);
+    expect(qualityIgnored("l2hc", true)).toBe(false);
+  });
+
   it("offers only what the device lists (issue #86: moto buds+)", () => {
     const caps = [
       { codec: "lhdcv5", sample_rates: [44100, 48000], bit_depths: [16], max_bitrate: 0 },
@@ -622,7 +669,7 @@ describe("Auto's order and the fallback (issue #86)", () => {
 
   it("leaves the experimental codecs out while they are off (issue #86)", () => {
     expect(CODECS.filter((c) => c.experimental).map((c) => c.id).sort()).toEqual(
-      ["aptxhd", "aptxll", "faststream", "opus", "opus05"],
+      ["aptxhd", "aptxll", "faststream", "l2hc", "opus", "opus05"],
     );
     expect(isExperimental("aptxad")).toBe(false);
     const pw = ["sbc", "aac", "opus", "aptxhd"];

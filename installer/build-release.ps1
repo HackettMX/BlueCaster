@@ -149,6 +149,8 @@ $docs = [ordered]@{
     'third-party/lhdcv5-enc-LICENSE.txt'      = Join-Path $ext 'lhdcv5-enc/LICENSE'
     'third-party/opus-COPYING.txt'            = Join-Path $ext 'opus/COPYING'
     'third-party/aptx-adaptive-LICENSE.txt'   = Join-Path $repo 'app/src/crates/aptx-adaptive/LICENSE'
+    # L2HC: vendored clean-room C99 encoder (MIT), no submodule of its own
+    'third-party/l2hc-native-LICENSE.txt'     = Join-Path $repo 'app/src/crates/l2hc-sys/csrc/LICENSE'
     # LE Audio (experimental): LC3 encoder and LE Secure Connections' P-256
     'third-party/liblc3-LICENSE.txt'          = Join-Path $ext 'btstack/3rd-party/lc3-google/LICENSE'
     'third-party/micro-ecc-LICENSE.txt'       = Join-Path $ext 'btstack/3rd-party/micro-ecc/LICENSE.txt'

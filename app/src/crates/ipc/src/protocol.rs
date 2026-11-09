@@ -284,13 +284,14 @@ pub struct StreamInfo {
     /// The profile's codec, when the device did not offer it (fallback)
     pub requested_codec: Option<String>,
     pub requested_in_use: bool,
-    /// Adaptive bit rate on (LDAC, LHDC V5, SBC and SBC XQ): LHDC V5 then
-    /// stays at 400 kbps or below whatever the quality. bitrate_kbps (and
+    /// Adaptive bit rate on (LDAC, LHDC V5, L2HC, SBC and SBC XQ): LHDC V5
+    /// then stays at 400 kbps or below whatever the quality, L2HC steps
+    /// down on a backed-up send queue. bitrate_kbps (and
     /// SBC's details.sbc.bitpool, frame_bytes, frames_per_packet) follow
     /// it: the core sends a new StreamInfo while they change.
     #[serde(default)]
     pub abr: bool,
-    /// The device's maximum bit rate lowered the profile's (LHDC V5)
+    /// The device's maximum bit rate lowered the profile's (LHDC V5, L2HC)
     #[serde(default)]
     pub bitrate_capped: bool,
     /// OPPO earbuds turned Hi-Res on for this connection, after one
@@ -545,9 +546,9 @@ pub struct Profile {
     pub name: String,
     pub device_address: String,
     pub device_name: String,
-    /// auto, ldac, aptxhd, aptxll, aptx, aptxad, sbcxq, sbc, aac, lhdcv5, opus, opus05, faststream
+    /// auto, ldac, aptxhd, aptxll, aptx, aptxad, sbcxq, sbc, aac, lhdcv5, l2hc, opus, opus05, faststream
     pub codec: String,
-    /// hq, sq, mq; mhq for LHDC V5; ll for aptX Adaptive
+    /// hq, sq, mq; mhq for LHDC V5 and L2HC; ll for aptX Adaptive
     pub quality: String,
     pub abr: bool,
     pub codec_fallback: bool,

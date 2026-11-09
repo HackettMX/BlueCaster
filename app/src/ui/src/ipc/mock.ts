@@ -2003,6 +2003,7 @@ export class MockCore implements Transport {
         "sbc",
         "aac",
         "lhdcv5",
+        "l2hc",
         "opus",
         "opus05",
         "faststream",
@@ -2232,7 +2233,7 @@ export class MockCore implements Transport {
       this.log(
         "info",
         "bt_host::app",
-        "capability discovery complete (LDAC=true aptX HD=false aptX LL=false aptX=false aptX Adaptive=false [not encodable] SBC=true AAC=true LHDC V5=false Opus=false)",
+        "capability discovery complete (LDAC=true aptX HD=false aptX LL=false aptX=false aptX Adaptive=false [not encodable] SBC=true AAC=true LHDC V5=false L2HC=false Opus=false)",
       );
       this.learnCodecs(t.address);
       const i = info();

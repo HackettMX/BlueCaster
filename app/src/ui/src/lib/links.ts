@@ -57,6 +57,7 @@ const CODEC_OPTIONS: Record<string, string> = {
   aptxad: "aptX Adaptive",
   aptx: "aptX",
   lhdcv5: "LHDC V5",
+  l2hc: "L2HC",
   opus: "Opus",
   opus05: "Opus 05",
   aac: "AAC",

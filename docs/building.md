@@ -117,7 +117,7 @@ python tools/emu/run_test.py                        # every codec and negotiatio
 
 How it works:
 
-- `emu_sink.py` runs two [Bumble](https://github.com/google/bumble) virtual controllers on an in-process link. One is served as H4 over TCP (`127.0.0.1`) for BlueCaster. The other is used by a Bumble A2DP sink that offers SBC (SBC XQ capable), AAC, aptX, aptX HD, aptX LL, LDAC, LHDC V5, FastStream, Opus, Opus 05 and aptX Adaptive, and records its HCI traffic.
+- `emu_sink.py` runs two [Bumble](https://github.com/google/bumble) virtual controllers on an in-process link. One is served as H4 over TCP (`127.0.0.1`) for BlueCaster. The other is used by a Bumble A2DP sink that offers SBC (SBC XQ capable), AAC, aptX, aptX HD, aptX LL, LDAC, LHDC V5, FastStream, Opus, Opus 05 and aptX Adaptive (L2HC and aptX Adaptive only when named with `--codecs`: BTstack 1.8.1 keeps at most 10 discovered SEPs), and records its HCI traffic.
 - `run_test.py` runs `bluecaster-core.exe --cli` for each codec with development options: `--hci-tcp` (virtual controller instead of WinUSB), `--test-tone` (1 kHz left / 1.5 kHz right instead of system audio), `--duration`, `--hci-capture`. The environment variable `BLUECASTER_CONFIG_DIR` points BlueCaster at a separate config folder, so pairing with the virtual sink never touches your real link keys.
 - Both HCI captures are then checked with `bluecaster_decode` (the sink side with `--received`).
 
@@ -126,7 +126,7 @@ A codec passes when all of these hold:
 - the requested codec was negotiated
 - `bluecaster_decode` finds no problem on the sent side or the received side
 - the sink received every media packet and frame BlueCaster sent, and at least 90% of the requested audio duration was sent
-- except LDAC, LHDC V5 and aptX Adaptive (no open-source decoder): the decoded audio is identical on both sides and is the test tone
+- except LDAC, LHDC V5, L2HC and aptX Adaptive (no open-source decoder): the decoded audio is identical on both sides and is the test tone
 
 | Option | Description |
 |:-------|:------------|
@@ -164,6 +164,7 @@ The C libraries are git submodules; Rust crates and the UI's npm packages are fe
 | libopenaptx | git submodule | 0.2.0 (do not update) | LGPL-2.1+ |
 | fdk-aac | git submodule | v2.0.3-158-gd8e6b1a | FDK AAC License |
 | LHDC V5 encoder | git submodule | as pinned | Apache-2.0 |
+| L2HC encoder | vendored C99 sources in `app/src/crates/l2hc-sys/csrc/` (no submodule) | L2HC-native-linux v1.1.1 | MIT |
 | libopus | git submodule | v1.5.2 | BSD-3-Clause |
 | Tauri, SolidJS, Rust crates | Cargo / pnpm | `Cargo.lock`, `pnpm-lock.yaml` | MIT / Apache-2.0 and others (`licenses/third-party/rust-crates.txt` in the release) |
 

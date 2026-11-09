@@ -17,7 +17,7 @@ nav_order: 5
 
 ## Overview
 
-BlueCaster enables LHDC V5, LDAC, aptX Adaptive, aptX HD,
+BlueCaster enables LHDC V5, LDAC, L2HC, aptX Adaptive, aptX HD,
 aptX Low Latency, aptX, Opus, AAC, SBC XQ and SBC Bluetooth audio on Windows
 (and LC3 over LE Audio, experimental). Windows' own Bluetooth stack supports
 only SBC, classic aptX and (Windows 11 only) AAC for A2DP — this tool adds the
@@ -286,7 +286,7 @@ result. Listing adapters and their driver needs no elevation.
   and a codec whose card offers more than the remote lists
   (`unlisted_options`) is configured from `RemoteCaps::unlisted`
 - Leaves the experimental codecs (aptX HD, aptX LL, Opus, Opus 05,
-  FastStream) out of Auto and the fallback with the command line's
+  FastStream, L2HC) out of Auto and the fallback with the command line's
   `--no-experimental`; the app always uses them (the `experimental_codecs`
   setting, from 2.0.2-beta.7's Codecs page, is read as on since issue #86)
 - Streams every A2DP profile as Auto, with Auto's default settings, while
@@ -307,7 +307,8 @@ result. Listing adapters and their driver needs no elevation.
   the highest rate it lists nor the Windows mix rate)
 - Maps the profile's quality to the ones the codec offers
   (`Quality::for_codec`, issue #86): LDAC and LHDC V5 High / Medium
-  (`sq`) / Low (`mq`), LHDC V5 also Medium-High (`mhq`), aptX Adaptive
+  (`sq`) / Low (`mq`), LHDC V5 also Medium-High (`mhq`), L2HC High /
+  Medium-High / Medium / Low (960 / 640 / 480 / 320 kbps), aptX Adaptive
   High / Low Latency, every other codec High (its highest bit rate the device
   takes); a quality the codec no longer has (aptX Adaptive's Standard /
   Mobile, AAC's lower levels) runs as High
@@ -320,8 +321,8 @@ result. Listing adapters and their driver needs no elevation.
 **Responsibilities**:
 - Run BTstack with the USB (or TCP) HCI transport on its own thread
 - Register stream endpoints: vendor codecs (LDAC, aptX HD, aptX, aptX LL,
-  LHDC V5, FastStream, Opus, Opus 05, aptX Adaptive) plus SBC (also used by
-  SBC XQ) and AAC: 11 in all (BTstack's `MAX_NR_AVDTP_STREAM_ENDPOINTS`)
+  LHDC V5, L2HC, FastStream, Opus, Opus 05, aptX Adaptive) plus SBC (also used by
+  SBC XQ) and AAC: 12 in all (BTstack's `MAX_NR_AVDTP_STREAM_ENDPOINTS`)
 - Register SDP records (A2DP Source, AVRCP Controller, AVRCP Target; HFP
   Audio Gateway, for the battery level only, while that experimental setting
   is on)
@@ -349,7 +350,7 @@ result. Listing adapters and their driver needs no elevation.
 - `a2dp_source_establish_stream()` — Connect to A2DP sink
 - `a2dp_source_set_config_other()` — Configure vendor-specific codec
 - `a2dp_source_stream_send_media_payload_rtp()` — Send encoded audio with an
-  RTP header (LDAC, aptX HD, AAC, SBC, SBC XQ, LHDC V5, Opus)
+  RTP header (LDAC, aptX HD, AAC, SBC, SBC XQ, LHDC V5, L2HC, Opus)
 - `a2dp_source_stream_send_media_packet()` — Send raw media packets without
   an RTP header (aptX, aptX LL, FastStream), or with BlueCaster's own RTP header
   (aptX Adaptive)
@@ -412,6 +413,7 @@ administrator) and is deleted when the helper ends.
 | Encoder | Library | Bitrate | Features |
 |---------|---------|---------|----------|
 | LHDC V5 | lhdcv5-enc (C port of the AOSP encoder) | 400/500/900/1000 kbps (Low/Medium/Medium-High/High), at most the sink's listed maximum, ABR 160–400 kbps | 16/24-bit, 5 ms frames, 2-byte media payload header, RTP header |
+| L2HC | l2hc-sys: vendored clean-room C99 encoder of L2HC-native-linux (MIT) | 320/480/640/960 kbps (Low/Medium/Medium-High/High), at most the rates the sink lists, ABR steps down on a backed-up send queue | Experimental; 16/24-bit, 48/96 kHz stereo, 10 ms frames (480/960 samples) of 400/600/800/1200 bytes; a frame larger than the MTU is split over several packets, whose 1-byte media payload header is 0x01 on the first fragment and 0x00 after it, all with the frame's RTP timestamp; Auto never picks it |
 | LDAC | libldac (AOSP) | 330/660/990 kbps | High/Medium/Low (HQ/SQ/MQ) modes, ABR |
 | aptX Adaptive | aptx-adaptive (pure-Rust encoder of AKS-Logic/aptx-adaptive-linux, MIT) | 427 kbps High, 265 kbps Low Latency (R2 sinks: 270); ABR steps down to 364/318 (R2: 270/204) | 48 kHz stereo (96 kHz in High when chosen, to an R2 sink that lists it: 646/340/255 kbps), 24-bit; one codec packet per media packet behind BlueCaster's own RTP header; ABR in High; Auto takes it after LHDC V5 and LDAC |
 | Opus | libopus 1.5.2 | 256 kbps (stereo; mono half) | Experimental; Android's A2DP Opus: 48 kHz, 20 ms frames (10 ms if the sink has only that), constrained VBR capped to the media payload, one frame per packet, 1-byte media payload header, RTP header |
@@ -437,6 +439,7 @@ Non-standard codecs are registered as Vendor Specific in AVDTP:
 | Codec | Vendor ID | Codec ID |
 |-------|-----------|----------|
 | LHDC V5 | Savitech (0x0000053A) | 0x4C35 |
+| L2HC | Huawei (0x0000027D) | 0x4C35 (0x3500 on some sinks; echoed back) |
 | LDAC | Sony (0x0000012D) | 0x00AA |
 | aptX Adaptive | Qualcomm (0x000000D7) | 0x00AD |
 | Opus | Google (0x000000E0) | 0x0001 |
@@ -465,6 +468,15 @@ Codec information element sizes (including the 6-byte vendor/codec ID):
   configuration and applied to the encoder, as Android does. Media packets
   carry a 2-byte payload header: frame count << 2 (latency bits 0) and a
   sequence number
+- **L2HC**: 10 bytes (`a2dp_l2hc_t`): byte 6 bit depth (0x01 16-bit, 0x02
+  24-bit, 0x04 32-bit), byte 7 sample rates (0x04 48k, 0x10 96k; 44.1 / 88.2 /
+  192 kHz exist but BlueCaster's encoder has MDCT windows only for 480 / 960
+  sample frames and does not offer them), byte 8 bit rates (0x01 320k,
+  0x02 480k, 0x04 640k, 0x08 960k; low-rate bits 0x10–0x80 below them),
+  byte 9 frame length (0x00 10 ms). SET_CONFIGURATION echoes the sink's own
+  codec ID (0x4C35 or 0x3500), picks the highest bit rate both sides list and
+  keeps 10 ms frames; shorter ABR frames need no renegotiation because the sink
+  rebuilds a frame from the media payload's first-fragment flag
 - **FastStream**: 8 bytes (PipeWire `a2dp_faststream_t`): byte 6 direction
   (0x01 sink = music, 0x02 source = voice), byte 7 low nibble the sink rates
   (0x2 44.1k, 0x1 48k), high nibble the source rate (0x2 16k). BlueCaster offers
@@ -482,9 +494,17 @@ Codec information element sizes (including the 6-byte vendor/codec ID):
   back with LL0 raised to at least 80 ms and a zero HQ latency replaced by
   200 ms; an R2 sink gets the source's own R2 block
 
-**RTP vs no RTP**: LDAC, aptX HD, AAC, SBC, SBC XQ, LHDC V5 and Opus media packets carry the
+**RTP vs no RTP**: LDAC, aptX HD, AAC, SBC, SBC XQ, LHDC V5, L2HC and Opus media packets carry the
 12-byte RTP header. aptX, aptX LL and FastStream are sent **without** an RTP header (as Android and
 PipeWire do), so the whole L2CAP MTU is available for aptX frames.
+
+**L2HC fragmentation**: one 10 ms encoder output is one codec frame. The
+packetizer splits a frame larger than `mtu - 1` into as many media packets as
+needed and writes 0x01 in the first fragment's payload header, 0x00 in the
+continuations (Huawei Fluoride's `L2hcConstructMtuOrganizedBtBufferRecords`).
+Every fragment of a frame carries the same RTP timestamp, so the sink can
+reassemble it. At the default 679-byte MTU a 960 kbps frame (1200 bytes) goes
+out as two packets of 679 and 523 bytes.
 
 **aptX Adaptive** sends one codec packet per media packet
 behind BlueCaster's own 12-byte RTP header (BTstack adds none): payload type 96,
@@ -553,4 +573,4 @@ uninstaller and `licenses\` (`licenses\README.txt`, `licenses\bluecaster\LICENSE
   dedicated USB adapter for BlueCaster
 - Some Bluetooth adapters' firmware limits achievable bitrate
 - USB Bluetooth 5.0+ adapters generally work well for LDAC
-- Auto codec selection priority (by sound quality, issue #86): LHDC V5 > LDAC > aptX Adaptive > Opus > aptX HD > aptX > aptX LL > AAC > SBC XQ > SBC (FastStream and Opus 05 only when chosen); a chosen codec the device no longer offers falls back to the first one in the device's order it offers; one chosen on its card while the device did not offer it is asked for anyway (`codec_forced`, no fallback)
+- Auto codec selection priority (by sound quality, issue #86): LHDC V5 > LDAC > aptX Adaptive > Opus > aptX HD > aptX > aptX LL > AAC > SBC XQ > SBC (FastStream, Opus 05 and the experimental L2HC only when chosen); a chosen codec the device no longer offers falls back to the first one in the device's order it offers; one chosen on its card while the device did not offer it is asked for anyway (`codec_forced`, no fallback)

@@ -97,10 +97,10 @@
  * Required for LDAC/aptX - BTstack's auto-mode only handles SBC. */
 #define ENABLE_A2DP_EXPLICIT_CONFIG
 
-/* A2DP: 11 stream endpoints (LDAC, aptX HD, aptX, aptX LL, SBC (also SBC XQ), AAC, LHDC V5, FastStream, Opus,
- * Opus 05, aptX Adaptive).
+/* A2DP: 12 stream endpoints (LDAC, aptX HD, aptX, aptX LL, SBC (also SBC XQ), AAC, LHDC V5, L2HC,
+ * FastStream, Opus, Opus 05, aptX Adaptive).
  * The pool is static: an endpoint beyond this count fails to register. */
-#define MAX_NR_AVDTP_STREAM_ENDPOINTS  11
+#define MAX_NR_AVDTP_STREAM_ENDPOINTS  12
 #define MAX_NR_AVDTP_CONNECTIONS       1
 #define MAX_NR_A2DP_SOURCE_CONNECTIONS 1
 
